@@ -145,6 +145,11 @@ public:
 
     void call(const neomcp::CallRequest& request, neomcp::CallControl control, neomcp::Completion done) override {
         record(request.name, request.input_responses, request.request_state);
+        {
+            // A host may keep the handles of its calls; this one keeps every one, so that a call outlives its end.
+            const std::lock_guard<std::mutex> lock(mutex_);
+            controls_.push_back(control);
+        }
         if (request.name == "parked") {
             const std::lock_guard<std::mutex> lock(mutex_);
             parked_.push_back(Parked{request, control, done});
@@ -322,6 +327,7 @@ private:
     std::vector<Entry> log_;
     std::deque<neomcp::InputWait> waits_;
     std::deque<Parked> parked_;
+    std::vector<neomcp::CallControl> controls_;
 };
 
 neomcp::SessionOptions input_options() {
