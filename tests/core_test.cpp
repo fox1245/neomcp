@@ -17,7 +17,9 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <stop_token>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -2021,6 +2023,637 @@ TEST(Idle, ConcurrentCompletionsEndIdleOnce) {
     // Idleness was reported at least once, and never while a call was left: the last report is the true one.
     EXPECT_GE(probe.value(), 1);
     EXPECT_EQ(probe.disagreements(), 0);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Tagged output and input units
+
+// Records what a session created with create_tagged writes, per unit, and counts any output of a unit that follows
+// the unit's last one. It can hold the thread that writes one output of a chosen unit, so that a test can act while
+// that output is being written.
+struct Recorder {
+    struct Unit {
+        std::vector<neomcp::Output> outputs;
+        int ends = 0;  // outputs with `last` set
+    };
+
+    void write(neomcp::Output output) {
+        std::unique_lock<std::mutex> lock(mutex);
+        const std::optional<neomcp::UnitId> unit = output.unit;
+        if (unit) {
+            Unit& entry = units[*unit];
+            if (entry.ends > 0) ++after_end;
+            if (output.last) ++entry.ends;
+            entry.outputs.push_back(std::move(output));
+        } else {
+            connection.push_back(std::move(output));
+        }
+        ++count;
+        changed.notify_all();
+        if (unit && hold == unit) {
+            hold.reset();
+            held = true;
+            changed.notify_all();
+            changed.wait(lock, [&] { return released; });
+            held = false;
+        }
+    }
+    bool wait_end(neomcp::UnitId unit) {
+        std::unique_lock<std::mutex> lock(mutex);
+        return changed.wait_for(lock, patience, [&] { return units[unit].ends > 0; });
+    }
+    bool wait_held() {
+        std::unique_lock<std::mutex> lock(mutex);
+        return changed.wait_for(lock, patience, [&] { return held; });
+    }
+    void hold_on(neomcp::UnitId unit) {
+        const std::lock_guard<std::mutex> lock(mutex);
+        hold = unit;
+    }
+    void release() {
+        const std::lock_guard<std::mutex> lock(mutex);
+        released = true;
+        changed.notify_all();
+    }
+    Unit unit(neomcp::UnitId id) {
+        const std::lock_guard<std::mutex> lock(mutex);
+        return units[id];
+    }
+    std::size_t written() {
+        const std::lock_guard<std::mutex> lock(mutex);
+        return count;
+    }
+    int outputs_after_an_end() {
+        const std::lock_guard<std::mutex> lock(mutex);
+        return after_end;
+    }
+
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::map<neomcp::UnitId, Unit> units;
+    std::vector<neomcp::Output> connection;
+    std::size_t count = 0;
+    int after_end = 0;
+    std::optional<neomcp::UnitId> hold;
+    bool held = false;
+    bool released = false;
+};
+
+std::unique_ptr<neomcp::Session> tagged_session(neomcp::ToolHost& host, Recorder& recorder,
+                                                neomcp::SessionOptions options = test_options()) {
+    auto made = neomcp::Session::create_tagged(std::move(options), host,
+                                               [&recorder](neomcp::Output output) { recorder.write(std::move(output)); });
+    if (auto* error = std::get_if<neomcp::CreateError>(&made)) throw std::runtime_error(error->message);
+    return std::move(std::get<std::unique_ptr<neomcp::Session>>(made));
+}
+
+std::string line_of(const json& message) { return neomcp::serialize(message); }
+
+json gated_call(const profile::Profile& revision, const json& id, const json& token = nullptr) {
+    json params = {{"name", "gated"}};
+    if (!token.is_null()) params["_meta"] = json{{"progressToken", token}};
+    return Peer::make_request(revision, *neomcp::RequestId::from_json(id), "tools/call", std::move(params));
+}
+
+// The output's message; null for an end marker.
+json message_of(const neomcp::Output& output) {
+    if (output.kind == neomcp::OutputKind::end) return nullptr;
+    return json::parse(output.line);
+}
+
+TEST(Units, RefusalNamesAreStatusReasons) {
+    using neomcp::RefusalReason;
+    const auto declared = profile::declared_status_reasons();
+    for (const RefusalReason reason :
+         {RefusalReason::parse_error, RefusalReason::invalid_request, RefusalReason::too_long, RefusalReason::too_deep,
+          RefusalReason::header_mismatch, RefusalReason::unsupported_version, RefusalReason::invalid_request_meta,
+          RefusalReason::unsupported_version_header, RefusalReason::method_not_found,
+          RefusalReason::missing_connection}) {
+        EXPECT_NE(std::find(declared.begin(), declared.end(), neomcp::to_string(reason)), declared.end())
+            << neomcp::to_string(reason);
+    }
+    EXPECT_EQ(neomcp::to_string(RefusalReason::none), "none");
+}
+
+TEST(Units, AnAnswerEndsItsUnit) {
+    FakeHost host;
+    Recorder recorder;
+    auto session = tagged_session(host, recorder);
+    const auto modern = builtin(modern_revision);
+    const auto legacy = builtin("2025-11-25");
+    EXPECT_TRUE(session->receive(7, line_of(Peer::make_request(*modern, 1, "tools/list"))));
+    EXPECT_TRUE(session->receive(8, line_of(Peer::initialize_request(*legacy, 2))));
+    EXPECT_TRUE(session->receive(9, line_of(Peer::make_request(*legacy, 3, "tools/list"))));
+    const std::vector<std::tuple<neomcp::UnitId, int, std::string>> expected{
+        {7, 1, modern_revision}, {8, 2, "2025-11-25"}, {9, 3, "2025-11-25"}};
+    for (const auto& [unit, id, revision] : expected) {
+        SCOPED_TRACE(unit);
+        const auto written = recorder.unit(unit);
+        ASSERT_EQ(written.outputs.size(), 1u);
+        const neomcp::Output& output = written.outputs[0];
+        EXPECT_EQ(output.unit, unit);
+        EXPECT_TRUE(output.last);
+        EXPECT_EQ(output.kind, neomcp::OutputKind::response);
+        EXPECT_EQ(output.refusal, neomcp::RefusalReason::none);
+        ASSERT_TRUE(output.profile);
+        EXPECT_EQ(output.profile->revision(), revision);
+        EXPECT_EQ(message_of(output).at("id"), id);
+        EXPECT_TRUE(message_of(output).contains("result"));
+    }
+}
+
+TEST(Units, RefusalsCarryTheirReason) {
+    using neomcp::RefusalReason;
+    const auto modern = builtin(modern_revision);
+    const auto legacy = builtin("2025-06-18");
+    json unnamed_revision = Peer::make_request(*modern, 1, "tools/list");
+    unnamed_revision["params"]["_meta"][version_key] = "2099-01-01";
+    json no_capabilities = Peer::make_request(*modern, 1, "tools/list");
+    no_capabilities["params"]["_meta"].erase(capabilities_key);
+    json version_not_a_string = Peer::make_request(*modern, 1, "tools/list");
+    version_not_a_string["params"]["_meta"][version_key] = 5;
+    struct Case {
+        std::string line;
+        RefusalReason reason;
+        std::string governing;  // the revision of the governing profile; empty: none known
+    };
+    const std::vector<Case> cases{
+        {"{", RefusalReason::parse_error, ""},
+        {std::string(300, ' '), RefusalReason::too_long, ""},
+        {std::string(20, '[') + std::string(20, ']'), RefusalReason::too_deep, ""},
+        {"42", RefusalReason::invalid_request, ""},
+        {R"([{"jsonrpc":"2.0","id":1,"method":"ping"}])", RefusalReason::invalid_request, ""},
+        {line_of(Peer::make_request(*modern, 1, "ping")), RefusalReason::method_not_found, modern_revision},
+        {line_of(unnamed_revision), RefusalReason::unsupported_version, modern_revision},
+        {line_of(no_capabilities), RefusalReason::invalid_request_meta, modern_revision},
+        {line_of(version_not_a_string), RefusalReason::invalid_request_meta, ""},
+        {line_of(Peer::make_request(*legacy, 1, "tools/list")), RefusalReason::missing_connection, ""},
+    };
+    neomcp::SessionOptions options = test_options();
+    options.max_message_bytes = 256;
+    options.max_nesting_depth = 8;
+    FakeHost host;
+    Recorder recorder;
+    auto session = tagged_session(host, recorder, options);
+    neomcp::UnitId unit = 0;
+    for (const auto& item : cases) {
+        SCOPED_TRACE(item.line.substr(0, 80));
+        EXPECT_TRUE(session->receive(++unit, item.line));
+        const auto written = recorder.unit(unit);
+        ASSERT_EQ(written.outputs.size(), 1u);
+        const neomcp::Output& output = written.outputs[0];
+        EXPECT_TRUE(output.last);
+        EXPECT_EQ(output.kind, neomcp::OutputKind::response);
+        EXPECT_EQ(output.refusal, item.reason) << neomcp::to_string(output.refusal);
+        EXPECT_TRUE(message_of(output).contains("error"));
+        EXPECT_EQ(output.profile ? output.profile->revision() : "", item.governing);
+    }
+
+    // On a connection: a second handshake, a duplicate id, a request the connection does not serve, and an
+    // ordinary error answer, which is no refusal.
+    EXPECT_TRUE(session->receive(++unit, line_of(Peer::initialize_request(*legacy, "init"))));
+    ASSERT_TRUE(recorder.wait_end(unit));
+    session->receive(++unit, line_of(gated_call(*legacy, "dup")));
+    const auto in_flight = host.wait_parked(patience);  // kept: a dropped completion would answer the call
+    ASSERT_TRUE(in_flight);
+    const std::vector<std::pair<json, RefusalReason>> on_connection{
+        {Peer::initialize_request(*legacy, "again"), RefusalReason::invalid_request},
+        {gated_call(*legacy, "dup"), RefusalReason::invalid_request},
+        {Peer::make_request(*legacy, "level", "logging/setLevel", {{"level", "info"}}), RefusalReason::method_not_found},
+        {Peer::make_request(*legacy, "unknown", "tools/call", {{"name", "no_such_tool"}}), RefusalReason::none},
+    };
+    for (const auto& [message, reason] : on_connection) {
+        SCOPED_TRACE(message.dump());
+        EXPECT_TRUE(session->receive(++unit, line_of(message)));
+        const auto written = recorder.unit(unit);
+        ASSERT_EQ(written.outputs.size(), 1u);
+        EXPECT_EQ(written.outputs[0].refusal, reason) << neomcp::to_string(written.outputs[0].refusal);
+        EXPECT_TRUE(message_of(written.outputs[0]).contains("error"));
+    }
+
+    neomcp::SessionOptions modern_only = test_options();
+    modern_only.profiles = profiles_of({modern_revision});
+    Recorder other;
+    auto served = tagged_session(host, other, modern_only);
+    EXPECT_TRUE(served->receive(1, line_of(Peer::initialize_request(*legacy, 1))));
+    ASSERT_EQ(other.unit(1).outputs.size(), 1u);
+    EXPECT_EQ(other.unit(1).outputs[0].refusal, RefusalReason::method_not_found);
+}
+
+TEST(Units, NotificationsAndResponsesEndWithoutAnAnswer) {
+    FakeHost host;
+    Recorder recorder;
+    auto session = tagged_session(host, recorder);
+    const auto legacy = builtin("2025-06-18");
+    // Kept out of the macros' arguments: one compiler in the build matrix misreads a raw string with quotes there.
+    constexpr std::string_view initialized = R"({"jsonrpc":"2.0","method":"notifications/initialized"})";
+    constexpr std::string_view response = R"({"jsonrpc":"2.0","id":77,"result":{}})";
+    EXPECT_FALSE(session->receive(1, initialized));
+    EXPECT_FALSE(session->receive(2, response));
+    EXPECT_TRUE(session->receive(3, line_of(Peer::initialize_request(*legacy, 1))));
+    EXPECT_FALSE(session->receive(4, initialized));
+    for (const neomcp::UnitId unit : {1, 2, 4}) {
+        SCOPED_TRACE(unit);
+        const auto written = recorder.unit(unit);
+        ASSERT_EQ(written.outputs.size(), 1u);
+        const neomcp::Output& output = written.outputs[0];
+        EXPECT_EQ(output.kind, neomcp::OutputKind::end);
+        EXPECT_TRUE(output.last);
+        EXPECT_TRUE(output.line.empty());
+        EXPECT_EQ(output.unit, unit);
+        EXPECT_EQ(output.refusal, neomcp::RefusalReason::none);
+    }
+    EXPECT_FALSE(recorder.unit(1).outputs[0].profile) << "no connection yet";
+    ASSERT_TRUE(recorder.unit(4).outputs[0].profile);
+    EXPECT_EQ(recorder.unit(4).outputs[0].profile->revision(), "2025-06-18") << "the connection's";
+}
+
+TEST(Units, ALaterAnswerEndsTheUnitAfterTheCallsNotifications) {
+    FakeHost host;
+    Recorder recorder;
+    auto session = tagged_session(host, recorder);
+    const auto modern = builtin(modern_revision);
+    EXPECT_TRUE(session->receive(5, line_of(gated_call(*modern, "c", "tc"))));
+    auto parked = host.wait_parked(patience);
+    ASSERT_TRUE(parked);
+    EXPECT_TRUE(recorder.unit(5).outputs.empty());
+    std::thread tool([call = *parked] {
+        call.control.progress(1);
+        call.done(text_result("done"));
+    });
+    tool.join();
+    ASSERT_TRUE(recorder.wait_end(5));
+    const auto written = recorder.unit(5);
+    ASSERT_EQ(written.outputs.size(), 2u);
+    EXPECT_EQ(written.outputs[0].kind, neomcp::OutputKind::notification);
+    EXPECT_FALSE(written.outputs[0].last);
+    EXPECT_EQ(written.outputs[0].unit, 5u);
+    EXPECT_EQ(message_of(written.outputs[0]).at("params").at("progressToken"), "tc");
+    EXPECT_EQ(written.outputs[1].kind, neomcp::OutputKind::response);
+    EXPECT_TRUE(written.outputs[1].last);
+    EXPECT_EQ(message_of(written.outputs[1]).at("id"), "c");
+}
+
+TEST(Units, ABatchIsOneUnit) {
+    FakeHost host;
+    Recorder recorder;
+    auto session = tagged_session(host, recorder);
+    const auto revision = builtin(batch_revision);
+    ASSERT_TRUE(session->receive(1, line_of(Peer::initialize_request(*revision, "init"))));
+    const json batch = json::array({gated_call(*revision, "b1", "tb"), Peer::make_request(*revision, "b2", "ping"),
+                                    json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}}});
+    EXPECT_TRUE(session->receive(2, line_of(batch)));
+    auto parked = host.wait_parked(patience);
+    ASSERT_TRUE(parked);
+    std::thread tool([call = *parked] {
+        call.control.progress(1);
+        call.done(text_result("b1"));
+    });
+    tool.join();
+    ASSERT_TRUE(recorder.wait_end(2));
+    const auto written = recorder.unit(2);
+    ASSERT_EQ(written.outputs.size(), 2u);
+    EXPECT_EQ(written.outputs[0].kind, neomcp::OutputKind::notification);
+    EXPECT_EQ(written.outputs[1].kind, neomcp::OutputKind::response);
+    EXPECT_TRUE(written.outputs[1].last);
+    ASSERT_TRUE(message_of(written.outputs[1]).is_array());
+    EXPECT_EQ(message_of(written.outputs[1]).size(), 2u);
+    ASSERT_TRUE(written.outputs[1].profile);
+    EXPECT_EQ(written.outputs[1].profile->revision(), batch_revision);
+
+    // Only notifications: no answer, one end.
+    constexpr std::string_view notifications_only = R"([{"jsonrpc":"2.0","method":"notifications/initialized"}])";
+    EXPECT_FALSE(session->receive(3, notifications_only));
+    const auto silent = recorder.unit(3);
+    ASSERT_EQ(silent.outputs.size(), 1u);
+    EXPECT_EQ(silent.outputs[0].kind, neomcp::OutputKind::end);
+    EXPECT_EQ(recorder.outputs_after_an_end(), 0);
+}
+
+TEST(Units, ANumberMayBeUsedAgainOnlyAfterItsUnitEnded) {
+    FakeHost host;
+    Recorder recorder;
+    auto session = tagged_session(host, recorder);
+    const auto modern = builtin(modern_revision);
+    ASSERT_TRUE(session->receive(1, line_of(gated_call(*modern, "first"))));
+    auto parked = host.wait_parked(patience);
+    ASSERT_TRUE(parked);
+    EXPECT_THROW(session->receive(1, line_of(Peer::make_request(*modern, "second", "tools/list"))),
+                 std::invalid_argument);
+    parked->done(text_result("first"));
+    ASSERT_TRUE(recorder.wait_end(1));
+    EXPECT_TRUE(session->receive(1, line_of(Peer::make_request(*modern, "third", "tools/list"))));
+    const auto written = recorder.unit(1);
+    ASSERT_EQ(written.outputs.size(), 2u);
+    EXPECT_EQ(message_of(written.outputs[1]).at("id"), "third");
+}
+
+TEST(Units, ALineBelongsToNoUnit) {
+    FakeHost host;
+    Recorder recorder;
+    auto session = tagged_session(host, recorder);
+    session->receive(line_of(Peer::make_request(*builtin(modern_revision), 1, "tools/list")));
+    session->receive(R"({"jsonrpc":"2.0","method":"notifications/initialized"})");
+    const std::lock_guard<std::mutex> lock(recorder.mutex);
+    EXPECT_TRUE(recorder.units.empty());
+    ASSERT_EQ(recorder.connection.size(), 1u) << "a notification line gets no end marker";
+    EXPECT_FALSE(recorder.connection[0].unit);
+    EXPECT_FALSE(recorder.connection[0].last);
+    EXPECT_EQ(recorder.connection[0].kind, neomcp::OutputKind::response);
+}
+
+TEST(Units, AfterCloseInputIsIgnored) {
+    FakeHost host;
+    Recorder recorder;
+    auto session = tagged_session(host, recorder);
+    session->close();
+    EXPECT_FALSE(session->receive(1, line_of(Peer::make_request(*builtin(modern_revision), 1, "tools/list"))));
+    EXPECT_EQ(recorder.written(), 0u);
+}
+
+TEST(Units, ACancelledCallsLateAnswerWritesNothingAndItsUnitEndsOnce) {
+    FakeHost host;
+    Recorder recorder;
+    neomcp::SessionOptions options = test_options();
+    options.protocol_logging = true;
+    auto session = tagged_session(host, recorder, options);
+    const auto modern = builtin(modern_revision);
+    json call = gated_call(*modern, "c1", "t1");
+    call["params"]["_meta"][log_level_key] = "debug";
+    ASSERT_TRUE(session->receive(1, line_of(call)));
+    auto parked = host.wait_parked(patience);
+    ASSERT_TRUE(parked);
+    parked->control.progress(1);
+    EXPECT_FALSE(session->receive(2, line_of(cancelled("c1"))));
+    EXPECT_TRUE(parked->control.stop_token().stop_requested());
+    std::thread late([call = *parked] {
+        call.control.progress(2);
+        call.control.log(neomcp::LogLevel::emergency, "late");
+        call.done(text_result("late"));
+    });
+    late.join();
+    ASSERT_TRUE(session->receive(3, line_of(Peer::make_request(*modern, "flush", "server/discover"))));
+    const auto first = recorder.unit(1);
+    ASSERT_EQ(first.outputs.size(), 2u);
+    EXPECT_EQ(first.outputs[0].kind, neomcp::OutputKind::notification);
+    EXPECT_EQ(first.outputs[1].kind, neomcp::OutputKind::end);
+    EXPECT_TRUE(first.outputs[1].last);
+    ASSERT_TRUE(first.outputs[1].profile);
+    EXPECT_EQ(first.outputs[1].profile->revision(), modern_revision);
+    EXPECT_EQ(first.ends, 1);
+    EXPECT_EQ(recorder.unit(2).outputs.size(), 1u);
+    EXPECT_EQ(recorder.unit(2).outputs[0].kind, neomcp::OutputKind::end);
+    EXPECT_EQ(recorder.unit(3).ends, 1);
+    EXPECT_EQ(recorder.outputs_after_an_end(), 0);
+}
+
+TEST(Units, ACancellationRacingTheAnswerEndsTheUnitOnce) {
+    const auto modern = builtin(modern_revision);
+    for (int round = 0; round < 200; ++round) {
+        SCOPED_TRACE(round);
+        FakeHost host;
+        Recorder recorder;
+        auto session = tagged_session(host, recorder);
+        ASSERT_TRUE(session->receive(1, line_of(gated_call(*modern, "c"))));
+        auto parked = host.wait_parked(patience);
+        ASSERT_TRUE(parked);
+        Gate gate;
+        std::thread tool([&gate, call = *parked] {
+            gate.wait();
+            call.done(text_result("raced"));
+        });
+        gate.open();
+        session->receive(2, line_of(cancelled("c")));
+        tool.join();
+        ASSERT_TRUE(session->receive(3, line_of(Peer::make_request(*modern, "flush", "server/discover"))));
+        const auto written = recorder.unit(1);
+        ASSERT_EQ(written.ends, 1);
+        ASSERT_EQ(written.outputs.size(), 1u);
+        EXPECT_EQ(recorder.outputs_after_an_end(), 0);
+    }
+}
+
+TEST(Units, ManyUnitsInFlightAnswerOnManyThreadsEachTaggedWithItsOwnUnit) {
+    FakeHost host;
+    Recorder recorder;
+    auto session = tagged_session(host, recorder);
+    const auto modern = builtin(modern_revision);
+    constexpr int units = 16;
+    for (int unit = 1; unit <= units; ++unit) {
+        ASSERT_TRUE(session->receive(static_cast<neomcp::UnitId>(unit), line_of(gated_call(*modern, unit, unit))));
+    }
+    std::vector<FakeHost::Parked> parked;
+    for (int i = 0; i < units; ++i) {
+        auto next = host.wait_parked(patience);
+        ASSERT_TRUE(next);
+        parked.push_back(*next);
+    }
+    Gate gate;
+    std::vector<std::thread> threads;
+    for (const auto& call : parked) {
+        threads.emplace_back([&gate, call] {
+            gate.wait();
+            call.control.progress(1);
+            call.control.progress(2);
+            call.done(text_result("done"));
+        });
+    }
+    gate.open();
+    for (auto& thread : threads) thread.join();
+    for (int unit = 1; unit <= units; ++unit) {
+        SCOPED_TRACE(unit);
+        ASSERT_TRUE(recorder.wait_end(static_cast<neomcp::UnitId>(unit)));
+        const auto written = recorder.unit(static_cast<neomcp::UnitId>(unit));
+        ASSERT_EQ(written.outputs.size(), 3u);
+        for (std::size_t i = 0; i < 2; ++i) {
+            EXPECT_EQ(written.outputs[i].kind, neomcp::OutputKind::notification);
+            EXPECT_FALSE(written.outputs[i].last);
+            EXPECT_EQ(message_of(written.outputs[i]).at("params").at("progressToken"), unit);
+            EXPECT_EQ(message_of(written.outputs[i]).at("params").at("progress"), static_cast<double>(i + 1));
+        }
+        EXPECT_TRUE(written.outputs[2].last);
+        EXPECT_EQ(message_of(written.outputs[2]).at("id"), unit);
+    }
+    EXPECT_EQ(recorder.outputs_after_an_end(), 0);
+    const std::lock_guard<std::mutex> lock(recorder.mutex);
+    EXPECT_TRUE(recorder.connection.empty());
+}
+
+TEST(Close, EndsAUnitWhoseAnswerWasStillQueued) {
+    FakeHost host;
+    Recorder recorder;
+    auto session = tagged_session(host, recorder);
+    const auto modern = builtin(modern_revision);
+    for (const neomcp::UnitId unit : {1, 2, 3}) {
+        ASSERT_TRUE(session->receive(unit, line_of(gated_call(*modern, static_cast<int>(unit)))));
+    }
+    // The host is called while the input is read, so the calls park in the order of their units.
+    std::map<int, FakeHost::Parked> parked;
+    for (int unit = 1; unit <= 3; ++unit) {
+        auto next = host.wait_parked(patience);
+        ASSERT_TRUE(next);
+        parked.emplace(unit, *next);
+    }
+    recorder.hold_on(1);
+    std::thread first([call = parked.at(1)] { call.done(text_result("one")); });
+    ASSERT_TRUE(recorder.wait_held());
+    // Unit 2's answer waits in the queue behind the one being written...
+    parked.at(2).done(text_result("two"));
+    // ...when the session closes; unit 3 is still in flight. Its stop callback tells when close() has emptied the
+    // queue.
+    Gate stopped;
+    std::stop_callback on_stop(parked.at(3).control.stop_token(), [&stopped] { stopped.open(); });
+    std::thread closer([&session] { session->close(); });
+    stopped.wait();
+    recorder.release();
+    closer.join();
+    first.join();
+    const std::size_t at_close = recorder.written();
+    parked.at(3).done(text_result("three"));
+    EXPECT_EQ(recorder.written(), at_close) << "nothing is written after close() returned";
+    EXPECT_EQ(recorder.unit(1).ends, 1);
+    EXPECT_EQ(recorder.unit(1).outputs.back().kind, neomcp::OutputKind::response);
+    for (const neomcp::UnitId unit : {2, 3}) {
+        SCOPED_TRACE(unit);
+        const auto written = recorder.unit(unit);
+        ASSERT_EQ(written.outputs.size(), 1u);
+        EXPECT_EQ(written.outputs[0].kind, neomcp::OutputKind::end);
+        EXPECT_TRUE(written.outputs[0].last);
+    }
+    EXPECT_EQ(recorder.outputs_after_an_end(), 0);
+}
+
+TEST(Close, RacingAnswersEveryUnitEndsExactlyOnce) {
+    const auto modern = builtin(modern_revision);
+    for (int round = 0; round < 200; ++round) {
+        SCOPED_TRACE(round);
+        FakeHost host;
+        Recorder recorder;
+        auto session = tagged_session(host, recorder);
+        constexpr int units = 4;
+        for (int unit = 1; unit <= units; ++unit) {
+            ASSERT_TRUE(session->receive(static_cast<neomcp::UnitId>(unit), line_of(gated_call(*modern, unit, unit))));
+        }
+        std::vector<FakeHost::Parked> parked;
+        for (int i = 0; i < units; ++i) {
+            auto next = host.wait_parked(patience);
+            ASSERT_TRUE(next);
+            parked.push_back(*next);
+        }
+        Gate gate;
+        std::vector<std::thread> threads;
+        for (const auto& call : parked) {
+            threads.emplace_back([&gate, call] {
+                gate.wait();
+                call.control.progress(1);
+                call.done(text_result("raced"));
+            });
+        }
+        gate.open();
+        session->close();
+        const std::size_t at_close = recorder.written();
+        for (auto& thread : threads) thread.join();
+        EXPECT_EQ(recorder.written(), at_close);
+        for (int unit = 1; unit <= units; ++unit) {
+            ASSERT_EQ(recorder.unit(static_cast<neomcp::UnitId>(unit)).ends, 1) << "unit " << unit;
+        }
+        ASSERT_EQ(recorder.outputs_after_an_end(), 0);
+    }
+}
+
+TEST(Close, FromInsideTheSinkTheOpenUnitsGetNoEnd) {
+    FakeHost host;
+    std::unique_ptr<neomcp::Session> session;
+    std::vector<neomcp::Output> outputs;
+    auto made = neomcp::Session::create_tagged(test_options(), host, [&](neomcp::Output output) {
+        outputs.push_back(std::move(output));
+        session->close();
+    });
+    ASSERT_TRUE(std::holds_alternative<std::unique_ptr<neomcp::Session>>(made));
+    session = std::move(std::get<std::unique_ptr<neomcp::Session>>(made));
+    const auto modern = builtin(modern_revision);
+    ASSERT_TRUE(session->receive(1, line_of(gated_call(*modern, "open"))));
+    auto parked = host.wait_parked(patience);
+    ASSERT_TRUE(parked);
+    session->receive(2, line_of(Peer::make_request(*modern, "answered", "tools/list")));
+    ASSERT_EQ(outputs.size(), 1u);
+    EXPECT_EQ(outputs[0].unit, 2u);
+    EXPECT_TRUE(parked->control.stop_token().stop_requested());
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The transport a session serves
+
+std::vector<std::string> revisions_of(std::span<const profile::ProfilePtr> profiles) {
+    std::vector<std::string> out;
+    for (const auto& entry : profiles) out.push_back(entry->revision());
+    return out;
+}
+
+TEST(Transport, ProfilesThatDoNotDefineItAreNotServed) {
+    FakeHost host;
+    neomcp::SessionOptions options = test_options();
+    options.transport = profile::Transport::streamable_http;
+    Peer peer(host, options);
+    const std::vector<std::string> served{"2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"};
+    EXPECT_EQ(revisions_of(peer.session().profiles()), served);
+    const auto unnamed =
+        peer.request(json{{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/list"}, {"params", json::object()}}, patience);
+    ASSERT_TRUE(unnamed);
+    EXPECT_EQ(unnamed->at("error").at("data").at("supported"), strings(served));
+    const auto opened = peer.request(Peer::initialize_request(*builtin("2024-11-05"), 2), patience);
+    ASSERT_TRUE(opened && opened->contains("result"));
+    EXPECT_EQ(result_of(*opened).at("protocolVersion"), "2025-11-25") << "2024-11-05 has no Streamable HTTP";
+
+    neomcp::SessionOptions sse = test_options();
+    sse.transport = profile::Transport::http_sse;
+    Peer old(host, sse);
+    EXPECT_EQ(revisions_of(old.session().profiles()), std::vector<std::string>{"2024-11-05"});
+
+    neomcp::SessionOptions nothing = test_options();
+    nothing.transport = profile::Transport::streamable_http;
+    nothing.profiles = profiles_of({"2024-11-05"});
+    auto made = neomcp::Session::create(nothing, host, [](std::string) {});
+    const auto* error = std::get_if<neomcp::CreateError>(&made);
+    ASSERT_NE(error, nullptr);
+    EXPECT_NE(error->message.find("streamable_http"), std::string::npos) << error->message;
+}
+
+TEST(Transport, ItsEntryNamesTheCancellationMechanism) {
+    FakeHost host;
+    neomcp::SessionOptions options = test_options();
+    options.transport = profile::Transport::streamable_http;
+    Peer peer(host, options);
+    const auto modern = builtin(modern_revision);
+    const auto legacy = builtin("2025-11-25");
+    ASSERT_TRUE(peer.initialize(*legacy, patience));
+    peer.notify(gated_call(*modern, "m"));
+    peer.notify(gated_call(*legacy, "l"));
+    auto m = host.wait_parked(patience);
+    auto l = host.wait_parked(patience);
+    ASSERT_TRUE(m && l);
+    peer.notify(cancelled("m"));
+    peer.notify(cancelled("l"));
+    EXPECT_FALSE(m->control.stop_token().stop_requested()) << "under 2026-07-28 a closed stream cancels, no message";
+    EXPECT_TRUE(l->control.stop_token().stop_requested());
+    m->done(text_result("m"));
+    EXPECT_TRUE(peer.await_response("m", patience));
+}
+
+TEST(Connection, TheProfileAHandshakeOpenedIsKnown) {
+    FakeHost host;
+    neomcp::SessionOptions options = test_options();
+    options.transport = profile::Transport::streamable_http;
+    Peer peer(host, options);
+    EXPECT_FALSE(peer.session().connection_profile());
+    ASSERT_TRUE(peer.request(Peer::make_request(*builtin(modern_revision), 1, "server/discover"), patience));
+    EXPECT_FALSE(peer.session().connection_profile()) << "a request that names its revision opens nothing";
+    ASSERT_TRUE(peer.initialize(*builtin("2025-06-18"), patience));
+    const profile::ProfilePtr opened = peer.session().connection_profile();
+    ASSERT_TRUE(opened);
+    EXPECT_EQ(opened->revision(), "2025-06-18");
+    ASSERT_TRUE(opened->streamable_http());
+    EXPECT_EQ(opened->streamable_http()->session_header, "Mcp-Session-Id");
 }
 
 }  // namespace

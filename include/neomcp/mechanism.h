@@ -59,6 +59,9 @@ public:
     virtual std::optional<std::string> check(const profile::Profile& profile) const = 0;
     // Whether a profile that opens this way needs the connection to keep what the handshake established.
     virtual bool needs_connection_state() const = 0;
+    // Whether every request names its revision itself (see named_revision), so that under a revision this mechanism
+    // serves a request that does not is malformed; false when requests are served on a connection it opens.
+    virtual bool requests_name_revision() const = 0;
 
     // A request that names its revision itself: that revision, or an error when the naming is malformed. Empty
     // when the request carries no such signal.
@@ -108,6 +111,9 @@ public:
     // The id of the request a client notification asks to stop; empty when the notification is not a cancellation
     // under this mechanism.
     virtual std::optional<RequestId> cancelled_request(const Message& notification) const = 0;
+    // Whether the end of the stream that carries a request's answer cancels the request (Session::abandon): the
+    // session then requests stop on its call. When false the call runs on, and what it writes is dropped.
+    virtual bool stops_on_stream_close() const = 0;
 };
 
 // The slots of the registry.

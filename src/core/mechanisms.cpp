@@ -50,6 +50,7 @@ public:
     }
 
     bool needs_connection_state() const override { return true; }
+    bool requests_name_revision() const override { return false; }
 
     std::optional<std::variant<std::string, RequestError>> named_revision(const Message&) const override {
         return std::nullopt;
@@ -118,6 +119,7 @@ public:
     }
 
     bool needs_connection_state() const override { return false; }
+    bool requests_name_revision() const override { return true; }
 
     std::optional<std::variant<std::string, RequestError>> named_revision(const Message& request) const override {
         const json* meta = member(request.params, "_meta");
@@ -219,6 +221,9 @@ public:
         if (id == nullptr) return std::nullopt;
         return RequestId::from_json(*id);
     }
+
+    // A client that only lost the stream of the answer may still want it: disconnection is not a cancellation.
+    bool stops_on_stream_close() const override { return false; }
 };
 
 // `close_response_stream`: a request is cancelled by closing the stream that carries its response, an event of the
@@ -226,6 +231,7 @@ public:
 class CloseResponseStream final : public CancelMechanism {
 public:
     std::optional<RequestId> cancelled_request(const Message&) const override { return std::nullopt; }
+    bool stops_on_stream_close() const override { return true; }
 };
 
 template <typename Interface, typename Implementation>
