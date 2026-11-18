@@ -38,6 +38,8 @@ jobs:
         run: >-
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DNEOMCP_WARNINGS_AS_ERRORS=ON
           "-DCMAKE_C_FLAGS=$SANITIZE" "-DCMAKE_CXX_FLAGS=$SANITIZE"
+      - name: Show the compilers and flags the build uses
+        run: grep -E '^CMAKE_(C|CXX)_(COMPILER|FLAGS):' build/CMakeCache.txt
       - name: Build
         run: cmake --build build --parallel
       - name: Test
