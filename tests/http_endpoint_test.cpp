@@ -766,6 +766,34 @@ TEST(HttpEndpointLegacy, TheConnectionStreamOpensOnceAndEndsWithTheSession) {
     EXPECT_TRUE(ended.ok) << "the stream ends normally with its session";
 }
 
+TEST(HttpEndpointLegacy, ABatchIsOneRequestAnsweredWithOneArrayWhereTheRevisionHasBatches) {
+    Harness harness;
+    const char* batching = "2025-03-26";  // the one revision with batches; it has no version header
+    const Reply opened = send(harness.port, "POST", {{"Content-Type", json_type}, {"Accept", both_types}},
+                              rpc(1, "initialize", initialize_params(batching)));
+    ASSERT_EQ(opened.status, 200);
+    EXPECT_EQ(opened.message().at("result").at("protocolVersion"), batching);
+    const httplib::Headers headers{{"Content-Type", json_type},
+                                   {"Accept", both_types},
+                                   {"Mcp-Session-Id", opened.header("Mcp-Session-Id")}};
+    EXPECT_EQ(send(harness.port, "POST", headers, notification("notifications/initialized")).status, 202);
+
+    const std::string batch =
+        "[" + rpc(2, "tools/list") + "," + rpc(3, "tools/call", call_params("echo", {{"text", "b"}})) + "]";
+    const Reply answered = send(harness.port, "POST", headers, batch);
+    ASSERT_EQ(answered.status, 200);
+    EXPECT_EQ(answered.header("Content-Type"), json_type);
+    const json answers = answered.message();
+    ASSERT_TRUE(answers.is_array());
+    ASSERT_EQ(answers.size(), 2U);
+    std::set<int> ids;
+    for (const json& answer : answers) ids.insert(answer.at("id").get<int>());
+    EXPECT_EQ(ids, (std::set<int>{2, 3}));
+
+    const std::string quiet = "[" + notification("notifications/initialized") + "]";
+    EXPECT_EQ(send(harness.port, "POST", headers, quiet).status, 202) << "a batch of notifications awaits nothing";
+}
+
 TEST(HttpEndpointLegacy, AVersionHeaderThatNamesNoServedRevisionIsRefused) {
     Harness harness;
     const std::string session = open_session(harness.port);
