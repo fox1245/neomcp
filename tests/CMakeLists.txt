@@ -96,3 +96,10 @@ if(NEOMCP_INTEROP_TESTS)
         ENVIRONMENT "NEOMCP_STDIO_FIXTURE=$<TARGET_FILE:neomcp_stdio_fixture>"
         TIMEOUT 300)
 endif()
+
+# ---- The HTTP building blocks ----------------------------------------------------------------------------------------
+
+add_executable(neomcp_http_model_test http_model_test.cpp)
+target_link_libraries(neomcp_http_model_test PRIVATE neomcp::http GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_http_model_test)
+gtest_discover_tests(neomcp_http_model_test DISCOVERY_TIMEOUT 120)
