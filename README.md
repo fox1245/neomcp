@@ -93,12 +93,42 @@ target_link_libraries(calc PRIVATE neomcp::server neomcp::stdio)
 ## Serving over HTTP
 
 The same server speaks Streamable HTTP with `neomcp::run_http` from `<neomcp/http_server.h>` (target
-`neomcp::http`):
+`neomcp::http`). This program is the first server with `run_http` in place of `run_stdio`. It serves
+`http://127.0.0.1:8000/mcp` until SIGINT or SIGTERM, or on the port given as its first argument:
 
 ```cpp
-neomcp::HttpServerOptions options;
-options.port = 8000;
-return neomcp::run_http(server, options);  // http://127.0.0.1:8000/mcp until SIGINT or SIGTERM
+#include <cstdint>
+#include <optional>
+#include <string>
+
+#include <neomcp/http_server.h>
+#include <neomcp/server.h>
+
+struct AddArgs {
+    int a;
+    int b;
+    std::optional<std::string> note;
+};
+NEOMCP_DESCRIBE(AddArgs, a, "first addend", b, "second addend", note, "a note to echo back")
+
+int main(int argc, char** argv) {
+    neomcp::Server server({.name = "calc", .version = "1.0.0"});
+    server.tool<AddArgs>("add", "Add two integers", [](const AddArgs& args) { return args.a + args.b; });
+
+    neomcp::HttpServerOptions options;
+    options.port = 8000;
+    if (argc > 1) {
+        options.port = static_cast<std::uint16_t>(std::stoi(argv[1]));
+    }
+    return neomcp::run_http(server, options);
+}
+```
+
+To build it, link `neomcp::server` and `neomcp::http`:
+
+```cmake
+add_subdirectory(neomcp)
+target_link_libraries(calc_http PRIVATE neomcp::server neomcp::http)
 ```
 
 It binds the loopback address unless told otherwise and checks the `Host` and `Origin` headers of every request
