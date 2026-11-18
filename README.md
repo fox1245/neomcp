@@ -6,6 +6,9 @@
 
 **A C++ SDK for the Model Context Protocol: servers and clients.**
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](README.md)
+
 </div>
 
 ---
@@ -19,3 +22,7 @@ clients. Work in progress. Nothing here is usable yet.
   names the mechanisms the revision uses and lists its methods, fields, headers and error codes.
 - Revisions 2024-11-05 to 2026-07-28, over stdio and Streamable HTTP.
 - Tools, resources and prompts declared from C++ types.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
