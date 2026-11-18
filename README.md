@@ -14,8 +14,8 @@
 ---
 
 neomcp is a C++ library for writing [Model Context Protocol](https://modelcontextprotocol.io) (MCP) servers and
-clients. Work in progress: servers over stdio work today, the rest is listed under Status, and the interface
-may still change.
+clients. Work in progress: servers over stdio and Streamable HTTP work today, the rest is listed under Status, and
+the interface may still change.
 
 ## Status
 
@@ -32,17 +32,19 @@ What exists now:
   file or another store must check it against what it is willing to serve.
 - A stdio server that speaks both eras of the protocol, the handshake of the older revisions and the per-request form
   of 2026-07-28, to the same program.
+- A Streamable HTTP server that serves both eras on one endpoint: sessions for the revisions that have them, the
+  per-request form of 2026-07-28 without one.
 
 Still planned:
 
-- Streamable HTTP.
+- Asking the client for input (forms, sampling), and notifications of changes to tools, prompts and resources.
 - The client.
 
 ## Build
 
 Requirements: CMake 3.20 or newer, a C++20 compiler, and network access at configure time (the pinned
-dependencies are fetched: [neojson](https://github.com/fox1245/neojson), standalone Asio, and GoogleTest when the
-tests are built).
+dependencies are fetched: [neojson](https://github.com/fox1245/neojson), standalone Asio, cpp-httplib, and
+GoogleTest when the tests are built).
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
@@ -87,6 +89,27 @@ standard output, one JSON message per line, and exits when its input closes. To 
 add_subdirectory(neomcp)
 target_link_libraries(calc PRIVATE neomcp::server neomcp::stdio)
 ```
+
+## Serving over HTTP
+
+The same server speaks Streamable HTTP with `neomcp::run_http` from `<neomcp/http_server.h>` (target
+`neomcp::http`):
+
+```cpp
+neomcp::HttpServerOptions options;
+options.port = 8000;
+return neomcp::run_http(server, options);  // http://127.0.0.1:8000/mcp until SIGINT or SIGTERM
+```
+
+It binds the loopback address unless told otherwise and checks the `Host` and `Origin` headers of every request
+(a browser page must not reach a local server through DNS rebinding). On any other address, name the hosts clients
+use in `allowed_hosts`, or switch the check off explicitly; otherwise the server does not start. There is no TLS: put
+a reverse proxy in front of a server that other machines reach.
+
+Sizing: each request waiting for its answer and each open response stream holds one worker thread of the listener
+for as long as it lasts. `max_worker_threads` (default 32) bounds them together; connections beyond it wait, up to
+`max_queued_connections`, and one beyond that is closed. A client of a session-based revision usually keeps one
+stream open besides its requests, so allow one worker per such client plus the requests you expect in flight.
 
 ## License
 
