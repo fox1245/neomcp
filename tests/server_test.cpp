@@ -259,6 +259,55 @@ asio::awaitable<void> until_stopped(std::stop_token token) {
     static_cast<void>(outcome);
 }
 
+// A gate coroutines wait at without holding up the io thread. open() lets every waiter through, and so does a stop
+// request on a waiter's token; wait() says whether the gate was opened.
+class AsyncGate {
+public:
+    asio::awaitable<bool> wait(std::stop_token token) {
+        const auto executor = co_await asio::this_coro::executor;
+        // Shared with the cancellations posted for it, which may run after this coroutine resumed for another reason.
+        auto timer = std::make_shared<asio::steady_timer>(executor, asio::steady_timer::time_point::max());
+        if (!enqueue(timer)) co_return true;
+        std::stop_callback wake(token, [timer] { asio::post(timer->get_executor(), [timer] { timer->cancel(); }); });
+        try {
+            auto outcome = co_await timer->async_wait(asio::as_tuple(asio::use_awaitable));
+            static_cast<void>(outcome);
+        } catch (const std::system_error&) {
+            // The server cancelled the wait together with the call.
+        }
+        co_return forget(timer);
+    }
+
+    void open() {
+        std::vector<std::shared_ptr<asio::steady_timer>> waiting;
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            open_ = true;
+            waiting.swap(waiting_);
+        }
+        for (const auto& timer : waiting) asio::post(timer->get_executor(), [timer] { timer->cancel(); });
+    }
+
+private:
+    // False when the gate is open already.
+    bool enqueue(const std::shared_ptr<asio::steady_timer>& timer) {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        if (open_) return false;
+        waiting_.push_back(timer);
+        return true;
+    }
+    // Drops the waiter's timer, which must not outlive the server's io_context; returns whether the gate is open.
+    bool forget(const std::shared_ptr<asio::steady_timer>& timer) {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        std::erase(waiting_, timer);
+        return open_;
+    }
+
+    std::mutex mutex_;
+    bool open_ = false;
+    std::vector<std::shared_ptr<asio::steady_timer>> waiting_;
+};
+
 // One client speaking one revision to a server: a handshake for a legacy revision, nothing for the modern one.
 struct Client {
     Client(neomcp::Server& server, const std::string& revision_name)
@@ -656,6 +705,7 @@ TEST(Registration, RefusedDefinitionsNameTheTool) {
 
 TEST(Registration, OptionsThatCannotWork) {
     EXPECT_THROW(neomcp::Server({.name = "x", .version = "1", .max_concurrent_calls = 0}), std::invalid_argument);
+    EXPECT_THROW(neomcp::Server({.name = "x", .version = "1", .max_coroutine_calls = 0}), std::invalid_argument);
     neomcp::Server server({.name = "x", .version = "1", .tools_page_size = 0});
     auto made = server.connect([](std::string) {});
     ASSERT_TRUE(std::holds_alternative<neomcp::CreateError>(made));
@@ -1014,6 +1064,122 @@ TEST(Pool, ACallBeyondBothBoundsIsRefusedAsBusy) {
     EXPECT_EQ(first_text(*second), "held");
     EXPECT_EQ(entered.value(), 2);
     EXPECT_EQ(first_text(client.call("hold")), "held") << "the capacity is back";
+}
+
+// A server whose coroutine tool waits at the gate its argument names; gates are created before any call.
+struct GatedCoroutines {
+    explicit GatedCoroutines(const std::string& name, const std::vector<std::string>& tags) {
+        for (const auto& tag : tags) static_cast<void>(gates[tag]);
+        neomcp::ServerOptions options = named(name);
+        options.max_coroutine_calls = 2;
+        server = std::make_unique<neomcp::Server>(std::move(options));
+        server->tool<st::Tag>("held", "",
+                              [this](st::Tag args, neomcp::Context& context) -> asio::awaitable<std::string> {
+                                  entered.add();
+                                  const bool opened = co_await gates.at(args.tag).wait(context.stop_token());
+                                  if (args.tag == "a") a_ended.set();
+                                  // Nothing suspends from here until the call is finished, and the io thread runs
+                                  // one thing at a time.
+                                  co_return args.tag + (opened ? " opened" : " stopped");
+                              });
+    }
+
+    std::map<std::string, AsyncGate> gates;  // destroyed after the server, so after every waiter ended
+    Counter entered;
+    Event a_ended;
+    std::unique_ptr<neomcp::Server> server;
+};
+
+json held(const std::string& tag) { return json{{"tag", tag}}; }
+
+void expect_busy(const std::optional<json>& answer) {
+    ASSERT_TRUE(answer) << "the call was not answered";
+    EXPECT_EQ(error_code_of(*answer), -32603) << answer->dump();
+    const json busy = {{"reason", "busy"}};
+    EXPECT_TRUE(answer->contains("error") && answer->at("error").contains("data") &&
+                answer->at("error").at("data") == busy)
+        << answer->dump();
+}
+
+TEST(CoroutineBound, ACallBeyondTheBoundIsRefusedAsBusy) {
+    GatedCoroutines fixture("coroutine_bound", {"a", "b", "c", "d"});
+    Client client(*fixture.server, modern_revision);
+    client.start("a", "held", held("a"));
+    client.start("b", "held", held("b"));
+    ASSERT_TRUE(fixture.entered.wait_for(2, patience));
+    expect_busy(client.peer.request(client.message("c", "tools/call", Client::call_params("held", held("c"), nullptr)),
+                                    patience));
+    EXPECT_EQ(fixture.entered.value(), 2) << "the refused call ran";
+
+    fixture.gates.at("a").open();
+    const auto a = client.peer.await_response("a", patience);
+    ASSERT_TRUE(a);
+    EXPECT_EQ(first_text(*a), "a opened");
+    // The place of a is free once its answer is there.
+    fixture.gates.at("d").open();
+    const json d = client.call("held", held("d"));
+    ASSERT_TRUE(d.contains("result")) << d.dump();
+    EXPECT_EQ(first_text(d), "d opened");
+
+    fixture.gates.at("b").open();
+    const auto b = client.peer.await_response("b", patience);
+    ASSERT_TRUE(b);
+    EXPECT_EQ(first_text(*b), "b opened");
+}
+
+TEST(CoroutineBound, ACancelledCallGivesBackItsPlace) {
+    GatedCoroutines fixture("coroutine_cancel", {"a", "b", "c", "d", "e"});
+    Client client(*fixture.server, modern_revision);
+    client.start("a", "held", held("a"));
+    client.start("b", "held", held("b"));
+    ASSERT_TRUE(fixture.entered.wait_for(2, patience));
+
+    client.peer.notify(cancelled("a"));
+    ASSERT_TRUE(fixture.a_ended.wait(patience));
+    // Opening b's gate runs on the io thread after a's call was finished; b's answer then says both are done.
+    fixture.gates.at("b").open();
+    const auto b = client.peer.await_response("b", patience);
+    ASSERT_TRUE(b);
+    EXPECT_EQ(first_text(*b), "b opened");
+
+    // Both places are free again: two calls are admitted, and a third is refused.
+    client.start("c", "held", held("c"));
+    client.start("d", "held", held("d"));
+    ASSERT_FALSE(client.peer.await_response("d", no_wait)) << "a place was not given back";
+    ASSERT_TRUE(fixture.entered.wait_for(4, patience));
+    expect_busy(client.peer.request(client.message("e", "tools/call", Client::call_params("held", held("e"), nullptr)),
+                                    patience));
+
+    fixture.gates.at("c").open();
+    fixture.gates.at("d").open();
+    const auto c = client.peer.await_response("c", patience);
+    const auto d = client.peer.await_response("d", patience);
+    ASSERT_TRUE(c && d);
+    EXPECT_EQ(first_text(*c), "c opened");
+    EXPECT_EQ(first_text(*d), "d opened");
+    EXPECT_FALSE(client.peer.await_response("a", no_wait)) << "the cancelled call was answered";
+}
+
+TEST(CoroutineBound, DestroyingTheServerReturnsWithHeldCalls) {
+    GatedCoroutines fixture("coroutine_shutdown", {"a", "b", "c"});
+    // The session outlives the server.
+    auto client = std::make_unique<Client>(*fixture.server, modern_revision);
+    client->start("a", "held", held("a"));
+    client->start("b", "held", held("b"));
+    ASSERT_TRUE(fixture.entered.wait_for(2, patience));
+    expect_busy(client->peer.request(
+        client->message("c", "tools/call", Client::call_params("held", held("c"), nullptr)), patience));
+
+    fixture.server.reset();
+    const auto a = client->peer.await_response("a", patience);
+    const auto b = client->peer.await_response("b", patience);
+    ASSERT_TRUE(a && b);
+    EXPECT_EQ(first_text(*a), "a stopped");
+    EXPECT_EQ(first_text(*b), "b stopped");
+    const json late = client->call("held", held("c"));
+    EXPECT_EQ(error_code_of(late), -32603) << late.dump();
+    EXPECT_FALSE(late.at("error").contains("data")) << "refused because the server is gone, not as busy";
+    client.reset();
 }
 
 TEST(Shutdown, DestroyingTheServerStopsBlockedHandlersAndReturns) {

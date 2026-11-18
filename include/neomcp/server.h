@@ -36,8 +36,9 @@
 //
 // Threads. Plain-function handlers run on a pool of worker threads the server owns, bounded by
 // ServerOptions::max_concurrent_calls and max_pending_calls. Coroutine handlers run on one thread the server owns,
-// which drives an asio::io_context: a coroutine handler must not block, or it holds up every other coroutine
-// handler. A handler may be called on several threads at once. Every handler gets a Context (see context.h).
+// which drives an asio::io_context, and are bounded by max_coroutine_calls; a coroutine handler must not block, or
+// it holds up every other coroutine handler. A handler may be called on several threads at once. Every handler gets
+// a Context (see context.h).
 #pragma once
 
 #include <cstddef>
@@ -79,8 +80,14 @@ struct ServerOptions {
     // error. Default 4.
     std::size_t max_concurrent_calls = 4;
     // Plain-function calls that may wait for a worker; a call beyond both bounds is refused as busy. Default 64.
-    // Coroutine handlers are not counted by either bound.
+    // Coroutine calls are counted by max_coroutine_calls instead.
     std::size_t max_pending_calls = 64;
+    // Coroutine calls in flight at once; a call beyond it is refused as busy. A coroutine call holds no thread, but
+    // it holds its arguments and its coroutine frames until it ends, so without a bound a client could make the
+    // server hold any number of them. A call keeps its place until its coroutine has ended, also after it was
+    // cancelled. Zero is an error. Default 64: as many as the plain-function calls that may wait, which is far more
+    // than a client keeps in flight, and it bounds what coroutine calls hold to 64 sets of arguments.
+    std::size_t max_coroutine_calls = 64;
 
     // Whether an error answer carries the text of the exception (or of the defect) behind it. Off: tool failures
     // and internal errors have fixed messages, so that nothing about the server's internals reaches the client.

@@ -6,8 +6,11 @@
 // - The core owns max_concurrent_calls worker threads for plain-function handlers and one thread that runs an
 //   asio::io_context for coroutine handlers. The io_context is the server's own so that coroutine handlers run
 //   without a transport; a later transport may supply its executor instead.
-// - One mutex (mutex_) guards the queue of calls waiting for a worker, the count of running ones, the calls in
-//   flight and the stopping flag. It is never held while a handler runs or while a call is completed.
+// - One mutex (mutex_) guards the queue of calls waiting for a worker, the count of running ones, the count of
+//   coroutine calls, the calls in flight and the stopping flag. It is never held while a handler runs or while a
+//   call is completed.
+// - A coroutine call is counted from its admission until it leaves the calls in flight, which happens once, in the
+//   first finish() of the call, however it ends; so the count is given back exactly once.
 // - Every call has its own stop source. A stop callback forwards the session's stop (cancellation or close) to it,
 //   and the destructor requests it directly. For a coroutine handler a second callback posts a terminal
 //   cancellation to the io thread, which cancels the asynchronous operation the coroutine awaits.
@@ -106,6 +109,7 @@ struct CallRecord {
     json arguments;
     json meta;
     std::uint64_t serial = 0;
+    bool coroutine = false;  // set before the call is admitted
 
     // The handler's stop source, and the callbacks that request it; the callbacks are destroyed first.
     std::stop_source stop;
@@ -178,6 +182,7 @@ private:
     std::condition_variable work_ready_;
     std::deque<std::shared_ptr<CallRecord>> queue_;
     std::size_t running_ = 0;
+    std::size_t coroutines_ = 0;  // coroutine calls in flight
     bool stopping_ = false;
     std::uint64_t next_serial_ = 0;
     std::map<std::uint64_t, std::shared_ptr<CallRecord>> in_flight_;
@@ -199,6 +204,9 @@ void CancelPoster::operator()() const noexcept { core->post_cancel(record); }
 ServerCore::ServerCore(ServerOptions options) : options_(std::move(options)) {
     if (options_.max_concurrent_calls == 0) {
         throw std::invalid_argument("neomcp: ServerOptions::max_concurrent_calls is zero");
+    }
+    if (options_.max_coroutine_calls == 0) {
+        throw std::invalid_argument("neomcp: ServerOptions::max_coroutine_calls is zero");
     }
     io_work_.emplace(asio::make_work_guard(io_));
     try {
@@ -361,6 +369,7 @@ void ServerCore::call(const CallRequest& request, CallControl control, Completio
     // Runs at once when the session already requested stop.
     record->follow.emplace(record->control.stop_token(), StopForward{&record->stop});
     const bool coroutine = std::holds_alternative<std::unique_ptr<CoroutineBody>>(entry.body);
+    record->coroutine = coroutine;
     {
         std::unique_lock<std::mutex> lock(mutex_);
         if (stopping_) {
@@ -368,7 +377,7 @@ void ServerCore::call(const CallRequest& request, CallControl control, Completio
             record->done(HostFailure{"the server has shut down"});
             return;
         }
-        if (!coroutine && !admits()) {
+        if (coroutine ? coroutines_ >= options_.max_coroutine_calls : !admits()) {
             lock.unlock();
             record->done(Refusal::busy);
             return;
@@ -378,10 +387,19 @@ void ServerCore::call(const CallRequest& request, CallControl control, Completio
         if (!coroutine) {
             queue_.push_back(record);
         } else {
+            ++coroutines_;
             // Nothing of the call runs here (drive() begins by posting), so spawning may happen under the lock; it
             // does, so that shutdown() cannot let the io_context run out of work in between.
-            asio::co_spawn(io_, drive(record),
-                           asio::bind_cancellation_slot(record->signal.slot(), Spawned{this, record}));
+            try {
+                asio::co_spawn(io_, drive(record),
+                               asio::bind_cancellation_slot(record->signal.slot(), Spawned{this, record}));
+            } catch (...) {
+                in_flight_.erase(record->serial);
+                --coroutines_;
+                lock.unlock();
+                record->done(HostFailure{"tool '" + record->definition->name + "' could not be started"});
+                return;
+            }
         }
     }
     if (!coroutine) {
@@ -402,9 +420,13 @@ void ServerCore::post_cancel(const std::weak_ptr<CallRecord>& record) {
 }
 
 void ServerCore::finish(const std::shared_ptr<CallRecord>& record, CallOutcome outcome) {
+    // The call leaves the calls in flight, and a coroutine call gives back its place, before the answer is written:
+    // a client that has the answer may start another call at once. Only the first finish() finds the call there.
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        if (in_flight_.erase(record->serial) != 0 && record->coroutine) --coroutines_;
+    }
     record->done(std::move(outcome));
-    const std::lock_guard<std::mutex> lock(mutex_);
-    in_flight_.erase(record->serial);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
