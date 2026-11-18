@@ -33,19 +33,48 @@ constexpr bool is_ipv4_text(std::string_view text) noexcept {
     }
 }
 
-// Only the characters an IPv6 address has: hexadecimal digits, ':' and, for an IPv4 address inside it, '.'; and at
-// least one ':'. Whether the text is a valid address is then the address parser's decision.
-constexpr bool has_ipv6_characters(std::string_view text) noexcept {
-    bool colon = false;
-    for (char c : text) {
-        const bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-        if (c == ':') {
-            colon = true;
-        } else if (!hex && c != '.') {
-            return false;
+// The text of an IPv6 address: groups of one to four hexadecimal digits separated by ':', eight of them, or fewer
+// with one "::" standing for the missing ones; the last two groups may be written as a dotted quad. Nothing else:
+// no brackets, no zone identifier, no port.
+constexpr bool is_ipv6_text(std::string_view text) noexcept {
+    constexpr std::size_t groups_total = 8;
+    constexpr std::size_t groups_of_a_dotted_quad = 2;
+    constexpr std::size_t max_digits = 4;
+    if (text.empty()) return false;
+    std::size_t groups = 0;
+    bool compressed = false;
+    std::size_t at = 0;
+    if (text.size() >= 2 && text[0] == ':' && text[1] == ':') {
+        compressed = true;
+        at = 2;
+    } else if (text[0] == ':') {
+        return false;
+    }
+    while (at < text.size()) {
+        const std::size_t start = at;
+        while (at < text.size() && ((text[at] >= '0' && text[at] <= '9') || (text[at] >= 'a' && text[at] <= 'f') ||
+                                    (text[at] >= 'A' && text[at] <= 'F'))) {
+            ++at;
+        }
+        if (at < text.size() && text[at] == '.') {
+            // A dotted quad is the rest of the text.
+            if (!is_ipv4_text(text.substr(start))) return false;
+            groups += groups_of_a_dotted_quad;
+            break;
+        }
+        if (at == start || at - start > max_digits) return false;
+        ++groups;
+        if (at == text.size()) break;
+        if (text[at] != ':') return false;
+        ++at;
+        if (at == text.size()) return false;  // a single ':' at the end
+        if (text[at] == ':') {
+            if (compressed) return false;
+            compressed = true;
+            ++at;
         }
     }
-    return colon;
+    return compressed ? groups < groups_total : groups == groups_total;
 }
 
 }  // namespace neomcp::http::detail

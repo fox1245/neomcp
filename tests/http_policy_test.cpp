@@ -221,6 +221,13 @@ TEST(HttpLoopback, IsDecidedByParsingTheAddress) {
     EXPECT_FALSE(is_loopback_address("127.1"));            // shortened forms are not read
     EXPECT_FALSE(is_loopback_address("0127.0.0.1"));
     EXPECT_FALSE(is_loopback_address("::1%lo"));           // a zone identifier is not accepted
+    EXPECT_FALSE(is_loopback_address("::1:"));
+    EXPECT_FALSE(is_loopback_address(":1"));
+    EXPECT_FALSE(is_loopback_address("0:0:0:0:0:0:0:0:1")); // nine groups
+    EXPECT_FALSE(is_loopback_address("::00001"));           // five digits in a group
+    EXPECT_FALSE(is_loopback_address("::ffff:127.0.0.1:80"));
+    EXPECT_TRUE(is_loopback_address("0::1"));
+    EXPECT_TRUE(is_loopback_address("::FFFF:127.0.0.1"));
 }
 
 // ---- HostPolicy ------------------------------------------------------------------------------------------------------

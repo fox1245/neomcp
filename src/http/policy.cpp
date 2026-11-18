@@ -24,7 +24,7 @@ constexpr std::array<std::string_view, 3> default_loopback_hosts = {"localhost",
 bool is_loopback_address(std::string_view address) {
     if (address.empty()) return false;
     if (equal_ignoring_case(address, loopback_name)) return true;
-    if (!detail::is_ipv4_text(address) && !detail::has_ipv6_characters(address)) return false;
+    if (!detail::is_ipv4_text(address) && !detail::is_ipv6_text(address)) return false;
     std::error_code error;
     const asio::ip::address parsed = asio::ip::make_address(std::string(address), error);
     if (error) return false;
