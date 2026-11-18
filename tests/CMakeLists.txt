@@ -45,8 +45,14 @@ target_compile_definitions(neomcp_json_schema_suite_test PRIVATE
 neomcp_configure_target(neomcp_json_schema_suite_test)
 gtest_discover_tests(neomcp_json_schema_suite_test DISCOVERY_TIMEOUT 120)
 
-# Large values must compare in linear time: a quadratic comparison does not finish within the timeout.
+# Large values must compare in linear time: a quadratic comparison does not finish within the time limit. The limit
+# is set only with NEOMCP_TEST_TIME_BOUNDS: an AddressSanitizer build on 64-bit Arm runs the same linear code several
+# hundred times slower than an uninstrumented one, so there the tests check the results only.
 add_executable(neomcp_json_schema_scale_test json_schema_scale_test.cpp)
 target_link_libraries(neomcp_json_schema_scale_test PRIVATE neomcp::schema neojson::neojson GTest::gtest_main Threads::Threads)
 neomcp_configure_target(neomcp_json_schema_scale_test)
-gtest_discover_tests(neomcp_json_schema_scale_test DISCOVERY_TIMEOUT 120 PROPERTIES TIMEOUT 2)
+if(NEOMCP_TEST_TIME_BOUNDS)
+    gtest_discover_tests(neomcp_json_schema_scale_test DISCOVERY_TIMEOUT 120 PROPERTIES TIMEOUT 2)
+else()
+    gtest_discover_tests(neomcp_json_schema_scale_test DISCOVERY_TIMEOUT 120)
+endif()

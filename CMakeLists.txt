@@ -9,6 +9,9 @@ endif()
 
 option(NEOMCP_BUILD_TESTS "Build the tests" ${NEOMCP_IS_TOP_LEVEL})
 option(NEOMCP_WARNINGS_AS_ERRORS "Treat warnings in neomcp's own targets as errors" OFF)
+option(NEOMCP_TEST_TIME_BOUNDS
+    "Give the tests that check how cost grows with size a short time limit. Turn it off for instrumented builds, whose slowdown is not uniform across platforms"
+    ON)
 
 include(cmake/NeomcpNeojson.cmake)
 

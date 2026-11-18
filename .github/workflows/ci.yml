@@ -37,6 +37,7 @@ jobs:
       - name: Configure (Debug, sanitizers)
         run: >-
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DNEOMCP_WARNINGS_AS_ERRORS=ON
+          -DNEOMCP_TEST_TIME_BOUNDS=OFF
           "-DCMAKE_C_FLAGS=$SANITIZE" "-DCMAKE_CXX_FLAGS=$SANITIZE"
       - name: Show the compilers and flags the build uses
         run: grep -E '^CMAKE_(C|CXX)_(COMPILER|FLAGS):' build/CMakeCache.txt
