@@ -150,3 +150,10 @@ gtest_discover_tests(neomcp_http_endpoint_test DISCOVERY_TIMEOUT 120)
 add_executable(neomcp_conformance_fixture conformance/everything_server.cpp)
 target_link_libraries(neomcp_conformance_fixture PRIVATE neomcp::http Threads::Threads)
 neomcp_configure_target(neomcp_conformance_fixture)
+
+# The requests of the conformance runner's resource, prompt, completion and caching scenarios, sent over real sockets
+# to the fixture's registrations in both eras: the stand-in for the runner where it cannot run.
+add_executable(neomcp_conformance_fixture_test conformance/fixture_test.cpp)
+target_link_libraries(neomcp_conformance_fixture_test PRIVATE neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_conformance_fixture_test)
+gtest_discover_tests(neomcp_conformance_fixture_test DISCOVERY_TIMEOUT 120)
