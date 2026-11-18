@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="t">
+  <title id="t">neomcp</title>
+  <rect x="2" y="2" width="252" height="252" rx="54" fill="#0f172a" stroke="#334155" stroke-width="4"/>
+  <g fill="none" stroke="#e2e8f0" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M128 136V70"/>
+    <path d="M128 136L70 182"/>
+    <path d="M128 136L186 182"/>
+  </g>
+  <g fill="#0f172a" stroke="#e2e8f0" stroke-width="12">
+    <circle cx="128" cy="62" r="19"/>
+    <circle cx="64" cy="186" r="19"/>
+    <circle cx="192" cy="186" r="19"/>
+  </g>
+  <rect x="100" y="108" width="56" height="56" rx="14" fill="#fb923c"/>
+</svg>

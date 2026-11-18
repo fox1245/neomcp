@@ -1,8 +1,17 @@
+<div align="center">
+
+<img src="assets/logo.svg" width="160">
+
 # neomcp
 
-A C++ SDK for the [Model Context Protocol](https://modelcontextprotocol.io) (MCP): servers and clients.
+**A C++ SDK for the Model Context Protocol: servers and clients.**
 
-Work in progress. Nothing here is usable yet.
+</div>
+
+---
+
+neomcp is a C++ library for writing [Model Context Protocol](https://modelcontextprotocol.io) (MCP) servers and
+clients. Work in progress. Nothing here is usable yet.
 
 ## Planned
 
