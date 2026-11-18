@@ -988,7 +988,10 @@ TEST(HttpEndpointForm, AnAnswerTooLargeForTheStreamEndsTheStreamInsteadOfWaiting
     Harness harness(options);
     const Reply reply =
         modern_call(harness.port, 1, "tools/call", with_progress(call_params("large"), "l"), "large");
-    EXPECT_FALSE(has_answer(reply.body)) << "the stream was cut instead";
+    EXPECT_EQ(reply.status, 200);
+    EXPECT_FALSE(reply.ok) << "the stream was cut, not ended as if it were complete";
+    EXPECT_FALSE(has_answer(reply.body));
+    EXPECT_EQ(events(reply.body).size(), 1U) << "the notification before the answer arrived";
     // The endpoint is still fine.
     EXPECT_EQ(modern_call(harness.port, 2, "tools/list").status, 200);
 }
