@@ -113,6 +113,9 @@ int main(int argc, char** argv) {
     neomcp::HttpServerOptions options;
     options.port = port;
     options.diagnostics = false;
+    // Every open stream holds a worker, and a scenario that fails half way may leave its session's stream open until
+    // the runner exits; one run of each revision opens a few dozen sessions.
+    options.max_worker_threads = 128;
     const bool announce = port == 0;
     options.on_listening = [announce](std::uint16_t bound) {
         if (!announce) return;

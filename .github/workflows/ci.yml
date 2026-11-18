@@ -3,7 +3,7 @@ name: CI
 # Every push and pull request builds and tests on Linux x64 (GCC and Clang) and Linux arm64, with AddressSanitizer
 # and UndefinedBehaviorSanitizer. macOS (arm64 and x64) and Windows (x64 and arm64) run on pushes to main and on
 # demand, and on every event once the repository is public. One more job runs the stdio server against the official
-# Python SDK's client.
+# Python SDK's client, and one runs the official conformance suite against the HTTP server, once per revision.
 
 on:
   push:
@@ -93,3 +93,54 @@ jobs:
         run: cmake --build build --parallel
       - name: Test
         run: ctest --test-dir build --output-on-failure --timeout 300
+
+  conformance:
+    name: conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CC: clang
+      CXX: clang++
+      RUNNER_PACKAGE: "@modelcontextprotocol/conformance@0.2.0-alpha.12"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON
+      - name: Build the fixture server
+        run: cmake --build build --parallel --target neomcp_conformance_fixture
+      - name: Start the fixture server on a free port of 127.0.0.1
+        id: fixture
+        run: |
+          build/tests/neomcp_conformance_fixture 0 2> "$RUNNER_TEMP/fixture.log" &
+          for attempt in $(seq 1 100); do
+            if [ -s "$RUNNER_TEMP/fixture.log" ]; then break; fi
+            sleep 0.1
+          done
+          port="$(head -n 1 "$RUNNER_TEMP/fixture.log")"
+          if [ -z "$port" ]; then
+            echo "The fixture did not report its port."
+            cat "$RUNNER_TEMP/fixture.log"
+            exit 1
+          fi
+          echo "FIXTURE_URL=http://127.0.0.1:$port/mcp" >> "$GITHUB_ENV"
+      # Both revisions run against the same process: one endpoint serves both eras.
+      - name: Conformance, revision 2026-07-28
+        run: >-
+          npx --yes "$RUNNER_PACKAGE" server --url "$FIXTURE_URL" --requirements 2026-07-28
+          --expected-failures tests/conformance/expected-failures-2026-07-28.yml
+          --output-dir "$RUNNER_TEMP/results-2026-07-28"
+      - name: Conformance, revision 2025-11-25
+        if: ${{ !cancelled() && steps.fixture.outcome == 'success' }}
+        run: >-
+          npx --yes "$RUNNER_PACKAGE" server --url "$FIXTURE_URL" --requirements 2025-11-25
+          --expected-failures tests/conformance/expected-failures-2025-11-25.yml
+          --output-dir "$RUNNER_TEMP/results-2025-11-25"
+      - name: Show the fixture's log and every check that did not succeed
+        if: ${{ failure() }}
+        run: |
+          echo "--- fixture log"
+          cat "$RUNNER_TEMP/fixture.log" || true
+          python3 -I tests/conformance/summarize_checks.py "$RUNNER_TEMP/results-2026-07-28" "$RUNNER_TEMP/results-2025-11-25"
