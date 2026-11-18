@@ -1,0 +1,82 @@
+cmake_minimum_required(VERSION 3.20)
+project(neomcp VERSION 0.0.1 LANGUAGES CXX)
+
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(NEOMCP_IS_TOP_LEVEL ON)
+else()
+    set(NEOMCP_IS_TOP_LEVEL OFF)
+endif()
+
+option(NEOMCP_BUILD_TESTS "Build the tests" ${NEOMCP_IS_TOP_LEVEL})
+option(NEOMCP_WARNINGS_AS_ERRORS "Treat warnings in neomcp's own targets as errors" OFF)
+
+include(cmake/NeomcpNeojson.cmake)
+
+# Language level and warnings for the targets of this project only; third-party targets keep their own settings.
+function(neomcp_configure_target target)
+    set_target_properties(${target} PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4)
+        if(NEOMCP_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE /WX)
+        endif()
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+        if(NEOMCP_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE -Werror)
+        endif()
+    endif()
+endfunction()
+
+# Every profiles/*.json is built into the library; the set is whatever the folder holds.
+file(GLOB NEOMCP_PROFILE_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/profiles/*.json")
+list(SORT NEOMCP_PROFILE_FILES)
+if(NOT NEOMCP_PROFILE_FILES)
+    message(FATAL_ERROR "neomcp: profiles/ holds no *.json file")
+endif()
+
+set(NEOMCP_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(NEOMCP_PROFILE_DATA_CPP "${NEOMCP_GENERATED_DIR}/neomcp_profile_data.cpp")
+set(NEOMCP_PROFILE_LIST "${NEOMCP_GENERATED_DIR}/profile_files.txt")
+
+# The list of files goes to the generator through a file that changes only when the list changes.
+string(REPLACE ";" "\n" NEOMCP_PROFILE_LIST_TEXT "${NEOMCP_PROFILE_FILES}")
+set(NEOMCP_PROFILE_LIST_OLD "")
+if(EXISTS "${NEOMCP_PROFILE_LIST}")
+    file(READ "${NEOMCP_PROFILE_LIST}" NEOMCP_PROFILE_LIST_OLD)
+endif()
+if(NOT NEOMCP_PROFILE_LIST_OLD STREQUAL "${NEOMCP_PROFILE_LIST_TEXT}\n")
+    file(WRITE "${NEOMCP_PROFILE_LIST}" "${NEOMCP_PROFILE_LIST_TEXT}\n")
+endif()
+
+add_custom_command(
+    OUTPUT "${NEOMCP_PROFILE_DATA_CPP}"
+    COMMAND ${CMAKE_COMMAND}
+        "-DLIST_FILE=${NEOMCP_PROFILE_LIST}"
+        "-DOUTPUT=${NEOMCP_PROFILE_DATA_CPP}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedProfiles.cmake"
+    DEPENDS ${NEOMCP_PROFILE_FILES} "${NEOMCP_PROFILE_LIST}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedProfiles.cmake"
+    COMMENT "Embedding the revision profiles"
+    VERBATIM)
+
+add_library(neomcp_profile
+    src/profile/profile.cpp
+    src/profile/mechanisms.cpp
+    src/profile/builtin.cpp
+    "${NEOMCP_PROFILE_DATA_CPP}")
+add_library(neomcp::profile ALIAS neomcp_profile)
+target_include_directories(neomcp_profile
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(neomcp_profile PRIVATE neojson::neojson)
+# The public header uses C++20 library types, so every consumer compiles as C++20.
+target_compile_features(neomcp_profile PUBLIC cxx_std_20)
+neomcp_configure_target(neomcp_profile)
+
+if(NEOMCP_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
