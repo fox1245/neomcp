@@ -76,6 +76,13 @@ target_link_libraries(neomcp_profile PRIVATE neojson::neojson)
 target_compile_features(neomcp_profile PUBLIC cxx_std_20)
 neomcp_configure_target(neomcp_profile)
 
+# Describing C++ types: JSON Schema from the types and conversion of values. Header-only.
+add_library(neomcp_describe INTERFACE)
+add_library(neomcp::describe ALIAS neomcp_describe)
+target_include_directories(neomcp_describe INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+target_link_libraries(neomcp_describe INTERFACE neojson::neojson)
+target_compile_features(neomcp_describe INTERFACE cxx_std_20)
+
 if(NEOMCP_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)

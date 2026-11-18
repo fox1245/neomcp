@@ -16,3 +16,8 @@ neomcp_configure_target(neomcp_profile_test)
 
 include(GoogleTest)
 gtest_discover_tests(neomcp_profile_test DISCOVERY_TIMEOUT 120)
+
+add_executable(neomcp_describe_test describe_test.cpp)
+target_link_libraries(neomcp_describe_test PRIVATE neomcp::describe neojson::neojson GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_describe_test)
+gtest_discover_tests(neomcp_describe_test DISCOVERY_TIMEOUT 120)
