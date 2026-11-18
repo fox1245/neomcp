@@ -12,6 +12,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <exception>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -70,6 +71,38 @@ private:
     std::mutex mutex_;
     std::condition_variable settled_;
     std::optional<Response> response_;
+};
+
+// The library's pool refuses a connection when its list of jobs not yet taken by a worker is full, which also happens
+// in a burst while workers are idle and about to take them. This queue counts the connections that are open instead
+// (served or waiting) and refuses one only when that number would exceed the workers' maximum plus the waiting bound.
+class BoundedPool final : public httplib::TaskQueue {
+public:
+    BoundedPool(std::size_t base, std::size_t maximum, std::size_t waiting, time_t idle_seconds)
+        : pool_(base, maximum, 0, idle_seconds), limit_(maximum + waiting) {}
+
+    bool enqueue(std::function<void()> job) override {
+        if (open_.fetch_add(1) >= limit_) {
+            open_.fetch_sub(1);
+            return false;
+        }
+        const bool taken = pool_.enqueue([this, job = std::move(job)] {
+            struct Done {
+                std::atomic<std::size_t>& open;
+                ~Done() { open.fetch_sub(1); }
+            } done{open_};
+            job();
+        });
+        if (!taken) open_.fetch_sub(1);
+        return taken;
+    }
+
+    void shutdown() override { pool_.shutdown(); }
+
+private:
+    httplib::ThreadPool pool_;
+    const std::size_t limit_;
+    std::atomic<std::size_t> open_{0};
 };
 
 bool valid_path(const std::string& path) {
@@ -158,8 +191,8 @@ Outcome<std::uint16_t> Listener::Impl::start() {
     const std::size_t maximum = options.max_worker_threads;
     const std::size_t queued = options.max_queued_connections;
     const auto idle = static_cast<time_t>(options.worker_idle_timeout.count());
-    candidate->new_task_queue = [base, maximum, queued, idle] {
-        return new httplib::ThreadPool(base, maximum, queued, idle);
+    candidate->new_task_queue = [base, maximum, queued, idle]() -> httplib::TaskQueue* {
+        return new BoundedPool(base, maximum, queued, idle);
     };
 
     auto route = [this](const httplib::Request& incoming, httplib::Response& outgoing) { handle(incoming, outgoing); };

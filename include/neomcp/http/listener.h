@@ -8,8 +8,9 @@
 //     its worker for as long as the stream is open, and so does a request whose Responder has not been completed yet
 //     (the worker waits for the completion). The number of such responses that can be open at once is
 //     ListenerOptions::max_worker_threads. Size it for the number of streams you expect plus the requests in flight.
-//   - A connection that arrives when every worker is busy is accepted and queued, up to max_queued_connections; it
-//     gets no answer until a worker is free. A connection that arrives when the queue is full is closed at once.
+//   - A connection that arrives when every worker is busy is accepted and kept waiting, up to max_queued_connections
+//     of them; it gets no answer until a worker is free. So at most max_worker_threads + max_queued_connections
+//     connections are open at once, and a connection that arrives beyond that is closed at once.
 //
 // The peer's disconnect is noticed by polling (ListenerOptions::disconnect_poll_interval), because a blocking
 // socket gives the worker no wake-up: a client that went away is noticed within about one interval, and the stream's
@@ -55,7 +56,7 @@ struct ListenerOptions {
     std::size_t max_worker_threads = 32;
     std::chrono::seconds worker_idle_timeout{3};
 
-    // Connections accepted while every worker is busy and kept waiting for one; at least 1.
+    // Connections kept waiting for a worker while every worker is busy; at least 1.
     std::size_t max_queued_connections = 64;
 
     // How long the listener waits for the next bytes of a request, and for the peer to accept bytes it writes. A

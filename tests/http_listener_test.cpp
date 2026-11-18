@@ -801,8 +801,9 @@ TEST(HttpListener, MoreStreamsThanWorkersQueueOneConnectionAndRefuseTheNext) {
     StreamHost host;
     auto server = run(options, host.handler());
 
-    StreamingClient first(server->port);
-    StreamingClient second(server->port);
+    Counter freed;  // counts the first two connections as they end
+    StreamingClient first(server->port, "/", [&] { freed.add(); });
+    StreamingClient second(server->port, "/", [&] { freed.add(); });
     ASSERT_TRUE(first.wait_for_headers());
     ASSERT_TRUE(second.wait_for_headers());
     auto stream_one = host.streams.pop();
@@ -820,15 +821,48 @@ TEST(HttpListener, MoreStreamsThanWorkersQueueOneConnectionAndRefuseTheNext) {
     EXPECT_FALSE(fourth.has_headers());
 
     (*stream_one)->end();  // frees a worker: the queued connection is served now
-    EXPECT_TRUE(first.wait_for_end());
+    ASSERT_TRUE(freed.wait_for_at_least(1));
     auto stream_late = host.streams.pop();
     ASSERT_TRUE(stream_late.has_value());
     (*stream_late)->end();
     (*stream_two)->end();
+    EXPECT_TRUE(first.wait_for_end());
     EXPECT_TRUE(second.wait_for_end());
     ASSERT_TRUE(ended.wait_for_at_least(2));
     // Exactly one of the two late connections got an answer, the other was refused.
     EXPECT_NE(third.wait_for_end(), fourth.wait_for_end());
+}
+
+// A burst of connections that fits in the workers plus the waiting bound is served whole, even when it arrives faster
+// than the idle workers can take their connections. A fresh listener for each round keeps connections that are still
+// closing from an earlier round out of the count.
+TEST(HttpListener, ABurstThatFitsTheWorkersAndTheQueueIsNeverRefused) {
+    constexpr int rounds = 20;
+    constexpr int burst = 4;
+    int refused = 0;
+    for (int round = 0; round < rounds; ++round) {
+        ListenerOptions options = defaults();
+        options.worker_threads = 1;
+        options.max_worker_threads = 2;
+        options.max_queued_connections = 2;  // up to 4 open connections
+        auto server = run(options, [](Request, Responder responder) { responder.complete(neomcp::http::make_response(200)); });
+        std::promise<void> go;
+        const std::shared_future<void> start = go.get_future().share();
+        std::atomic<int> failed{0};
+        std::vector<std::thread> peers;
+        for (int i = 0; i < burst; ++i) {
+            peers.emplace_back([&] {
+                auto client = make_client(server->port);
+                start.wait();
+                auto result = client->Get("/");
+                if (!result || result->status != 200) ++failed;
+            });
+        }
+        go.set_value();
+        for (auto& peer : peers) peer.join();
+        refused += failed;
+    }
+    EXPECT_EQ(refused, 0);
 }
 
 }  // namespace
