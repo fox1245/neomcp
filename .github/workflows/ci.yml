@@ -1,7 +1,7 @@
 name: CI
 
-# Every push and pull request builds and tests on Linux x64 (GCC and Clang) and Linux arm64, with AddressSanitizer
-# and UndefinedBehaviorSanitizer. macOS (arm64 and x64) and Windows (x64 and arm64) run on pushes to main and on
+# Every push and pull request builds and tests on Linux x64 (GCC and Clang), with AddressSanitizer and
+# UndefinedBehaviorSanitizer, and on Linux arm64 without them. macOS (arm64 and x64) and Windows (x64 and arm64) run on pushes to main and on
 # demand, and on every event once the repository is public. One more job runs the stdio and HTTP servers against the
 # official Python SDK's client, and one runs the official conformance suite against the HTTP server, once per revision.
 
@@ -26,16 +26,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-x64-gcc, runner: ubuntu-24.04, cc: gcc, cxx: g++ }
-          - { name: linux-x64-clang, runner: ubuntu-24.04, cc: clang, cxx: clang++ }
-          - { name: linux-arm64-gcc, runner: ubuntu-24.04-arm, cc: gcc, cxx: g++ }
+          - { name: linux-x64-gcc, runner: ubuntu-24.04, cc: gcc, cxx: g++, sanitize: "-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer" }
+          - { name: linux-x64-clang, runner: ubuntu-24.04, cc: clang, cxx: clang++, sanitize: "-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer" }
+          # With the sanitizers the tests run many times slower on arm64 than on x64 and the suite no longer
+          # finishes within the job's time limit, so the arm64 job builds without them; both x64 jobs run them.
+          - { name: linux-arm64-gcc, runner: ubuntu-24.04-arm, cc: gcc, cxx: g++, sanitize: "" }
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
-      SANITIZE: -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
+      SANITIZE: ${{ matrix.sanitize }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Configure (Debug, sanitizers)
+      - name: Configure (Debug; sanitizers where the matrix names them)
         run: >-
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DNEOMCP_WARNINGS_AS_ERRORS=ON
           -DNEOMCP_TEST_TIME_BOUNDS=OFF
