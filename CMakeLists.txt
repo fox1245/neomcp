@@ -87,6 +87,7 @@ target_compile_features(neomcp_describe INTERFACE cxx_std_20)
 add_library(neomcp_schema
     src/schema/compile.cpp
     src/schema/evaluate.cpp
+    src/schema/pattern_scan.cpp
     src/schema/uri.cpp
     src/schema/validator.cpp
     src/schema/value.cpp)

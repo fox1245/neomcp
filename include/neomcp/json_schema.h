@@ -53,6 +53,13 @@ struct Limits {
     // for a stack known to be larger.
     std::size_t max_pattern_input = 256;
 
+    // The longest regular expression, in bytes, that `compile` accepts in a `pattern` or as a `patternProperties` key.
+    // The compiler of std::regex recurses on nested groups: libstdc++ 13 failed on a 512 KiB stack at 1000 levels of
+    // nested groups ("(((...a...)))", 2,001 bytes; 800 levels still compiled) with or without optimization. The
+    // default allows 256 levels of the densest nesting, a quarter of that, and is longer than any pattern that
+    // describes a name, an identifier or a code.
+    std::size_t max_pattern_length = 512;
+
     // How many schemas one `validate` call may evaluate in total. This bounds the work of a schema whose references
     // fan out (each level evaluates two subschemas that each evaluate two more) and that no depth limit stops.
     std::size_t max_evaluations = 10'000'000;

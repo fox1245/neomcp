@@ -154,17 +154,17 @@
     {
       "file": "pattern.json",
       "group": "pattern with Unicode property escape requires unicode mode",
-      "reason": "The pattern uses a Unicode property escape, which the ECMAScript grammar of std::regex does not have; a pattern the engine cannot compile is refused at compile."
+      "reason": "The pattern uses a Unicode property escape (\\p{..}), which the ECMAScript 3 grammar of std::regex does not have; the validator refuses it before the regex engine sees it, on every platform."
     },
     {
       "file": "pattern.json",
       "group": "pattern with Unicode property escape",
-      "reason": "The pattern uses a Unicode property escape, which the ECMAScript grammar of std::regex does not have; a pattern the engine cannot compile is refused at compile."
+      "reason": "The pattern uses a Unicode property escape (\\p{..}), which the ECMAScript 3 grammar of std::regex does not have; the validator refuses it before the regex engine sees it, on every platform."
     },
     {
       "file": "patternProperties.json",
       "group": "patternProperties with Unicode property escape",
-      "reason": "The pattern uses a Unicode property escape, which the ECMAScript grammar of std::regex does not have; a pattern the engine cannot compile is refused at compile."
+      "reason": "The pattern uses a Unicode property escape (\\p{..}), which the ECMAScript 3 grammar of std::regex does not have; the validator refuses it before the regex engine sees it, on every platform."
     },
     {
       "file": "ref.json",

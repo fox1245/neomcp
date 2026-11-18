@@ -584,10 +584,65 @@ TEST(JsonSchema, IdsAreChecked) {
 
 TEST(JsonSchema, PatternsThatCannotCompileAreRefusedAtTheKeyword) {
     EXPECT_EQ(refusal(parse(R"({"pattern":"(unclosed"})")).schema_pointer, "/pattern");
-    EXPECT_EQ(refusal(parse(R"({"properties":{"a":{"pattern":"[z-a]"}}})")).schema_pointer, "/properties/a/pattern");
+    EXPECT_EQ(refusal(parse(R"j({"properties":{"a":{"pattern":"a)"}}})j")).schema_pointer, "/properties/a/pattern");
     EXPECT_EQ(refusal(parse(R"({"patternProperties":{"(x":true}})")).schema_pointer, "/patternProperties/(x");
     EXPECT_EQ(refusal(parse(R"({"patternProperties":{"a/(b":true}})")).schema_pointer, "/patternProperties/a~1(b");
     EXPECT_EQ(refusal(parse(R"({"pattern":3})")).schema_pointer, "/pattern");
+}
+
+TEST(JsonSchema, RegexConstructsOfNewerEcmaScriptAreRefusedOnEveryPlatform) {
+    const std::vector<std::pair<std::string, std::string>> cases = {
+        {R"(\p{L})", "Unicode property escape"},
+        {R"(^\P{Lu}+$)", "Unicode property escape"},
+        {R"([\p{L}0-9])", "Unicode property escape"},
+        {R"(\u{1F600})", "code point escape"},
+        {R"(a(?<=b)c)", "lookbehind"},
+        {R"(a(?<!b)c)", "lookbehind"},
+        {R"((?<year>[0-9]+))", "named group"},
+        {R"((?<n>a)\k<n>)", "named group"},
+        {R"(\k<n>)", "named back-reference"},
+    };
+    for (const auto& [pattern, construct] : cases) {
+        const Issue in_pattern = refusal(json{{"properties", json{{"a", json{{"pattern", pattern}}}}}});
+        EXPECT_EQ(in_pattern.schema_pointer, "/properties/a/pattern") << pattern;
+        EXPECT_TRUE(contains(in_pattern.message, construct)) << pattern << ": " << in_pattern.message;
+        EXPECT_TRUE(contains(in_pattern.message, "does not have")) << pattern;
+        const Issue in_key = refusal(json{{"patternProperties", json{{pattern, true}}}});
+        EXPECT_EQ(in_key.schema_pointer, "/patternProperties/" + pattern) << pattern;
+        EXPECT_TRUE(contains(in_key.message, construct)) << pattern;
+    }
+}
+
+TEST(JsonSchema, TheSameCharactersInAHarmlessPlaceAreNotRefused) {
+    const std::vector<std::string> patterns = {
+        R"(\\p)",       // an escaped backslash, then the letter p
+        R"(\\u{2})",    // an escaped backslash, then "u" repeated twice
+        R"([(?<x])",    // inside a character class
+        R"([\\]p)",     // the class ends at the first unescaped bracket
+        R"(\(?<a)",     // an optional escaped parenthesis
+        R"((?=a)b)",    // lookahead exists in the grammar
+        R"((?!a)b)",
+        R"((?:a)b)",
+    };
+    for (const std::string& pattern : patterns) {
+        EXPECT_TRUE(compiled(json{{"pattern", pattern}})) << pattern;
+        EXPECT_TRUE(compiled(json{{"patternProperties", json{{pattern, true}}}})) << pattern;
+    }
+}
+
+TEST(JsonSchema, ARangeThatEnginesReadDifferentlyIsRefusedOrHarmless) {
+    // ECMAScript rejects the reversed range [z-a]; libstdc++ does too, libc++ accepts it. What holds on every
+    // platform: the schema is refused at the keyword, or it compiles and validation answers without a crash.
+    const json schema = parse(R"({"properties":{"a":{"pattern":"[z-a]"}}})");
+    auto result = Validator::compile(schema);
+    if (const auto* issue = std::get_if<Issue>(&result)) {
+        EXPECT_EQ(issue->schema_pointer, "/properties/a/pattern");
+        return;
+    }
+    const Validator validator = std::get<Validator>(result);
+    for (const char* text : {"", "a", "m", "z", "-"}) {
+        (void)validator.validate(json{{"a", text}});
+    }
 }
 
 TEST(JsonSchema, KeywordsOfTheWrongShapeAreRefused) {
@@ -786,6 +841,29 @@ TEST(JsonSchemaLimits, MaxPatternInputBoundsStringsAndPropertyNames) {
     // The default is 256 bytes.
     EXPECT_TRUE(accepts(schema, json(std::string(256, 'a'))));
     EXPECT_TRUE(check(schema, json(std::string(257, 'a'))));
+}
+
+TEST(JsonSchemaLimits, MaxPatternLengthBoundsThePatternSource) {
+    Limits limits;
+    limits.max_pattern_length = 8;
+    const std::string inside = "^a{1,5}$";  // 8 bytes
+    const std::string outside = "^a{1,56}$";  // 9 bytes
+    EXPECT_TRUE(compiled(json{{"pattern", inside}}, limits));
+    const Issue pattern = refusal(json{{"pattern", outside}}, limits);
+    EXPECT_EQ(pattern.schema_pointer, "/pattern");
+    EXPECT_TRUE(contains(pattern.message, "max_pattern_length"));
+    EXPECT_EQ(refusal(json{{"properties", json{{"p", json{{"pattern", outside}}}}}}, limits).schema_pointer,
+              "/properties/p/pattern");
+
+    EXPECT_TRUE(compiled(json{{"patternProperties", json{{inside, true}}}}, limits));
+    const Issue key = refusal(json{{"patternProperties", json{{outside, true}}}}, limits);
+    EXPECT_EQ(key.schema_pointer, "/patternProperties/" + std::string("^a{1,56}$"));
+    EXPECT_TRUE(contains(key.message, "max_pattern_length"));
+
+    // The default is 512 bytes.
+    EXPECT_TRUE(compiled(json{{"pattern", std::string(512, 'a')}}));
+    EXPECT_FALSE(refusal(json{{"pattern", std::string(513, 'a')}}).schema_pointer.empty());
+    EXPECT_EQ(Limits{}.max_pattern_length, 512U);
 }
 
 TEST(JsonSchemaLimits, MaxEvaluationsBoundsTheWorkOfOneValidation) {
