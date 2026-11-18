@@ -477,8 +477,47 @@ TEST(Era, UnsupportedModernVersion) {
         EXPECT_EQ(error_code_of(*answer), -32022) << answer->dump();
         EXPECT_EQ(error_message_of(*answer), "Unsupported protocol version");
         EXPECT_EQ(answer->at("error").at("data").at("requested"), requested);
-        EXPECT_EQ(answer->at("error").at("data").at("supported"), strings(newest_first));
+        EXPECT_EQ(answer->at("error").at("data").at("supported"), strings({modern_revision}))
+            << "only the revisions a request can name";
     }
+}
+
+// The lists a client can pick a revision from hold the revisions it can name the same way; the lists in errors that
+// name no revision tell the reader everything the server serves.
+TEST(Era, SupportedListsFollowTheOpeningMechanism) {
+    neomcp::SessionOptions options = test_options();
+    options.profiles = profiles_of(all_revisions);  // the legacy revisions and one modern revision
+    FakeHost host;
+    Peer peer(host, options);
+    const auto modern = builtin(modern_revision);
+    json unsupported = Peer::make_request(*modern, 1, "tools/list");
+    unsupported["params"]["_meta"][version_key] = "2099-01-01";
+    const auto refused = peer.request(unsupported, patience);
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(error_code_of(*refused), -32022);
+    EXPECT_EQ(refused->at("error").at("data").at("supported"), strings({modern_revision}));
+    const auto discover = peer.request(Peer::make_request(*modern, 2, "server/discover"), patience);
+    ASSERT_TRUE(discover);
+    EXPECT_EQ(result_of(*discover).at("supportedVersions"), strings({modern_revision}));
+    const auto unnamed =
+        peer.request(json{{"jsonrpc", "2.0"}, {"id", 3}, {"method", "tools/list"}, {"params", json::object()}}, patience);
+    ASSERT_TRUE(unnamed);
+    EXPECT_EQ(error_code_of(*unnamed), -32602);
+    EXPECT_EQ(unnamed->at("error").at("data").at("supported"), strings(newest_first));
+
+    // With a second revision of the same mechanism (a copy of the modern profile under a later name), both are
+    // listed, newest first.
+    json document = json::parse(profile::builtin_text(modern_revision));
+    document["revision"] = "2099-01-01";
+    auto loaded = profile::load(document.dump());
+    ASSERT_TRUE(std::holds_alternative<profile::ProfilePtr>(loaded));
+    options.profiles.push_back(std::get<profile::ProfilePtr>(loaded));
+    Peer wider(host, options);
+    const auto both = wider.request(Peer::make_request(*modern, 4, "server/discover"), patience);
+    ASSERT_TRUE(both);
+    EXPECT_EQ(result_of(*both).at("supportedVersions"), strings({"2099-01-01", modern_revision}));
+    const auto later = wider.request(Peer::make_request(*std::get<profile::ProfilePtr>(loaded), 5, "tools/list"), patience);
+    ASSERT_TRUE(later && later->contains("result")) << "a request naming the later revision is served";
 }
 
 TEST(Era, ModernRequiredMetaKeysOneByOne) {
@@ -755,7 +794,7 @@ TEST(Discover, Result) {
     const json& result = result_of(answer);
     EXPECT_EQ(keys(result), (std::set<std::string>{"_meta", "cacheScope", "capabilities", "instructions", "resultType",
                                                    "supportedVersions", "ttlMs"}));
-    EXPECT_EQ(result.at("supportedVersions"), strings(newest_first));
+    EXPECT_EQ(result.at("supportedVersions"), strings({modern_revision})) << "only the revisions a request can name";
     EXPECT_EQ(result.at("capabilities"), (json{{"tools", {{"listChanged", false}}}}));
     EXPECT_EQ(result.at("ttlMs"), 5000);
     EXPECT_EQ(result.at("cacheScope"), "public");

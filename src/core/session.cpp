@@ -186,7 +186,8 @@ private:
     static const std::map<std::string, Handler, std::less<>>& handlers();
 
     // ---- answers
-    json supported_versions() const;
+    // The enabled revisions, newest first: those a request can name under `opener`, or every one when null.
+    json supported_versions(const OpenMechanism* opener = nullptr) const;
     json capabilities(const profile::Profile& profile) const;
     void finish_result(json& body, std::string_view type, const profile::Profile& profile) const;
     json call_result(const ToolResult& result, const profile::Profile& profile) const;
@@ -510,13 +511,16 @@ std::optional<json> SessionCore::serve_named(Message request, const OpenMechanis
         if (candidate.profile->revision() == revision) chosen = &candidate;
     }
     json data = json::object();
-    data["supported"] = supported_versions();
     if (newest == nullptr) {
+        // No revision can be named this way; the list tells the reader what the server serves at all.
+        data["supported"] = supported_versions();
         return make_error(id, error_code::invalid_params,
                           "Invalid params: this server serves no revision that a request names in params._meta",
                           std::move(data));
     }
     if (chosen == nullptr) {
+        // The revisions the client can name in a retried request.
+        data["supported"] = supported_versions(&opener);
         data["requested"] = revision;
         const auto code = newest->profile->error_code(unsupported_version_error);
         return make_error(id, code.value_or(error_code::invalid_params), "Unsupported protocol version",
@@ -750,7 +754,7 @@ std::optional<json> SessionCore::on_discover(Message& request, const Served& ser
                                              std::size_t) {
     const profile::Profile& profile = *served.profile;
     json body = json::object();
-    body["supportedVersions"] = supported_versions();
+    body["supportedVersions"] = supported_versions(served.open);
     body["capabilities"] = capabilities(profile);
     if (options_.instructions) body["instructions"] = *options_.instructions;
     finish_result(body, "DiscoverResult", profile);
@@ -779,9 +783,11 @@ std::optional<json> SessionCore::on_set_level(Message& request, const Served& se
 // ---------------------------------------------------------------------------------------------------------------
 // Answers
 
-json SessionCore::supported_versions() const {
+json SessionCore::supported_versions(const OpenMechanism* opener) const {
     json list = json::array();
-    for (const auto& profile : profiles_) list.push_back(profile->revision());
+    for (const Served& served : served_) {
+        if (opener == nullptr || served.open == opener) list.push_back(served.profile->revision());
+    }
     return list;
 }
 
