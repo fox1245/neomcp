@@ -56,3 +56,8 @@ if(NEOMCP_TEST_TIME_BOUNDS)
 else()
     gtest_discover_tests(neomcp_json_schema_scale_test DISCOVERY_TIMEOUT 120)
 endif()
+
+add_executable(neomcp_core_test core_test.cpp)
+target_link_libraries(neomcp_core_test PRIVATE neomcp::core GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_core_test)
+gtest_discover_tests(neomcp_core_test DISCOVERY_TIMEOUT 120)
