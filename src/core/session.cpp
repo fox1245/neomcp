@@ -32,6 +32,12 @@
 //   mutex: at the end of a drain, after a cancellation, and when a batch was assembled. A batch counts as pending from
 //   the moment it is read until its answer was handed to the queue, so that the gap between the last call of the batch
 //   and its answer is not mistaken for idleness.
+// - The change feed. The session registers its listener with the host (ToolHost::watch) and resets the registration
+//   with mutex_ released, and a host calls the listener with no lock of its own held, so mutex_ and a lock of the host
+//   never nest. A change is queued under mutex_ like any output. A subscription is a call in flight that becomes
+//   visible to changes in the same hold of mutex_ that queues its acknowledgement, so nothing precedes that; it ends
+//   through the paths of a call (cancellation, abandon(), close()) or when the host ends its feed, and the last two end
+//   it with outputs of its own, which a full queue never drops and close() keeps.
 // - A sink that throws closes the session. The exception goes only to the thread that reads: out of receive() when
 //   that thread was writing, also when it wrote through a Completion or CallControl a tool used inline during
 //   receive() (the exception is held and rethrown after the tool's frames are left). A tool's own thread that was

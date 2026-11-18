@@ -863,7 +863,12 @@ TEST(SubscriptionFeed, TheNotificationsOfACallNeverGoToASubscription) {
 
 TEST(SubscriptionFeed, AnAbandonedSubscriptionEndsWithoutAWord) {
     FeedHost host;
-    Tagged session(host);
+    neomcp::SessionOptions options = options_for(modern_revision);
+    options.max_subscriptions = 2;
+    // A transport whose cancellation mechanism does not take a closed stream for a cancellation: a subscription ends
+    // with its stream all the same.
+    ASSERT_EQ(builtin(modern_revision)->stdio()->cancel, "cancelled_notification");
+    Tagged session(host, std::move(options));
     EXPECT_TRUE(session.send(1, "s", "subscriptions/listen", listen_params({{"toolsListChanged", true}})));
     EXPECT_TRUE(session.send(2, "t", "subscriptions/listen", listen_params({{"toolsListChanged", true}})));
     ASSERT_TRUE(session.next(1));
@@ -871,9 +876,12 @@ TEST(SubscriptionFeed, AnAbandonedSubscriptionEndsWithoutAWord) {
     session.session().abandon(1);
     host.report(neomcp::ChangeKind::tools_list);
     EXPECT_EQ(session.next_message(2), tagged("notifications/tools/list_changed", "t"));
+    // The abandoned one gave its place back.
+    EXPECT_TRUE(session.send(3, "u", "subscriptions/listen", listen_params({{"toolsListChanged", true}})));
+    EXPECT_EQ(session.next_message(3), acknowledged("u", {{"toolsListChanged", true}}));
     session.session().close();
     EXPECT_EQ(session.of(1).size(), 1u) << "after its abandonment nothing of the unit is written, its end included";
-    // The other one ended gracefully: the notice, then the result as the unit's last output.
+    // The others ended gracefully: the notice, then the result as the unit's last output.
     const auto ended = session.of(2);
     ASSERT_EQ(ended.size(), 4u);
     EXPECT_EQ(json::parse(ended[2].line).at("method"), "notifications/cancelled");
