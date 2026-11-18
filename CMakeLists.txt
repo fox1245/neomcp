@@ -83,6 +83,21 @@ target_include_directories(neomcp_describe INTERFACE $<BUILD_INTERFACE:${CMAKE_C
 target_link_libraries(neomcp_describe INTERFACE neojson::neojson)
 target_compile_features(neomcp_describe INTERFACE cxx_std_20)
 
+# JSON Schema 2020-12 validation. It depends on the JSON value type only.
+add_library(neomcp_schema
+    src/schema/compile.cpp
+    src/schema/evaluate.cpp
+    src/schema/uri.cpp
+    src/schema/validator.cpp
+    src/schema/value.cpp)
+add_library(neomcp::schema ALIAS neomcp_schema)
+target_include_directories(neomcp_schema
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(neomcp_schema PUBLIC neojson::neojson)
+target_compile_features(neomcp_schema PUBLIC cxx_std_20)
+neomcp_configure_target(neomcp_schema)
+
 if(NEOMCP_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
