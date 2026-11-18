@@ -268,6 +268,49 @@ json to_wire(const ReadResult& result, const profile::Profile& profile) {
     return object;
 }
 
+json to_wire(const PromptDefinition& prompt, const profile::Profile& profile) {
+    json object = json::object();
+    object["name"] = prompt.name;
+    put(object, "title", prompt.title);
+    put(object, "description", prompt.description);
+    if (!prompt.arguments.empty()) {
+        json arguments = json::array();
+        for (const auto& argument : prompt.arguments) {
+            json entry = json::object();
+            entry["name"] = argument.name;
+            put(entry, "title", argument.title);
+            put(entry, "description", argument.description);
+            entry["required"] = argument.required;
+            keep_members(entry, "PromptArgument", profile);
+            arguments.push_back(std::move(entry));
+        }
+        object["arguments"] = std::move(arguments);
+    }
+    if (!prompt.icons.empty()) object["icons"] = icons(prompt.icons, profile);
+    put(object, "_meta", prompt.meta);
+    keep_members(object, "Prompt", profile);
+    return object;
+}
+
+json to_wire(const PromptMessage& message, const profile::Profile& profile) {
+    json object = json::object();
+    object["role"] = std::string(to_string(message.role));
+    object["content"] = to_wire(message.content, profile);
+    keep_members(object, "PromptMessage", profile);
+    return object;
+}
+
+json to_wire(const PromptResult& result, const profile::Profile& profile) {
+    json object = json::object();
+    put(object, "description", result.description);
+    json messages = json::array();
+    for (const auto& message : result.messages) messages.push_back(to_wire(message, profile));
+    object["messages"] = std::move(messages);
+    put(object, "_meta", result.meta);
+    keep_members(object, "GetPromptResult", profile);
+    return object;
+}
+
 json to_wire(const ToolResult& result, const profile::Profile& profile) {
     json object = json::object();
     json content = json::array();

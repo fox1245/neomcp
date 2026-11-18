@@ -54,6 +54,21 @@
 // parameters (a text that is not a number for an integer member is no match). A URI nothing serves is answered as the
 // revision prescribes for a resource that does not exist.
 //
+// Prompts. A prompt is a template of messages that a client offers its user:
+//
+//   struct ReviewArgs { std::string title; std::optional<std::string> focus; };
+//   NEOMCP_DESCRIBE(ReviewArgs, title, "what to review", focus, "what to look at")
+//   server.prompt<ReviewArgs>("review", "Review a change", [](const ReviewArgs& a) { return "Review " + a.title; });
+//
+// Arguments are strings on the wire: Args is a described struct of std::string members (required) and
+// std::optional<std::string> members (optional), which is checked at compile time, and the argument list of the
+// prompt (name, description, required) is derived from it. A prompt without arguments is registered without a type
+// (server.prompt(name, description, handler)). A std::string a handler returns is one message of the user; a
+// neomcp::PromptMessage, a vector of them or a neomcp::PromptResult are as built, and the content of a message may be
+// text, an image, audio, a resource link or an embedded resource. prompts/get answers an unknown prompt and a
+// missing required argument with Invalid params. The server declares the `prompts` capability exactly when a prompt
+// is registered.
+//
 // Threads. Plain-function handlers run on a pool of worker threads the server owns, bounded by
 // ServerOptions::max_concurrent_calls and max_pending_calls. Coroutine handlers run on one thread the server owns,
 // which drives an asio::io_context, and are bounded by max_coroutine_calls; a coroutine handler must not block, or
@@ -134,6 +149,10 @@ struct ServerOptions {
     // Resources per resources/list page, and templates per resources/templates/list page; empty: one page with
     // everything. Zero is an error.
     std::optional<std::size_t> resources_page_size{};
+    // Caching hints on prompts/list, where the revision has them. Default: stale at once, private.
+    CacheHints prompts_cache{};
+    // Prompts per prompts/list page; empty: one page with every prompt. Zero is an error.
+    std::optional<std::size_t> prompts_page_size{};
     // Input bounds of a session (see SessionOptions): 8 MiB per line, 128 levels of nesting, and 1024 lines waiting
     // to be written before progress and log notifications are dropped.
     std::size_t max_message_bytes = SessionOptions{}.max_message_bytes;
@@ -218,6 +237,23 @@ private:
     std::size_t index_;
 };
 
+// A registered prompt, for setting its optional members; it behaves as a ToolHandle does.
+class PromptHandle {
+public:
+    PromptHandle title(std::string text) const;
+    PromptHandle icons(std::vector<Icon> list) const;
+    // `_meta` of the prompt; an object, else std::invalid_argument.
+    PromptHandle meta(json value) const;
+
+    const std::string& name() const;
+
+private:
+    friend class Server;
+    PromptHandle(detail::ServerCore* core, std::size_t index) : core_(core), index_(index) {}
+    detail::ServerCore* core_;
+    std::size_t index_;
+};
+
 class Server final : public ToolHost {
 public:
     // Starts the server's threads. Throws std::invalid_argument for options that cannot work.
@@ -269,12 +305,24 @@ public:
     template <class Params, class Handler>
     ResourceTemplateHandle resource_template(std::string uri_template, std::string name, Handler&& handler);
 
-    // ToolHost: the resources, which the first use ends registration for. Null when none is registered.
+    // A prompt whose arguments are the described struct Args (see above). Throws std::invalid_argument for an empty or
+    // duplicate name and std::logic_error once the server serves; each message names the prompt.
+    template <class Args, class Handler>
+    PromptHandle prompt(std::string name, std::string description, Handler&& handler);
+
+    // A prompt without arguments.
+    template <class Handler>
+    PromptHandle prompt(std::string name, std::string description, Handler&& handler);
+
+    // ToolHost: the resources and the prompts, which the first use ends registration for. Null when none is
+    // registered.
     ResourceHost* resource_host() noexcept override;
+    PromptHost* prompt_host() noexcept override;
 
 private:
     ToolHandle add(ToolDefinition definition, detail::Body body);
     ResourceHandle add_resource(ResourceDefinition definition, detail::FeatureBody<ReadResult> body);
+    PromptHandle add_prompt(PromptDefinition definition, detail::FeatureBody<PromptResult> body);
     ResourceTemplateHandle add_resource_template(ResourceTemplateDefinition definition,
                                                  detail::FeatureBody<ReadResult> body,
                                                  std::vector<detail::TemplateMember> members,
@@ -378,6 +426,46 @@ ResourceTemplateHandle Server::resource_template(std::string uri_template, std::
             std::move(definition),
             detail::make_feature_body<detail::TemplateKind<Params>, Params, F>(std::forward<Handler>(handler)),
             detail::template_members_of<Params>(), std::move(check));
+    }
+}
+
+template <class Args, class Handler>
+PromptHandle Server::prompt(std::string name, std::string description, Handler&& handler) {
+    using F = std::decay_t<Handler>;
+    if constexpr (!described<Args>) {
+        static_assert(detail::dependent_false<Args>,
+                      "neomcp: server.prompt<Args>(...) needs Args to be a described struct (NEOMCP_DESCRIBE or a "
+                      "neomcp::Described specialisation)");
+        return PromptHandle(nullptr, 0);
+    } else if constexpr (!detail::all_prompt_arguments_are_strings<Args>()) {
+        static_assert(detail::dependent_false<Args>,
+                      "neomcp: the arguments of a prompt are strings on the wire: the members of the Args of "
+                      "server.prompt<Args>(...) are std::string or std::optional<std::string>");
+        return PromptHandle(nullptr, 0);
+    } else if constexpr (!detail::check_feature_handler<detail::PromptKind<Args>, F>()) {
+        return PromptHandle(nullptr, 0);
+    } else {
+        PromptDefinition definition;
+        definition.name = std::move(name);
+        definition.description = std::move(description);
+        definition.arguments = detail::prompt_arguments_of<Args>();
+        return add_prompt(std::move(definition),
+                          detail::make_feature_body<detail::PromptKind<Args>, Args, F>(std::forward<Handler>(handler)));
+    }
+}
+
+template <class Handler>
+PromptHandle Server::prompt(std::string name, std::string description, Handler&& handler) {
+    using F = std::decay_t<Handler>;
+    if constexpr (!detail::check_feature_handler<detail::PromptNoArgumentsKind, F>()) {
+        return PromptHandle(nullptr, 0);
+    } else {
+        PromptDefinition definition;
+        definition.name = std::move(name);
+        definition.description = std::move(description);
+        return add_prompt(std::move(definition),
+                          detail::make_feature_body<detail::PromptNoArgumentsKind, detail::NoArguments, F>(
+                              std::forward<Handler>(handler)));
     }
 }
 

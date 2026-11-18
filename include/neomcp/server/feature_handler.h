@@ -10,6 +10,8 @@
 //   registered with                         inputs                                            result R
 //   resource(uri, name, ...)                 none                                              see below
 //   resource_template<Params>(...)           `const Params&` or `Params`                       see below
+//   prompt(name, description, ...)           none                                              see below
+//   prompt<Args>(...)                        `const Args&` or `Args`                           see below
 //
 // The result of a resource or template handler becomes the contents of the read:
 //
@@ -19,6 +21,13 @@
 //   neomcp::ResourceContents          as built (the handler writes the uri itself)
 //   std::vector<ResourceContents>     as built
 //   neomcp::ReadResult                as built
+//
+// The result of a prompt handler becomes the messages of the prompt:
+//
+//   std::string                       one message of the user, with that text
+//   neomcp::PromptMessage             one message, as built
+//   std::vector<PromptMessage>        the messages, as built
+//   neomcp::PromptResult              as built (the description of the prompt's result too)
 #pragma once
 
 #include <cstddef>
@@ -103,7 +112,7 @@ std::remove_cv_t<typename CallSignature<F>::result> call_with_inputs(F& handler,
 }
 
 // Which registration a handler belongs to; it decides what the compile-time messages say.
-enum class KindId { resource, resource_template };
+enum class KindId { resource, resource_template, prompt, prompt_no_arguments };
 
 // What is wrong with the parameters of a handler of the kind, if anything.
 enum class ParamProblem { none, unknown, context_not_last, args_missing, args_twice };
@@ -153,6 +162,14 @@ constexpr bool check_feature_handler() {
                 static_assert(dependent_false<F>,
                               "neomcp: a handler registered with server.resource(...) takes no parameters or only "
                               "`neomcp::Context&`");
+            } else if constexpr (Kind::id == KindId::prompt_no_arguments) {
+                static_assert(dependent_false<F>,
+                              "neomcp: a handler registered with server.prompt(...) takes no parameters or only "
+                              "`neomcp::Context&`; register a handler that takes arguments with server.prompt<Args>(...)");
+            } else if constexpr (Kind::id == KindId::prompt) {
+                static_assert(dependent_false<F>,
+                              "neomcp: a handler registered with server.prompt<Args>(...) takes the arguments as "
+                              "`const Args&` or `Args`, and optionally `neomcp::Context&` after them");
             } else {
                 static_assert(dependent_false<F>,
                               "neomcp: a handler registered with server.resource_template<Params>(...) takes the "
@@ -163,9 +180,15 @@ constexpr bool check_feature_handler() {
             static_assert(dependent_false<F>, "neomcp: `neomcp::Context&` is the last parameter of a handler");
             return false;
         } else if constexpr (problem == ParamProblem::args_missing) {
-            static_assert(dependent_false<F>,
-                          "neomcp: a handler registered with server.resource_template<Params>(...) takes the "
-                          "parameters as `const Params&` or `Params`");
+            if constexpr (Kind::id == KindId::prompt) {
+                static_assert(dependent_false<F>,
+                              "neomcp: a handler registered with server.prompt<Args>(...) takes the arguments as "
+                              "`const Args&` or `Args`");
+            } else {
+                static_assert(dependent_false<F>,
+                              "neomcp: a handler registered with server.resource_template<Params>(...) takes the "
+                              "parameters as `const Params&` or `Params`");
+            }
             return false;
         } else if constexpr (problem == ParamProblem::args_twice) {
             static_assert(dependent_false<F>, "neomcp: a handler takes its parameters once");
@@ -178,10 +201,17 @@ constexpr bool check_feature_handler() {
             static_assert(dependent_false<F>, "neomcp: a handler returns std::string, not a C string");
             return false;
         } else if constexpr (std::is_reference_v<R> || !Kind::template valid_result<R>()) {
-            static_assert(dependent_false<F>,
-                          "neomcp: a resource handler returns std::string, neomcp::Bytes, a described struct, "
-                          "neomcp::json, neomcp::ResourceContents, std::vector<neomcp::ResourceContents> or "
-                          "neomcp::ReadResult, or an asio::awaitable of one of them");
+            if constexpr (Kind::id == KindId::prompt || Kind::id == KindId::prompt_no_arguments) {
+                static_assert(dependent_false<F>,
+                              "neomcp: a prompt handler returns std::string, neomcp::PromptMessage, "
+                              "std::vector<neomcp::PromptMessage> or neomcp::PromptResult, or an asio::awaitable of "
+                              "one of them");
+            } else {
+                static_assert(dependent_false<F>,
+                              "neomcp: a resource handler returns std::string, neomcp::Bytes, a described struct, "
+                              "neomcp::json, neomcp::ResourceContents, std::vector<neomcp::ResourceContents> or "
+                              "neomcp::ReadResult, or an asio::awaitable of one of them");
+            }
             return false;
         } else {
             return true;
@@ -355,6 +385,120 @@ struct TemplateKind {
         return to_read_result<R>(std::move(value), invocation);
     }
 };
+
+// ---------------------------------------------------------------------------------------------------------------
+// Prompts
+
+template <class R>
+struct is_prompt_message_vector : std::false_type {};
+template <>
+struct is_prompt_message_vector<std::vector<PromptMessage>> : std::true_type {};
+
+template <class R>
+constexpr bool is_prompt_result_type() {
+    return std::is_same_v<R, std::string> || std::is_same_v<R, PromptMessage> || is_prompt_message_vector<R>::value ||
+           std::is_same_v<R, PromptResult>;
+}
+
+template <class R>
+PromptResult to_prompt_result(R value) {
+    if constexpr (std::is_same_v<R, PromptResult>) {
+        return value;
+    } else if constexpr (std::is_same_v<R, std::string>) {
+        PromptMessage message;
+        message.role = Role::user;
+        TextContent text;
+        text.text = std::move(value);
+        message.content = std::move(text);
+        PromptResult result;
+        result.messages.push_back(std::move(message));
+        return result;
+    } else if constexpr (std::is_same_v<R, PromptMessage>) {
+        PromptResult result;
+        result.messages.push_back(std::move(value));
+        return result;
+    } else {
+        PromptResult result;
+        result.messages = std::move(value);
+        return result;
+    }
+}
+
+// The kind of prompt<Args>() handlers: the arguments the request carried, decoded as the described struct.
+template <class Parameters>
+struct PromptKind {
+    using Out = PromptResult;
+    using Args = Parameters;
+    static constexpr KindId id = KindId::prompt;
+    static constexpr bool takes_args = true;
+
+    template <class R>
+    static constexpr bool valid_result() {
+        return is_prompt_result_type<R>();
+    }
+    template <class A>
+    static Inputs<A> decode(const Invocation& invocation) {
+        return Inputs<A>{neomcp::from_json<Parameters>(invocation.arguments)};
+    }
+    template <class R>
+    static Out convert(R value, const Invocation&) {
+        return to_prompt_result<R>(std::move(value));
+    }
+};
+
+// The kind of prompt() handlers.
+struct PromptNoArgumentsKind {
+    using Out = PromptResult;
+    using Args = NoArguments;
+    static constexpr KindId id = KindId::prompt_no_arguments;
+    static constexpr bool takes_args = false;
+
+    template <class R>
+    static constexpr bool valid_result() {
+        return is_prompt_result_type<R>();
+    }
+    template <class A>
+    static Inputs<A> decode(const Invocation&) {
+        return Inputs<A>{};
+    }
+    template <class R>
+    static Out convert(R value, const Invocation&) {
+        return to_prompt_result<R>(std::move(value));
+    }
+};
+
+template <class M>
+constexpr bool is_prompt_argument_type() {
+    return std::is_same_v<M, std::string> || std::is_same_v<M, std::optional<std::string>>;
+}
+
+template <class Args>
+constexpr bool all_prompt_arguments_are_strings() {
+    return std::apply(
+        [](const auto&... field) {
+            return (is_prompt_argument_type<typename std::decay_t<decltype(field)>::member_type>() && ...);
+        },
+        Described<Args>::fields.items);
+}
+
+// The argument list of a prompt: its members, a member that is not std::optional being required.
+template <class Args>
+std::vector<PromptArgumentDefinition> prompt_arguments_of() {
+    std::vector<PromptArgumentDefinition> arguments;
+    std::apply(
+        [&](const auto&... field) {
+            (arguments.push_back([&] {
+                PromptArgumentDefinition argument;
+                argument.name = std::string(field.name);
+                if (!field.description.empty()) argument.description = std::string(field.description);
+                argument.required = !is_optional_v<typename std::decay_t<decltype(field)>::member_type>;
+                return argument;
+            }()),
+             ...);
+        },
+        Described<Args>::fields.items);
+    return arguments;
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // The variables of a resource template

@@ -93,7 +93,7 @@ struct CancelPoster {
 struct CallRecord;
 
 // What a call produced: any outcome a host can complete a call with.
-using JobOutcome = std::variant<ToolResult, ReadResult, NotFound, InvalidRequest, Refusal, HostFailure>;
+using JobOutcome = std::variant<ToolResult, ReadResult, PromptResult, NotFound, InvalidRequest, Refusal, HostFailure>;
 
 // Something a call can run: a registered tool, resource or resource template. A call runs it on a worker (plain) or on the coroutine thread, and the
 // run never throws: what the handler throws becomes an outcome.
@@ -188,7 +188,10 @@ struct CallRecord {
     std::optional<std::stop_callback<CancelPoster>> poster;
 };
 
-class ServerCore final : public ToolHost, public ResourceHost, public std::enable_shared_from_this<ServerCore> {
+class ServerCore final : public ToolHost,
+                         public ResourceHost,
+                         public PromptHost,
+                         public std::enable_shared_from_this<ServerCore> {
 public:
     explicit ServerCore(ServerOptions options);
     ~ServerCore() override;
@@ -212,14 +215,22 @@ public:
     const ResourceDefinition& resource_definition(std::size_t index) const { return resource_defs_.at(index); }
     const ResourceTemplateDefinition& template_definition(std::size_t index) const { return template_defs_.at(index); }
 
+    std::size_t add_prompt(PromptDefinition definition, FeatureBody<PromptResult> body);
+    void edit_prompt(std::size_t index, const std::function<void(PromptDefinition&)>& change);
+    const PromptDefinition& prompt_definition(std::size_t index) const { return prompt_defs_.at(index); }
+
     std::variant<std::unique_ptr<Session>, CreateError> connect(Sink sink, IdleCallback on_idle);
     std::span<const ToolDefinition> tools() const override;
     void call(const CallRequest& request, CallControl control, Completion done) override;
     ResourceHost* resource_host() noexcept override;
     std::span<const ResourceDefinition> resources() const override;
     std::span<const ResourceTemplateDefinition> resource_templates() const override;
-    ListSettings list_settings() const override;
+    ListSettings resource_list_settings() const override;
     void read(const ReadRequest& request, CallControl control, Completion done) override;
+    PromptHost* prompt_host() noexcept override;
+    std::span<const PromptDefinition> prompts() const override;
+    ListSettings prompt_list_settings() const override;
+    void get(const PromptRequest& request, CallControl control, Completion done) override;
     std::optional<std::string> check(const ToolDefinition& tool, const json& arguments) const;
 
     const ServerOptions& options() const noexcept { return options_; }
@@ -279,6 +290,10 @@ private:
     std::map<std::string, std::size_t, std::less<>> resource_by_uri_;
     std::vector<ResourceTemplateDefinition> template_defs_;
     std::vector<TemplateSlot> template_slots_;
+
+    std::vector<PromptDefinition> prompt_defs_;
+    std::vector<std::unique_ptr<FeatureEntry<PromptResult>>> prompt_entries_;
+    std::map<std::string, std::size_t, std::less<>> prompt_by_name_;
     mutable std::atomic<bool> serving_{false};
 
     // Guarded by mutex_.
@@ -314,6 +329,9 @@ ServerCore::ServerCore(ServerOptions options) : options_(std::move(options)) {
     }
     if (options_.resources_page_size && *options_.resources_page_size == 0) {
         throw std::invalid_argument("neomcp: ServerOptions::resources_page_size is zero");
+    }
+    if (options_.prompts_page_size && *options_.prompts_page_size == 0) {
+        throw std::invalid_argument("neomcp: ServerOptions::prompts_page_size is zero");
     }
     io_work_.emplace(asio::make_work_guard(io_));
     try {
@@ -498,6 +516,26 @@ std::size_t ServerCore::add_resource_template(ResourceTemplateDefinition definit
     return index;
 }
 
+std::size_t ServerCore::add_prompt(PromptDefinition definition, FeatureBody<PromptResult> body) {
+    const std::string label = "prompt '" + definition.name + "'";
+    ensure_registering(label, "registered");
+    if (definition.name.empty()) throw std::invalid_argument("neomcp: a prompt needs a name");
+    if (prompt_by_name_.find(definition.name) != prompt_by_name_.end()) {
+        throw std::invalid_argument("neomcp: a prompt named '" + definition.name + "' is registered already");
+    }
+    const std::size_t index = prompt_defs_.size();
+    prompt_by_name_.emplace(definition.name, index);
+    prompt_defs_.push_back(std::move(definition));
+    prompt_entries_.push_back(std::make_unique<FeatureEntry<PromptResult>>(std::move(body), label));
+    return index;
+}
+
+void ServerCore::edit_prompt(std::size_t index, const std::function<void(PromptDefinition&)>& change) {
+    PromptDefinition& prompt = prompt_defs_.at(index);
+    ensure_registering("prompt '" + prompt.name + "'", "changed");
+    change(prompt);
+}
+
 void ServerCore::edit_resource(std::size_t index, const std::function<void(ResourceDefinition&)>& change) {
     ResourceDefinition& resource = resource_defs_.at(index);
     ensure_registering("resource '" + resource.uri + "'", "changed");
@@ -646,7 +684,7 @@ std::span<const ResourceTemplateDefinition> ServerCore::resource_templates() con
     return template_defs_;
 }
 
-ListSettings ServerCore::list_settings() const {
+ListSettings ServerCore::resource_list_settings() const {
     ListSettings settings;
     settings.page_size = options_.resources_page_size;
     settings.cache = options_.resources_cache;
@@ -685,6 +723,36 @@ void ServerCore::read(const ReadRequest& request, CallControl control, Completio
         return;
     }
     done(FeatureOutcome(NotFound{request.uri}));
+}
+
+PromptHost* ServerCore::prompt_host() noexcept {
+    serving_.store(true);
+    return prompt_defs_.empty() ? nullptr : this;
+}
+
+std::span<const PromptDefinition> ServerCore::prompts() const {
+    serving_.store(true);
+    return prompt_defs_;
+}
+
+ListSettings ServerCore::prompt_list_settings() const {
+    ListSettings settings;
+    settings.page_size = options_.prompts_page_size;
+    settings.cache = options_.prompts_cache;
+    return settings;
+}
+
+void ServerCore::get(const PromptRequest& request, CallControl control, Completion done) {
+    serving_.store(true);
+    const auto found = prompt_by_name_.find(request.name);
+    if (found == prompt_by_name_.end()) {
+        done(FeatureOutcome(InvalidRequest{"unknown prompt: " + request.name}));
+        return;
+    }
+    json arguments = json::object();
+    for (const auto& [name, value] : request.arguments) arguments[name] = value;
+    admit(*prompt_entries_[found->second], std::move(arguments), request.meta, std::move(control), std::move(done),
+          request.name);
 }
 
 void ServerCore::post_cancel(const std::weak_ptr<CallRecord>& record) {
@@ -951,6 +1019,29 @@ ToolHandle ToolHandle::icons(std::vector<Icon> list) const {
 const std::string& ToolHandle::name() const { return core_->definition(index_).name; }
 
 // ---------------------------------------------------------------------------------------------------------------
+// PromptHandle
+
+PromptHandle PromptHandle::title(std::string text) const {
+    core_->edit_prompt(index_, [&](PromptDefinition& prompt) { prompt.title = std::move(text); });
+    return *this;
+}
+
+PromptHandle PromptHandle::icons(std::vector<Icon> list) const {
+    core_->edit_prompt(index_, [&](PromptDefinition& prompt) { prompt.icons = std::move(list); });
+    return *this;
+}
+
+PromptHandle PromptHandle::meta(json value) const {
+    core_->edit_prompt(index_, [&](PromptDefinition& prompt) {
+        if (!value.is_object()) throw std::invalid_argument("neomcp: prompt '" + prompt.name + "': _meta must be an object");
+        prompt.meta = std::move(value);
+    });
+    return *this;
+}
+
+const std::string& PromptHandle::name() const { return core_->prompt_definition(index_).name; }
+
+// ---------------------------------------------------------------------------------------------------------------
 // ResourceHandle and ResourceTemplateHandle
 
 namespace {
@@ -1073,6 +1164,12 @@ void Server::call(const CallRequest& request, CallControl control, Completion do
 const ServerOptions& Server::options() const noexcept { return core_->options(); }
 
 ResourceHost* Server::resource_host() noexcept { return core_->resource_host(); }
+
+PromptHost* Server::prompt_host() noexcept { return core_->prompt_host(); }
+
+PromptHandle Server::add_prompt(PromptDefinition definition, detail::FeatureBody<PromptResult> body) {
+    return PromptHandle(core_.get(), core_->add_prompt(std::move(definition), std::move(body)));
+}
 
 ResourceHandle Server::add_resource(ResourceDefinition definition, detail::FeatureBody<ReadResult> body) {
     return ResourceHandle(core_.get(), core_->add_resource(std::move(definition), std::move(body)));

@@ -205,4 +205,38 @@ struct ReadResult {
     std::optional<CacheHints> cache;
 };
 
+// ---------------------------------------------------------------------------------------------------------------
+// Prompts
+
+// An argument a prompt takes. Arguments are strings on the wire.
+struct PromptArgumentDefinition {
+    std::string name;
+    std::optional<std::string> title;
+    std::optional<std::string> description;
+    bool required = false;
+};
+
+// A prompt the server offers, for prompts/list.
+struct PromptDefinition {
+    std::string name;
+    std::optional<std::string> title;
+    std::optional<std::string> description;
+    std::vector<PromptArgumentDefinition> arguments;
+    std::vector<Icon> icons;
+    std::optional<json> meta;  // an object, written as `_meta`
+};
+
+// One message of a prompt: who says it, and what: text, an image, audio, a resource link or an embedded resource.
+struct PromptMessage {
+    Role role = Role::user;
+    ContentBlock content;
+};
+
+// The outcome of prompts/get.
+struct PromptResult {
+    std::optional<std::string> description;
+    std::vector<PromptMessage> messages;
+    std::optional<json> meta;  // an object, written as `_meta`
+};
+
 }  // namespace neomcp

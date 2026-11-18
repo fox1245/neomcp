@@ -41,6 +41,12 @@ json to_wire(const ResourceContents& contents, const profile::Profile& profile);
 // Type `ReadResourceResult`. Members the protocol engine adds (`resultType`, the caching hints) are not written
 // here.
 json to_wire(const ReadResult& result, const profile::Profile& profile);
+// Type `Prompt`; its arguments as `PromptArgument` and its icons as `Icon`.
+json to_wire(const PromptDefinition& prompt, const profile::Profile& profile);
+// Type `PromptMessage`, its content as above.
+json to_wire(const PromptMessage& message, const profile::Profile& profile);
+// Type `GetPromptResult`. Members the protocol engine adds (`resultType`) are not written here.
+json to_wire(const PromptResult& result, const profile::Profile& profile);
 // Type `CallToolResult`, its content blocks as above. Members the protocol engine adds (such as `resultType`) are
 // not part of the model and are not written here.
 json to_wire(const ToolResult& result, const profile::Profile& profile);

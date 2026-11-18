@@ -56,12 +56,24 @@ struct KindParams {
     std::string name;
 };
 
+struct ReviewArgs {
+    std::string title;
+    std::optional<std::string> focus;
+};
+
+struct TwoArgs {
+    std::string arg1;
+    std::string arg2;
+};
+
 }  // namespace ft
 
 NEOMCP_DESCRIBE(ft::FileParams, path, "the path")
 NEOMCP_DESCRIBE(ft::ItemParams, id, "", verbose, "")
 NEOMCP_DESCRIBE(ft::SearchParams, q, "", limit, "")
 NEOMCP_DESCRIBE(ft::KindParams, kind, "", name, "")
+NEOMCP_DESCRIBE(ft::ReviewArgs, title, "what to review", focus, "what to look at")
+NEOMCP_DESCRIBE(ft::TwoArgs, arg1, "", arg2, "")
 
 namespace {
 
@@ -978,6 +990,296 @@ TEST(Concurrency, ReadsAreBoundedLikeToolCalls) {
     EXPECT_EQ(refused.at("error").at("data").at("reason"), "busy");
     release.set();
     ASSERT_TRUE(client.peer.await_response("hold", patience));
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Prompts
+
+// Prompt per revision (schema.json of each revision): title and _meta from 2025-06-18, icons from 2025-11-25.
+const std::map<std::string, std::set<std::string>> prompt_members{
+    {"2024-11-05", {"arguments", "description", "name"}},
+    {"2025-03-26", {"arguments", "description", "name"}},
+    {"2025-06-18", {"_meta", "arguments", "description", "name", "title"}},
+    {"2025-11-25", {"_meta", "arguments", "description", "icons", "name", "title"}},
+    {"2026-07-28", {"_meta", "arguments", "description", "icons", "name", "title"}},
+};
+
+TEST_P(PerRevision, ListedPromptsHaveExactlyTheRevisionsMembersAndTheArgumentsOfTheirType) {
+    const std::string revision = GetParam();
+    ASSERT_EQ(prompt_members.size(), profile::builtin_revisions().size());
+    neomcp::Server server(named("prompts"));
+    server.prompt<ft::ReviewArgs>("review", "Review a change",
+                                   [](const ft::ReviewArgs& args) { return "Review " + args.title; })
+        .title("Review")
+        .icons({an_icon()})
+        .meta(json{{"k", "v"}});
+    server.prompt("hello", "Say hello", [] { return std::string("Hello"); });
+
+    Client client(server, revision);
+    const json list = result_of(client.ask("prompts/list"));
+    expect_conforms(list, "ListPromptsResult", *client.revision);
+    ASSERT_EQ(list.at("prompts").size(), 2u);
+    const json& review = list.at("prompts").at(0);
+    EXPECT_EQ(keys(review), prompt_members.at(revision)) << review.dump();
+    expect_conforms(review, "Prompt", *client.revision);
+    EXPECT_EQ(review.at("name"), "review");
+    EXPECT_EQ(review.at("description"), "Review a change");
+    EXPECT_EQ(review.at("arguments"),
+              (json::array({json{{"name", "title"}, {"description", "what to review"}, {"required", true}},
+                            json{{"name", "focus"}, {"description", "what to look at"}, {"required", false}}})));
+    for (const auto& argument : *review.at("arguments").get_ptr<const json::array_t*>()) {
+        expect_conforms(argument, "PromptArgument", *client.revision);
+    }
+    const json& hello = list.at("prompts").at(1);
+    EXPECT_FALSE(hello.contains("arguments")) << "a prompt without arguments lists none";
+}
+
+TEST_P(PerRevision, GetReturnsTheMessagesOfEachResultType) {
+    const std::string revision = GetParam();
+    neomcp::Server server(named("prompts"));
+    server.prompt("text", "", [] { return std::string("Hello"); });
+    server.prompt("message", "", [] {
+        neomcp::PromptMessage message;
+        message.role = neomcp::Role::assistant;
+        neomcp::TextContent text;
+        text.text = "from the assistant";
+        message.content = text;
+        return message;
+    });
+    server.prompt("image", "", [] {
+        neomcp::ImageContent image;
+        image.data = "AAAA";
+        image.mime_type = "image/png";
+        neomcp::PromptMessage message;
+        message.content = image;
+        return std::vector<neomcp::PromptMessage>{message, message};
+    });
+    server.prompt("resource", "", [] {
+        neomcp::TextResourceContents contents;
+        contents.uri = "test://example-resource";
+        contents.text = "inside";
+        neomcp::EmbeddedResource embedded;
+        embedded.resource = contents;
+        neomcp::PromptMessage message;
+        message.content = embedded;
+        neomcp::PromptResult result;
+        result.description = "with a resource";
+        result.messages.push_back(message);
+        result.meta = json{{"k", "v"}};
+        return result;
+    });
+    server.prompt("audio", "", [] {
+        neomcp::AudioContent audio;
+        audio.data = "AAAA";
+        audio.mime_type = "audio/wav";
+        neomcp::PromptMessage message;
+        message.content = audio;
+        return message;
+    });
+
+    Client client(server, revision);
+    const auto get = [&](const std::string& name) {
+        const json answer = client.ask("prompts/get", json{{"name", name}});
+        EXPECT_TRUE(answer.contains("result")) << answer.dump();
+        expect_conforms(result_of(answer), "GetPromptResult", *client.revision);
+        return result_of(answer);
+    };
+
+    const json text = get("text");
+    ASSERT_EQ(text.at("messages").size(), 1u);
+    EXPECT_EQ(text.at("messages").at(0), (json{{"role", "user"}, {"content", {{"type", "text"}, {"text", "Hello"}}}}));
+    EXPECT_FALSE(text.contains("description"));
+
+    EXPECT_EQ(get("message").at("messages").at(0).at("role"), "assistant");
+
+    const json image = get("image");
+    ASSERT_EQ(image.at("messages").size(), 2u);
+    EXPECT_EQ(image.at("messages").at(1).at("content"),
+              (json{{"type", "image"}, {"data", "AAAA"}, {"mimeType", "image/png"}}));
+
+    const json resource = get("resource");
+    EXPECT_EQ(resource.at("description"), "with a resource");
+    EXPECT_EQ(resource.at("messages").at(0).at("content").at("type"), "resource");
+    EXPECT_EQ(resource.at("messages").at(0).at("content").at("resource").at("uri"), "test://example-resource");
+    // Every revision's result type has `_meta`.
+    EXPECT_EQ(resource.at("_meta").at("k"), "v");
+
+    // Audio exists from 2025-03-26; before it the block is written as text that says so.
+    const json audio = get("audio").at("messages").at(0).at("content");
+    EXPECT_EQ(audio.at("type"), revision == "2024-11-05" ? "text" : "audio");
+}
+
+TEST(Prompts, HandlerFormsAreCalled) {
+    neomcp::Server server(named("prompts"));
+    server.prompt("plain", "", [] { return std::string("plain"); });
+    server.prompt("context", "", [](neomcp::Context& context) { return std::string(context.revision()); });
+    server.prompt("coroutine", "", []() -> asio::awaitable<std::string> { co_return std::string("co"); });
+    server.prompt<ft::TwoArgs>("by-value", "", [](ft::TwoArgs args) { return args.arg1 + args.arg2; });
+    server.prompt<ft::TwoArgs>("with-context", "", [](const ft::TwoArgs& args, neomcp::Context& context) {
+        return args.arg1 + std::string(context.revision());
+    });
+    server.prompt<ft::TwoArgs>("co-args", "", [](const ft::TwoArgs& args) -> asio::awaitable<std::string> {
+        co_return args.arg2 + args.arg1;
+    });
+    server.prompt<ft::ReviewArgs>("optional", "", [](const ft::ReviewArgs& args) {
+        return args.title + (args.focus ? "/" + *args.focus : std::string("/none"));
+    });
+
+    Client client(server, modern_revision);
+    const auto text = [&](const std::string& name, json arguments = json::object()) {
+        const json answer = client.ask("prompts/get", json{{"name", name}, {"arguments", std::move(arguments)}});
+        EXPECT_TRUE(answer.contains("result")) << answer.dump();
+        return answer.contains("result")
+                   ? result_of(answer).at("messages").at(0).at("content").at("text").get<std::string>()
+                   : std::string();
+    };
+    EXPECT_EQ(text("plain"), "plain");
+    EXPECT_EQ(text("context"), modern_revision);
+    EXPECT_EQ(text("coroutine"), "co");
+    EXPECT_EQ(text("by-value", {{"arg1", "a"}, {"arg2", "b"}}), "ab");
+    EXPECT_EQ(text("with-context", {{"arg1", "a"}, {"arg2", "b"}}), std::string("a") + modern_revision);
+    EXPECT_EQ(text("co-args", {{"arg1", "a"}, {"arg2", "b"}}), "ba");
+    EXPECT_EQ(text("optional", {{"title", "t"}}), "t/none");
+    EXPECT_EQ(text("optional", {{"title", "t"}, {"focus", "f"}}), "t/f");
+    EXPECT_EQ(text("optional", {{"title", "t"}, {"unknown", "ignored"}}), "t/none");
+}
+
+TEST_P(PerRevision, UnknownPromptsAndBadArgumentsAreInvalidParams) {
+    neomcp::Server server(named("prompts"));
+    server.prompt<ft::ReviewArgs>("review", "", [](const ft::ReviewArgs&) { return std::string("x"); });
+    Client client(server, GetParam());
+
+    const auto code = [&](json params) { return error_code_of(client.ask("prompts/get", std::move(params))); };
+    EXPECT_EQ(code(json{{"name", "nonexistent"}}), -32602);
+    EXPECT_EQ(code(json{{"name", 5}}), -32602);
+    EXPECT_EQ(code(json{{"name", "review"}}), -32602) << "the required argument is missing";
+    EXPECT_EQ(code(json{{"name", "review"}, {"arguments", json::object()}}), -32602);
+    EXPECT_EQ(code(json{{"name", "review"}, {"arguments", {{"focus", "f"}}}}), -32602);
+    EXPECT_EQ(code(json{{"name", "review"}, {"arguments", json::array()}}), -32602);
+    EXPECT_EQ(code(json{{"name", "review"}, {"arguments", {{"title", 5}}}}), -32602) << "arguments are strings";
+    EXPECT_EQ(code(json{{"name", "review"}, {"arguments", {{"title", "t"}}}}), 0);
+
+    const json missing = client.ask("prompts/get", json{{"name", "review"}});
+    EXPECT_NE(missing.at("error").at("message").get<std::string>().find("title"), std::string::npos)
+        << "the message names the missing argument";
+    const json unknown = client.ask("prompts/get", json{{"name", "nonexistent"}});
+    EXPECT_NE(unknown.at("error").at("message").get<std::string>().find("nonexistent"), std::string::npos);
+}
+
+TEST_P(PerRevision, ThePromptsCapabilityIsDeclaredExactlyWhenAPromptIsRegistered) {
+    const std::string revision = GetParam();
+    {
+        neomcp::Server server(named("none"));
+        server.resource("a://x", "X", [] { return std::string(); });
+        Client client(server, revision);
+        EXPECT_FALSE(client.capabilities().contains("prompts")) << client.capabilities().dump();
+        EXPECT_EQ(error_code_of(client.ask("prompts/list")), -32601);
+        EXPECT_EQ(error_code_of(client.ask("prompts/get", json{{"name", "x"}})), -32601);
+    }
+    {
+        neomcp::Server server(named("prompt"));
+        server.prompt("p", "", [] { return std::string(); });
+        Client client(server, revision);
+        const json capabilities = client.capabilities();
+        ASSERT_TRUE(capabilities.contains("prompts")) << capabilities.dump();
+        EXPECT_FALSE(capabilities.at("prompts").contains("listChanged"));
+        EXPECT_FALSE(capabilities.contains(resources_capability));
+        EXPECT_EQ(error_code_of(client.ask("resources/list")), -32601);
+    }
+}
+
+TEST_P(PerRevision, PromptListsArePaged) {
+    neomcp::ServerOptions options = named("prompts");
+    options.prompts_page_size = 2;
+    neomcp::Server server(std::move(options));
+    for (int i = 0; i < 5; ++i) server.prompt("p" + std::to_string(i), "d", [] { return std::string(); });
+    Client client(server, GetParam());
+    std::vector<std::string> seen;
+    json params = json::object();
+    for (int pages = 0; pages < 10; ++pages) {
+        const json page = result_of(client.ask("prompts/list", params));
+        for (const auto& prompt : *page.at("prompts").get_ptr<const json::array_t*>()) {
+            seen.push_back(prompt.at("name").get<std::string>());
+        }
+        if (!page.contains("nextCursor")) break;
+        params = json{{"cursor", page.at("nextCursor")}};
+    }
+    EXPECT_EQ(seen, (std::vector<std::string>{"p0", "p1", "p2", "p3", "p4"}));
+    EXPECT_EQ(error_code_of(client.ask("prompts/list", json{{"cursor", "7"}})), -32602);
+    EXPECT_EQ(error_code_of(client.ask("prompts/list", json{{"cursor", "x"}})), -32602);
+}
+
+TEST(Prompts, ResultsOf20260728CarryWhatTheirSchemasRequire) {
+    neomcp::ServerOptions options = named("prompts");
+    options.prompts_cache = neomcp::CacheHints{4000, neomcp::CacheScope::public_scope};
+    neomcp::Server server(std::move(options));
+    server.prompt("p", "d", [] { return std::string("x"); });
+    Client client(server, modern_revision);
+    const json list = result_of(client.ask("prompts/list"));
+    expect_conforms(list, "ListPromptsResult", *client.revision);
+    EXPECT_EQ(list.at("resultType"), "complete");
+    EXPECT_EQ(list.at("ttlMs"), 4000);
+    EXPECT_EQ(list.at("cacheScope"), "public");
+    const json got = result_of(client.ask("prompts/get", json{{"name", "p"}}));
+    expect_conforms(got, "GetPromptResult", *client.revision);
+    EXPECT_EQ(got.at("resultType"), "complete");
+}
+
+TEST(Prompts, RegistrationRefusalsNameThePrompt) {
+    neomcp::Server server(named("prompts"));
+    const auto handle = server.prompt("p", "d", [] { return std::string(); });
+    EXPECT_EQ(handle.name(), "p");
+    EXPECT_THROW(handle.meta(json::array()), std::invalid_argument);
+    try {
+        server.prompt("p", "again", [] { return std::string(); });
+        ADD_FAILURE() << "a duplicate name is refused";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find("'p'"), std::string::npos) << error.what();
+    }
+    EXPECT_THROW(server.prompt("", "d", [] { return std::string(); }), std::invalid_argument);
+    Client client(server, modern_revision);
+    static_cast<void>(client.ask("prompts/list"));
+    EXPECT_THROW(handle.title("late"), std::logic_error);
+    EXPECT_THROW(server.prompt("late", "d", [] { return std::string(); }), std::logic_error);
+
+    neomcp::ServerOptions options = named("zero");
+    options.prompts_page_size = 0;
+    EXPECT_THROW(neomcp::Server{std::move(options)}, std::invalid_argument);
+}
+
+TEST(Prompts, ACancelledGetSeesStopAndTwoRunAtOnce) {
+    Event entered;
+    Event observed;
+    Meeting meeting(2);
+    std::atomic<int> failures{0};
+    neomcp::Server server(named("prompts"));
+    server.prompt("wait", "d", [&](neomcp::Context& context) {
+        entered.set();
+        Event never;
+        static_cast<void>(never.wait(context.stop_token()));
+        if (context.cancelled()) observed.set();
+        return std::string("late");
+    });
+    server.prompt("meet-a", "d", [&] {
+        if (!meeting.arrive(patience)) ++failures;
+        return std::string("a");
+    });
+    server.prompt<ft::TwoArgs>("meet-b", "d", [&](const ft::TwoArgs&) -> asio::awaitable<std::string> {
+        if (!meeting.arrive(patience)) ++failures;
+        co_return std::string("b");
+    });
+    Client client(server, modern_revision);
+    client.peer.notify(client.message("c1", "prompts/get", json{{"name", "wait"}}));
+    ASSERT_TRUE(entered.wait(patience));
+    client.peer.notify(cancelled("c1"));
+    EXPECT_TRUE(observed.wait(patience));
+
+    client.peer.notify(client.message("a", "prompts/get", json{{"name", "meet-a"}}));
+    client.peer.notify(client.message("b", "prompts/get",
+                                      json{{"name", "meet-b"}, {"arguments", {{"arg1", "1"}, {"arg2", "2"}}}}));
+    ASSERT_TRUE(client.peer.await_response("a", patience));
+    ASSERT_TRUE(client.peer.await_response("b", patience));
+    EXPECT_EQ(failures.load(), 0);
 }
 
 }  // namespace

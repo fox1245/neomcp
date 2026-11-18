@@ -194,7 +194,7 @@ struct Place {
 };
 
 // What a call in flight is for; it decides which outcomes may complete it.
-enum class CallKind { tool, resource_read };
+enum class CallKind { tool, resource_read, prompt_get };
 
 struct CallState {
     std::weak_ptr<SessionCore> core;
@@ -305,6 +305,8 @@ private:
     std::optional<Answer> on_resources_list(Message& request, const Served& served, Origin&, const Place&);
     std::optional<Answer> on_resource_templates_list(Message& request, const Served& served, Origin&, const Place&);
     std::optional<Answer> on_resources_read(Message& request, const Served& served, Origin& origin, const Place& place);
+    std::optional<Answer> on_prompts_list(Message& request, const Served& served, Origin&, const Place&);
+    std::optional<Answer> on_prompts_get(Message& request, const Served& served, Origin& origin, const Place& place);
     std::optional<Answer> on_set_level(Message& request, const Served& served, Origin& origin, const Place&);
     static const std::map<std::string, Handler, std::less<>>& handlers();
 
@@ -921,6 +923,8 @@ const std::map<std::string, SessionCore::Handler, std::less<>>& SessionCore::han
         {"resources/list", &SessionCore::on_resources_list},
         {"resources/templates/list", &SessionCore::on_resource_templates_list},
         {"resources/read", &SessionCore::on_resources_read},
+        {"prompts/list", &SessionCore::on_prompts_list},
+        {"prompts/get", &SessionCore::on_prompts_get},
         {std::string(set_level_method), &SessionCore::on_set_level},
     };
     return table;
@@ -1126,7 +1130,7 @@ std::optional<Answer> SessionCore::on_resources_list(Message& request, const Ser
     ListSettings settings;
     try {
         resources = host->resources();
-        settings = host->list_settings();
+        settings = host->resource_list_settings();
     } catch (...) {
         return served_answer(
             make_error(*request.id, error_code::internal_error, "Internal error: the resources could not be listed"), served);
@@ -1148,7 +1152,7 @@ std::optional<Answer> SessionCore::on_resource_templates_list(Message& request, 
     ListSettings settings;
     try {
         templates = host->resource_templates();
-        settings = host->list_settings();
+        settings = host->resource_list_settings();
     } catch (...) {
         return served_answer(make_error(*request.id, error_code::internal_error,
                                         "Internal error: the resource templates could not be listed"),
@@ -1185,6 +1189,78 @@ std::optional<Answer> SessionCore::on_resources_read(Message& request, const Ser
     if (const json* meta = member(request.params, "_meta")) read.meta = *meta;
     try {
         host->read(read, CallControl(call), Completion(std::make_shared<CompletionState>(call)));
+    } catch (...) {
+        // The completion answers with an internal error once its last copy is gone.
+    }
+    return std::nullopt;
+}
+
+std::optional<Answer> SessionCore::on_prompts_list(Message& request, const Served& served, Origin&, const Place&) {
+    PromptHost* host = host_.prompt_host();
+    if (host == nullptr) return method_not_found(request, served);
+    std::span<const PromptDefinition> prompts;
+    ListSettings settings;
+    try {
+        prompts = host->prompts();
+        settings = host->prompt_list_settings();
+    } catch (...) {
+        return served_answer(
+            make_error(*request.id, error_code::internal_error, "Internal error: the prompts could not be listed"), served);
+    }
+    auto page = page_of(request, served, prompts.size(), settings.page_size);
+    if (auto* refusal = std::get_if<Answer>(&page)) return std::move(*refusal);
+    const auto [start, count] = std::get<Page>(page);
+    json list = json::array();
+    for (std::size_t i = start; i < start + count; ++i) list.push_back(to_wire(prompts[i], *served.profile));
+    return list_answer(request, served, "prompts", std::move(list), start + count, prompts.size(), "ListPromptsResult",
+                       settings.cache);
+}
+
+std::optional<Answer> SessionCore::on_prompts_get(Message& request, const Served& served, Origin& origin,
+                                                  const Place& place) {
+    PromptHost* host = host_.prompt_host();
+    if (host == nullptr) return method_not_found(request, served);
+    const RequestId& id = *request.id;
+    const auto invalid = [&](std::string message) {
+        return served_answer(make_error(id, error_code::invalid_params, "Invalid params: " + message), served);
+    };
+    const json* name = member(request.params, "name");
+    const auto* prompt_name = name == nullptr ? nullptr : name->get_ptr<const std::string*>();
+    if (prompt_name == nullptr) return invalid("params.name must be a string");
+    PromptRequest get;
+    get.name = *prompt_name;
+    if (const json* given = member(request.params, "arguments")) {
+        const auto* members = given->get_ptr<const json::object_t*>();
+        if (members == nullptr) return invalid("params.arguments must be an object");
+        for (const auto& [argument, value] : *members) {
+            const auto* text = value.get_ptr<const std::string*>();
+            if (text == nullptr) return invalid("params.arguments." + argument + " must be a string");
+            get.arguments.emplace(argument, *text);
+        }
+    }
+    std::span<const PromptDefinition> prompts;
+    try {
+        prompts = host->prompts();
+    } catch (...) {
+        return served_answer(
+            make_error(id, error_code::internal_error, "Internal error: the prompts could not be listed"), served);
+    }
+    const auto prompt = std::find_if(prompts.begin(), prompts.end(),
+                                     [&](const PromptDefinition& definition) { return definition.name == get.name; });
+    if (prompt == prompts.end()) return invalid("unknown prompt: " + get.name);
+    for (const auto& argument : prompt->arguments) {
+        if (argument.required && get.arguments.find(argument.name) == get.arguments.end()) {
+            return invalid("missing required argument: " + argument.name);
+        }
+    }
+    auto token = progress_token_of(request, served);
+    if (auto* refusal = std::get_if<Answer>(&token)) return std::move(*refusal);
+
+    auto call = begin_call(CallKind::prompt_get, id, served, origin, place, std::move(std::get<json>(token)));
+    if (!call) return std::nullopt;
+    if (const json* meta = member(request.params, "_meta")) get.meta = *meta;
+    try {
+        host->get(get, CallControl(call), Completion(std::make_shared<CompletionState>(call)));
     } catch (...) {
         // The completion answers with an internal error once its last copy is gone.
     }
@@ -1321,6 +1397,7 @@ json SessionCore::capabilities(const profile::Profile& profile) const {
     capabilities["tools"] = std::move(tools);
     if (options_.protocol_logging) capabilities["logging"] = json::object();
     if (host_.resource_host() != nullptr) capabilities["resources"] = json::object();
+    if (host_.prompt_host() != nullptr) capabilities["prompts"] = json::object();
     keep_members(capabilities, "ServerCapabilities", profile);
     return capabilities;
 }
@@ -1392,6 +1469,14 @@ void SessionCore::complete(const std::shared_ptr<CallState>& call, FeatureOutcom
         } else {
             json body = to_wire(*result, profile);
             finish_result(body, "ReadResourceResult", profile, result->cache.value_or(CacheHints{}));
+            response = make_result(call->id, std::move(body));
+        }
+    } else if (const auto* prompt = std::get_if<PromptResult>(&outcome)) {
+        if (call->kind != CallKind::prompt_get) {
+            response = wrong_kind();
+        } else {
+            json body = to_wire(*prompt, profile);
+            finish_result(body, "GetPromptResult", profile);
             response = make_result(call->id, std::move(body));
         }
     } else if (const auto* missing = std::get_if<NotFound>(&outcome)) {
