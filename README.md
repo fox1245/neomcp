@@ -26,13 +26,14 @@ What exists now:
   five revisions, 2024-11-05 to 2026-07-28.
 - Tools declared from C++ types: the input and output schemas are derived from the types, and arguments are checked
   against the schema before the handler runs.
+- Resources, resource templates (RFC 6570), prompts and argument completion declared from C++ types, served for
+  every revision with the members and the caching hints each revision defines.
 - A stdio server that speaks both eras of the protocol, the handshake of the older revisions and the per-request form
   of 2026-07-28, to the same program.
 
 Still planned:
 
 - Streamable HTTP.
-- Resources and prompts declared from C++ types.
 - The client.
 
 ## Build
