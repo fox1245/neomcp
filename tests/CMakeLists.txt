@@ -105,6 +105,12 @@ if(NEOMCP_INTEROP_TESTS)
     set_tests_properties(interop_stdio_python_sdk PROPERTIES
         ENVIRONMENT "NEOMCP_STDIO_FIXTURE=$<TARGET_FILE:neomcp_stdio_fixture>"
         TIMEOUT 300)
+    # The same client over Streamable HTTP, in both eras against one server process.
+    add_test(NAME interop_http_python_sdk
+        COMMAND "${NEOMCP_INTEROP_PYTHON}" -I "${CMAKE_CURRENT_SOURCE_DIR}/interop/test_http_interop.py")
+    set_tests_properties(interop_http_python_sdk PROPERTIES
+        ENVIRONMENT "NEOMCP_HTTP_FIXTURE=$<TARGET_FILE:neomcp_conformance_fixture>"
+        TIMEOUT 300)
 endif()
 
 # ---- The HTTP building blocks ----------------------------------------------------------------------------------------

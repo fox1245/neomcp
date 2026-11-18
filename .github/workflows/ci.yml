@@ -2,8 +2,8 @@ name: CI
 
 # Every push and pull request builds and tests on Linux x64 (GCC and Clang) and Linux arm64, with AddressSanitizer
 # and UndefinedBehaviorSanitizer. macOS (arm64 and x64) and Windows (x64 and arm64) run on pushes to main and on
-# demand, and on every event once the repository is public. One more job runs the stdio server against the official
-# Python SDK's client, and one runs the official conformance suite against the HTTP server, once per revision.
+# demand, and on every event once the repository is public. One more job runs the stdio and HTTP servers against the
+# official Python SDK's client, and one runs the official conformance suite against the HTTP server, once per revision.
 
 on:
   push:

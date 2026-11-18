@@ -55,8 +55,8 @@ ctest --test-dir build --output-on-failure
 Options: `NEOMCP_BUILD_TESTS` (default ON when neomcp is the top-level project) and `NEOMCP_WARNINGS_AS_ERRORS`
 (default OFF). Every `profiles/*.json` is built into the library.
 
-`NEOMCP_INTEROP_TESTS` (default OFF) adds a test that drives a stdio server with the official Python SDK's client.
-Install `tests/interop/requirements.txt` into a Python environment and pass its interpreter as
+`NEOMCP_INTEROP_TESTS` (default OFF) adds tests that drive a stdio server and an HTTP server with the official
+Python SDK's client. Install `tests/interop/requirements.txt` into a Python environment and pass its interpreter as
 `NEOMCP_INTEROP_PYTHON`.
 
 ## A first server
