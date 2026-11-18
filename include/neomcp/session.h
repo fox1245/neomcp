@@ -33,6 +33,10 @@ class SessionCore;
 
 // Receives each outgoing message serialised on one line, without the line terminator. It is called by one thread
 // at a time, never re-entrantly, and never while the session holds a lock; it may call into the session.
+//
+// A sink that throws closes the session. The exception propagates out of Session::receive when the thread that
+// reads was writing, including through a tool that completed or reported inline during receive(). A tool's own
+// thread writing through a Completion or a CallControl never sees it: the sink's owner knows its write failed.
 using Sink = std::function<void(std::string line)>;
 
 // Checks tool arguments against the tool's input schema: a message when they fail it, empty when they pass.
@@ -101,7 +105,8 @@ public:
     // Closes the session.
     ~Session();
 
-    // One input line. Called by one thread at a time. Ignored after close().
+    // One input line. Called by one thread at a time. Ignored after close(). Throws what the sink threw when this
+    // thread was writing (the session is closed then).
     void receive(std::string_view line);
 
     // Requests stop on every call in flight and drops everything not yet written. When it returns, nothing is

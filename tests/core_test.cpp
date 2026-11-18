@@ -1485,6 +1485,98 @@ TEST(Close, FromInsideTheSink) {
     EXPECT_EQ(lines.size(), 1u);
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// A sink that fails
+
+// Throws instead of writing the line it was told to fail on.
+struct FailingSink {
+    void write(std::string line) {
+        const std::lock_guard<std::mutex> lock(mutex);
+        ++attempts;
+        if (attempts == fail_at) throw std::runtime_error("the transport failed");
+        lines.push_back(json::parse(line));
+    }
+    void fail_on_next() {
+        const std::lock_guard<std::mutex> lock(mutex);
+        fail_at = attempts + 1;
+    }
+    std::size_t tried() {
+        const std::lock_guard<std::mutex> lock(mutex);
+        return attempts;
+    }
+
+    std::mutex mutex;
+    std::size_t attempts = 0;
+    std::size_t fail_at = 0;  // 0: never
+    std::vector<json> lines;
+};
+
+std::unique_ptr<neomcp::Session> session_writing_to(FakeHost& host, FailingSink& sink) {
+    auto made = neomcp::Session::create(test_options(), host, [&sink](std::string line) { sink.write(std::move(line)); });
+    if (!std::holds_alternative<std::unique_ptr<neomcp::Session>>(made)) throw std::logic_error("no session");
+    return std::move(std::get<std::unique_ptr<neomcp::Session>>(made));
+}
+
+std::string modern_line(const std::string& id, const std::string& method, json params = json::object()) {
+    return neomcp::serialize(Peer::make_request(*builtin(modern_revision), id, method, std::move(params)));
+}
+
+TEST(SinkFailure, TheReadingThreadGetsItAndTheSessionCloses) {
+    FakeHost host;
+    FailingSink sink;
+    auto session = session_writing_to(host, sink);
+    session->receive(modern_line("1", "server/discover"));
+    sink.fail_on_next();
+    EXPECT_THROW(session->receive(modern_line("2", "server/discover")), std::runtime_error);
+    EXPECT_NO_THROW(session->receive(modern_line("3", "server/discover")));
+    EXPECT_EQ(sink.tried(), 2u) << "nothing is written after the failure";
+}
+
+TEST(SinkFailure, AToolCompletingInlineDuringReceiveLeavesItToReceive) {
+    FakeHost host;
+    FailingSink sink;
+    auto session = session_writing_to(host, sink);
+    sink.fail_on_next();
+    EXPECT_THROW(session->receive(modern_line("1", "tools/call", {{"name", "echo"}})), std::runtime_error);
+    EXPECT_NO_THROW(session->receive(modern_line("2", "server/discover")));
+    EXPECT_EQ(sink.tried(), 1u);
+}
+
+// A tool's thread completes or reports while the sink fails: nothing reaches that thread, and the session closes.
+void expect_tool_thread_is_spared(bool through_progress) {
+    FakeHost host;
+    FailingSink sink;
+    auto session = session_writing_to(host, sink);
+    session->receive(modern_line("a", "tools/call", {{"name", "gated"}, {"_meta", {{"progressToken", "ta"}}}}));
+    session->receive(modern_line("b", "tools/call", {{"name", "gated"}}));
+    auto a = host.wait_parked(patience);
+    auto b = host.wait_parked(patience);
+    ASSERT_TRUE(a && b);
+    sink.fail_on_next();
+    bool escaped = false;
+    std::thread tool([call = *a, through_progress, &escaped] {
+        try {
+            if (through_progress) {
+                call.control.progress(1);
+            } else {
+                call.done(text_result("a"));
+            }
+        } catch (...) {
+            escaped = true;
+        }
+    });
+    tool.join();
+    EXPECT_FALSE(escaped) << "the sink's exception reached the tool's thread";
+    EXPECT_EQ(sink.tried(), 1u);
+    EXPECT_TRUE(b->control.stop_token().stop_requested()) << "the session closed itself";
+    EXPECT_NO_THROW(session->receive(modern_line("c", "server/discover")));
+    EXPECT_NO_THROW(b->done(text_result("b")));
+    EXPECT_EQ(sink.tried(), 1u) << "nothing is written after the failure";
+}
+
+TEST(SinkFailure, ACompletionOnAToolThreadIsSpared) { expect_tool_thread_is_spared(false); }
+TEST(SinkFailure, ProgressOnAToolThreadIsSpared) { expect_tool_thread_is_spared(true); }
+
 TEST(Close, HandlesOutliveTheSession) {
     FakeHost host;
     std::optional<FakeHost::Parked> parked;

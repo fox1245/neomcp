@@ -45,6 +45,8 @@ public:
     // Stop is requested when the client cancels the call or the session closes.
     std::stop_token stop_token() const noexcept;
 
+    // Neither progress() nor log() throws what the session's sink throws; a failing sink closes the session.
+    //
     // Sends a progress notification when the request asked for progress; a value that is not finite or not greater
     // than the last one sent is dropped, and so is anything after the call completed or was cancelled.
     void progress(double progress, std::optional<double> total = std::nullopt,
@@ -65,7 +67,8 @@ private:
 };
 
 // Completes one call. Copies share one completion: the first call counts and later ones are ignored. When the
-// last copy is destroyed without having been called, the call is answered with an internal error.
+// last copy is destroyed without having been called, the call is answered with an internal error. Completing never
+// throws what the session's sink throws: a failing sink closes the session, and the tool's thread goes on.
 class Completion {
 public:
     void operator()(CallOutcome outcome) const;

@@ -13,6 +13,10 @@
 //   a cancellation is received nothing more is written for that request, even what was queued before it.
 // - close() marks the session closed, empties the queue, takes the calls in flight, releases the mutex, requests
 //   stop on them, and then waits until no other thread is inside the sink.
+// - A sink that throws closes the session. The exception goes only to the thread that reads: out of receive() when
+//   that thread was writing, also when it wrote through a Completion or CallControl a tool used inline during
+//   receive() (the exception is held and rethrown after the tool's frames are left). A tool's own thread that was
+//   writing through a Completion or CallControl never sees it: the transport that owns the sink knows already.
 #include "neomcp/session.h"
 
 #include <algorithm>
@@ -157,7 +161,11 @@ private:
     using Handler = std::optional<json> (SessionCore::*)(Message&, const Served&, Origin&, const Batch&,
                                                          std::size_t);
 
+    // How the thread that writes got there: reading input, or through a handle a tool holds.
+    enum class Writer { reader, host };
+
     // ---- input
+    void read(std::string_view line);
     void receive_array(json value);
     std::optional<json> handle(json value, const Batch& batch, std::size_t index);
     void on_notification(const Message& notification);
@@ -184,12 +192,12 @@ private:
     json call_result(const ToolResult& result, const profile::Profile& profile) const;
     void cancel(const RequestId& id, const CancelMechanism& mechanism, const std::string& method);
     void finish_call(const std::shared_ptr<CallState>& call, json response);
-    void emit_batch(const Batch& batch);
+    void emit_batch(const Batch& batch, Writer writer);
 
     // ---- output
-    void emit(Output output);
+    void emit(Output output, Writer writer);
     void emit_error(int code, std::string message);
-    void drain(std::unique_lock<std::mutex>& lock);
+    void drain(std::unique_lock<std::mutex>& lock, Writer writer);
 
     // Immutable after create().
     SessionOptions options_;
@@ -211,6 +219,8 @@ private:
     bool closed_ = false;
     std::map<RequestId, std::shared_ptr<CallState>> in_flight_;
     std::optional<Connection> connection_;
+    std::thread::id reading_thread_;   // the thread inside receive(), while it is there
+    std::exception_ptr reader_failure_;  // a sink failure the reading thread met through a tool's handle
 };
 
 CompletionState::~CompletionState() {
@@ -338,7 +348,24 @@ void SessionCore::receive(std::string_view line) {
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         if (closed_) return;
+        reading_thread_ = std::this_thread::get_id();
     }
+    std::exception_ptr failure;
+    try {
+        read(line);
+    } catch (...) {
+        failure = std::current_exception();
+    }
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        reading_thread_ = std::thread::id();
+        std::exception_ptr held = std::exchange(reader_failure_, nullptr);
+        if (!failure) failure = std::move(held);
+    }
+    if (failure) std::rethrow_exception(failure);
+}
+
+void SessionCore::read(std::string_view line) {
     if (line.size() > options_.max_message_bytes) {
         emit_error(error_code::invalid_request, "Invalid Request: the message is longer than " +
                                                     std::to_string(options_.max_message_bytes) + " bytes");
@@ -358,7 +385,7 @@ void SessionCore::receive(std::string_view line) {
         receive_array(std::move(value));
         return;
     }
-    if (auto answer = handle(std::move(value), nullptr, 0)) emit(Output{serialize(*answer), nullptr});
+    if (auto answer = handle(std::move(value), nullptr, 0)) emit(Output{serialize(*answer), nullptr}, Writer::reader);
 }
 
 void SessionCore::receive_array(json value) {
@@ -391,7 +418,7 @@ void SessionCore::receive_array(json value) {
         batch->reading = false;
         finished = batch->outstanding == 0;
     }
-    if (finished) emit_batch(batch);
+    if (finished) emit_batch(batch, Writer::reader);
 }
 
 std::optional<json> SessionCore::handle(json value, const Batch& batch, std::size_t index) {
@@ -825,10 +852,10 @@ void SessionCore::finish_call(const std::shared_ptr<CallState>& call, json respo
         batch_finished = --call->batch->outstanding == 0 && !call->batch->reading;
     } else {
         queue_.push_back(Output{std::move(line), call});
-        drain(lock);
+        drain(lock, Writer::host);
     }
     lock.unlock();
-    if (batch_finished) emit_batch(call->batch);
+    if (batch_finished) emit_batch(call->batch, Writer::host);
 }
 
 void SessionCore::cancel(const RequestId& id, const CancelMechanism& mechanism, const std::string& method) {
@@ -850,10 +877,10 @@ void SessionCore::cancel(const RequestId& id, const CancelMechanism& mechanism, 
         if (call->batch) batch_finished = --call->batch->outstanding == 0 && !call->batch->reading;
     }
     call->stop.request_stop();
-    if (batch_finished) emit_batch(call->batch);
+    if (batch_finished) emit_batch(call->batch, Writer::reader);
 }
 
-void SessionCore::emit_batch(const Batch& batch) {
+void SessionCore::emit_batch(const Batch& batch, Writer writer) {
     std::vector<json> responses;
     {
         const std::lock_guard<std::mutex> lock(mutex_);
@@ -863,7 +890,9 @@ void SessionCore::emit_batch(const Batch& batch) {
         }
         batch->responses.clear();
     }
-    if (auto answer = batch->mechanism->assemble(std::move(responses))) emit(Output{serialize(*answer), nullptr});
+    if (auto answer = batch->mechanism->assemble(std::move(responses))) {
+        emit(Output{serialize(*answer), nullptr}, writer);
+    }
 }
 
 void SessionCore::progress(const std::shared_ptr<CallState>& call, double value, std::optional<double> total,
@@ -885,7 +914,7 @@ void SessionCore::progress(const std::shared_ptr<CallState>& call, double value,
     if (call->last_progress && !(value > *call->last_progress)) return;
     call->last_progress = value;
     queue_.push_back(Output{std::move(line), call});
-    drain(lock);
+    drain(lock, Writer::host);
 }
 
 void SessionCore::log(const std::shared_ptr<CallState>& call, LogLevel level, json data,
@@ -907,24 +936,24 @@ void SessionCore::log(const std::shared_ptr<CallState>& call, LogLevel level, js
     if (call->follows_connection_level && connection_) threshold = connection_->log_level;
     if (!threshold || level < *threshold) return;
     queue_.push_back(Output{std::move(line), call});
-    drain(lock);
+    drain(lock, Writer::host);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
 // Output
 
-void SessionCore::emit(Output output) {
+void SessionCore::emit(Output output, Writer writer) {
     std::unique_lock<std::mutex> lock(mutex_);
     if (closed_) return;
     queue_.push_back(std::move(output));
-    drain(lock);
+    drain(lock, writer);
 }
 
 void SessionCore::emit_error(int code, std::string message) {
-    emit(Output{serialize(make_error(std::nullopt, code, std::move(message))), nullptr});
+    emit(Output{serialize(make_error(std::nullopt, code, std::move(message))), nullptr}, Writer::reader);
 }
 
-void SessionCore::drain(std::unique_lock<std::mutex>& lock) {
+void SessionCore::drain(std::unique_lock<std::mutex>& lock, Writer writer) {
     if (draining_) return;  // the thread that drains writes this output too
     draining_ = true;
     drainer_ = std::this_thread::get_id();
@@ -950,7 +979,9 @@ void SessionCore::drain(std::unique_lock<std::mutex>& lock) {
         lock.unlock();
         close();
         lock.lock();
-        std::rethrow_exception(failure);
+        if (writer == Writer::reader) std::rethrow_exception(failure);
+        // Through a tool's handle: the reading thread gets it when receive() returns; a tool's thread never does.
+        if (reading_thread_ == std::this_thread::get_id() && !reader_failure_) reader_failure_ = failure;
     }
 }
 
