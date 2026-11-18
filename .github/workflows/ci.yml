@@ -1,0 +1,69 @@
+name: CI
+
+# Every push and pull request builds and tests on Linux x64 (GCC and Clang) and Linux arm64, with AddressSanitizer
+# and UndefinedBehaviorSanitizer. macOS (arm64 and x64) and Windows (x64 and arm64) run on pushes to main and on
+# demand, and on every event once the repository is public.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  linux:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64-gcc, runner: ubuntu-24.04, cc: gcc, cxx: g++ }
+          - { name: linux-x64-clang, runner: ubuntu-24.04, cc: clang, cxx: clang++ }
+          - { name: linux-arm64-gcc, runner: ubuntu-24.04-arm, cc: gcc, cxx: g++ }
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+      SANITIZE: -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Configure (Debug, sanitizers)
+        run: >-
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DNEOMCP_WARNINGS_AS_ERRORS=ON
+          "-DCMAKE_C_FLAGS=$SANITIZE" "-DCMAKE_CXX_FLAGS=$SANITIZE"
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --timeout 300
+
+  other-platforms:
+    name: ${{ matrix.name }}
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event.repository.private == false
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macos-arm64, runner: macos-15 }
+          - { name: macos-x64, runner: macos-15-intel }
+          - { name: windows-x64-msvc, runner: windows-2022 }
+          - { name: windows-arm64-msvc, runner: windows-11-arm }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure --timeout 300
