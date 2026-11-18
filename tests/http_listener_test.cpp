@@ -638,7 +638,7 @@ TEST(HttpListener, StopEndsEveryOpenStreamAndReturnsWithinABound) {
     ListenerOptions options = defaults();
     options.worker_threads = streams;
     options.max_worker_threads = streams;
-    options.disconnect_poll_interval = 25ms;
+    options.disconnect_poll_interval = 10s;  // stop() must not wait for a worker's next look at its stream
     StreamHost host;
     auto server = run(options, host.handler());
 
