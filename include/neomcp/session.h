@@ -77,8 +77,8 @@ std::string_view to_string(RefusalReason reason) noexcept;
 // Every input unit ends exactly once: with its answer (the response, or for a batch the batch's answer), whose
 // `last` is set, or with an output of kind `end` when no answer will come: its request was cancelled, the session
 // closed while the unit was open, or it held only notifications and responses. Nothing of a unit follows its last
-// output. A unit fed after close() gets nothing, and so does every unit still open when the sink threw or when close()
-// was called from inside the sink.
+// output. A unit the transport abandoned gets nothing more, its end included (Session::abandon); so does a unit fed
+// after close(), and every unit still open when the sink threw or when close() was called from inside the sink.
 struct Output {
     std::string line;            // the message on one line, without the line terminator; empty for kind `end`
     std::optional<UnitId> unit;  // the unit it belongs to; empty when it belongs to the connection
@@ -205,6 +205,14 @@ public:
     // been written already, and a request that is cancelled later ends the unit without one), false when it holds
     // only notifications and responses. After close() the input is ignored and false returned.
     bool receive(UnitId unit, std::string_view input);
+
+    // The transport lost the stream that carried the unit's outputs. The cancellation mechanism of the profile each
+    // of the unit's calls is served under decides what happens to the call: it is stopped when the mechanism says a
+    // closed stream cancels it, else it runs on. Either way nothing more of the unit is written, its end included.
+    // When abandon() returns no output of the unit is being written and none will be: it waits for a sink call
+    // writing one on another thread (but not on its own thread, when called from inside the sink). An unknown or
+    // ended unit is ignored.
+    void abandon(UnitId unit);
 
     // Requests stop on every call in flight and drops everything not yet written; each unit still open ends with an
     // output of kind `end`, written before close() returns. When it returns, nothing is being written and nothing

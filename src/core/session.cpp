@@ -17,6 +17,10 @@
 //   its end marker). The thread that queues the last output marks the unit finished under the mutex, and nothing
 //   more is queued for a finished unit, so a unit gets exactly one last output; the paths that can end a unit (an
 //   answer, a cancellation, the assembly of a batch, a unit that needs no answer) each queue it under that rule.
+// - abandon() marks the unit abandoned and lets it go: nothing more is queued for it, the drainer skips what is
+//   queued, and the calls whose cancellation mechanism takes a closed stream for a cancellation are stopped as a
+//   cancellation would stop them. The drainer records which unit it is writing while it is inside the sink, and
+//   abandon() waits until that is no longer the abandoned unit, unless the drainer is the thread calling it.
 // - close() marks the session closed, empties the queue, takes the calls in flight, and queues an end marker for
 //   every unit still open, since the queue no longer holds their last outputs. It releases the mutex, requests stop
 //   on the calls, waits until no other thread is inside the sink and writes the end markers itself unless another
@@ -144,6 +148,7 @@ struct UnitState {
     // Guarded by the core's mutex.
     profile::ProfilePtr profile;  // the profile its calls are served under, once one is known
     bool finished = false;        // its last output was queued
+    bool abandoned = false;       // the transport let it go: nothing more is written for it
 };
 
 using Unit = std::shared_ptr<UnitState>;
@@ -224,6 +229,7 @@ public:
 
     // `unit` empty: the input belongs to no unit.
     bool receive(std::optional<UnitId> unit, std::string_view input);
+    void abandon(UnitId unit);
     void close();
     bool idle() const;
     profile::ProfilePtr connection_profile() const;
@@ -318,6 +324,8 @@ private:
     bool broken_ = false;  // the sink threw; it is not called again
     std::map<RequestId, std::shared_ptr<CallState>> in_flight_;
     std::map<UnitId, Unit> units_;     // the units still open
+    const UnitState* writing_ = nullptr;  // the unit whose output the drainer is writing; null when none
+    std::size_t abandoning_ = 0;       // threads in abandon() waiting for a write to end
     std::size_t pending_batches_ = 0;  // batches read whose answer was not handed to the queue yet
     std::optional<Connection> connection_;
     std::thread::id reading_thread_;   // the thread inside receive(), while it is there
@@ -915,6 +923,8 @@ std::optional<Answer> SessionCore::on_tools_call(Message& request, const Served&
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         if (closed_) return std::nullopt;
+        // A unit abandoned while it was read: when a closed stream cancels the call, it is not started.
+        if (place.unit && place.unit->abandoned && served.cancel->stops_on_stream_close()) return std::nullopt;
         if (place.unit && !place.batch) place.unit->profile = served.profile;
         in_flight_.emplace(id, call);
         if (place.batch) ++place.batch->outstanding;
@@ -1180,7 +1190,7 @@ bool SessionCore::enqueue(Queued queued) {
     if (closed_) return false;
     if (queued.unit) {
         UnitState& unit = *queued.unit;
-        if (unit.finished) return false;  // nothing follows the last output of a unit
+        if (unit.finished || unit.abandoned) return false;  // nothing follows the last output of a unit
         queued.output.unit = unit.id;
         if (queued.output.last) unit.finished = true;
     }
@@ -1241,6 +1251,8 @@ void SessionCore::drain(std::unique_lock<std::mutex>& lock, Writer writer) {
             if (open != units_.end() && open->second == queued.unit) units_.erase(open);
         }
         if (queued.owner && queued.owner->cancelled) continue;
+        if (queued.unit && queued.unit->abandoned) continue;
+        writing_ = queued.unit.get();
         lock.unlock();
         try {
             sink_(std::move(queued.output));
@@ -1248,6 +1260,8 @@ void SessionCore::drain(std::unique_lock<std::mutex>& lock, Writer writer) {
             failure = std::current_exception();
         }
         lock.lock();
+        writing_ = nullptr;
+        if (abandoning_ > 0) written_.notify_all();
         if (failure) break;
     }
     draining_ = false;
@@ -1294,6 +1308,43 @@ void SessionCore::signal_idle() noexcept {
         options_.on_idle();
     } catch (...) {
     }
+}
+
+void SessionCore::abandon(UnitId number) {
+    std::vector<std::shared_ptr<CallState>> stopped;
+    std::vector<Batch> assembled;
+    bool now_idle = false;
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        const auto found = units_.find(number);
+        if (found == units_.end()) return;  // unknown, ended, or the session closed
+        const Unit unit = found->second;
+        units_.erase(found);
+        unit->abandoned = true;
+        // A call whose cancellation mechanism takes a closed stream for a cancellation stops; the others run on.
+        for (auto it = in_flight_.begin(); it != in_flight_.end();) {
+            const std::shared_ptr<CallState> call = it->second;
+            if (call->unit != unit || !call->served->cancel->stops_on_stream_close()) {
+                ++it;
+                continue;
+            }
+            it = in_flight_.erase(it);
+            call->active = false;
+            call->cancelled = true;
+            if (call->batch && --call->batch->outstanding == 0 && !call->batch->reading) assembled.push_back(call->batch);
+            stopped.push_back(call);
+        }
+        // An output of the unit that another thread is writing now is the last one the transport gets.
+        if (drainer_ != std::this_thread::get_id()) {
+            ++abandoning_;
+            written_.wait(lock, [&] { return writing_ != unit.get(); });
+            --abandoning_;
+        }
+        now_idle = assembled.empty() && !closed_ && idle_locked();
+    }
+    for (const auto& call : stopped) call->stop.request_stop();
+    for (const auto& batch : assembled) emit_batch(batch, Writer::host);
+    if (now_idle) signal_idle();
 }
 
 void SessionCore::close() {
@@ -1367,6 +1418,11 @@ void Session::receive(std::string_view line) {
 bool Session::receive(UnitId unit, std::string_view input) {
     const auto core = core_;
     return core->receive(unit, input);
+}
+
+void Session::abandon(UnitId unit) {
+    const auto core = core_;
+    core->abandon(unit);
 }
 
 void Session::close() {

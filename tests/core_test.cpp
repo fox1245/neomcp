@@ -2656,4 +2656,221 @@ TEST(Connection, TheProfileAHandshakeOpenedIsKnown) {
     EXPECT_EQ(opened->streamable_http()->session_header, "Mcp-Session-Id");
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// A transport that lost the stream of a unit
+
+neomcp::SessionOptions http_options() {
+    neomcp::SessionOptions options = test_options();
+    options.transport = profile::Transport::streamable_http;
+    return options;
+}
+
+TEST(Abandon, UnderCloseResponseStreamTheCallsStopAndNothingMoreIsWritten) {
+    FakeHost host;
+    Recorder recorder;
+    auto session = tagged_session(host, recorder, http_options());
+    const auto modern = builtin(modern_revision);
+    ASSERT_TRUE(session->receive(1, line_of(gated_call(*modern, "c", "t"))));
+    auto parked = host.wait_parked(patience);
+    ASSERT_TRUE(parked);
+    parked->control.progress(1);
+    ASSERT_EQ(recorder.unit(1).outputs.size(), 1u);
+    session->abandon(1);
+    EXPECT_TRUE(parked->control.stop_token().stop_requested());
+    EXPECT_TRUE(session->idle()) << "the stopped call is finished";
+    std::thread late([call = *parked] {
+        call.control.progress(2);
+        call.done(text_result("late"));
+    });
+    late.join();
+    session->abandon(1);
+    session->abandon(99);
+    ASSERT_TRUE(session->receive(2, line_of(Peer::make_request(*modern, "flush", "server/discover"))));
+    ASSERT_TRUE(recorder.wait_end(2));
+    const auto written = recorder.unit(1);
+    EXPECT_EQ(written.outputs.size(), 1u);
+    EXPECT_EQ(written.ends, 0) << "an abandoned unit gets no end";
+}
+
+TEST(Abandon, UnderCancelledNotificationTheCallsRunOnAndWhatTheyWriteIsDropped) {
+    FakeHost host;
+    Recorder recorder;
+    auto session = tagged_session(host, recorder, http_options());
+    const auto legacy = builtin("2025-11-25");
+    ASSERT_TRUE(session->receive(1, line_of(Peer::initialize_request(*legacy, "init"))));
+    ASSERT_TRUE(session->receive(2, line_of(gated_call(*legacy, "l", "t"))));
+    auto running = host.wait_parked(patience);
+    ASSERT_TRUE(running);
+    session->abandon(2);
+    EXPECT_FALSE(running->control.stop_token().stop_requested()) << "disconnection is not a cancellation here";
+    EXPECT_FALSE(session->idle()) << "its call still runs";
+    std::thread tool([call = *running] {
+        call.control.progress(1);
+        call.done(text_result("l"));
+    });
+    tool.join();
+    EXPECT_TRUE(session->idle());
+    EXPECT_TRUE(recorder.unit(2).outputs.empty());
+
+    // Its call can still be cancelled by the notification of its own mechanism.
+    ASSERT_TRUE(session->receive(3, line_of(gated_call(*legacy, "k"))));
+    auto cancelled_later = host.wait_parked(patience);
+    ASSERT_TRUE(cancelled_later);
+    session->abandon(3);
+    EXPECT_FALSE(session->receive(4, line_of(cancelled("k"))));
+    EXPECT_TRUE(cancelled_later->control.stop_token().stop_requested());
+    cancelled_later->done(text_result("k"));
+    EXPECT_TRUE(recorder.unit(3).outputs.empty());
+    EXPECT_EQ(recorder.unit(4).ends, 1);
+}
+
+TEST(Abandon, ABatchRunsOnAndItsAnswerIsDropped) {
+    FakeHost host;
+    Recorder recorder;
+    auto session = tagged_session(host, recorder, http_options());
+    const auto revision = builtin(batch_revision);
+    ASSERT_TRUE(session->receive(1, line_of(Peer::initialize_request(*revision, "init"))));
+    ASSERT_TRUE(session->receive(
+        2, line_of(json::array({gated_call(*revision, "b1"), Peer::make_request(*revision, "b2", "ping")}))));
+    auto parked = host.wait_parked(patience);
+    ASSERT_TRUE(parked);
+    session->abandon(2);
+    EXPECT_FALSE(parked->control.stop_token().stop_requested());
+    parked->done(text_result("b1"));
+    EXPECT_TRUE(session->idle()) << "the batch was assembled and dropped";
+    EXPECT_TRUE(recorder.unit(2).outputs.empty());
+}
+
+TEST(Abandon, WhileTheRequestIsStillBeingRead) {
+    FakeHost host;
+    Recorder recorder;
+    neomcp::Session* target = nullptr;
+    std::optional<neomcp::UnitId> abandon_on_check;
+    neomcp::SessionOptions options = http_options();
+    // The argument check runs while receive() reads the request, before the call starts.
+    options.check_arguments = [&](const neomcp::ToolDefinition&, const json&) -> std::optional<std::string> {
+        if (abandon_on_check) target->abandon(*abandon_on_check);
+        return std::nullopt;
+    };
+    auto session = tagged_session(host, recorder, options);
+    target = session.get();
+    const auto modern = builtin(modern_revision);
+    const auto legacy = builtin("2025-11-25");
+
+    abandon_on_check = 1;
+    EXPECT_TRUE(session->receive(1, line_of(gated_call(*modern, "m"))));
+    EXPECT_FALSE(host.wait_parked(now)) << "a call whose stream is gone and whose closing cancels it does not start";
+    EXPECT_TRUE(session->idle());
+
+    abandon_on_check.reset();
+    ASSERT_TRUE(session->receive(2, line_of(Peer::initialize_request(*legacy, "init"))));
+    abandon_on_check = 3;
+    EXPECT_TRUE(session->receive(3, line_of(gated_call(*legacy, "l"))));
+    auto running = host.wait_parked(patience);
+    ASSERT_TRUE(running) << "a call whose closing stream does not cancel it starts";
+    running->done(text_result("l"));
+    abandon_on_check.reset();
+    EXPECT_TRUE(recorder.unit(1).outputs.empty());
+    EXPECT_TRUE(recorder.unit(3).outputs.empty());
+}
+
+TEST(Abandon, FromInsideTheSinkForTheUnitBeingWritten) {
+    FakeHost host;
+    std::unique_ptr<neomcp::Session> session;
+    std::vector<neomcp::Output> outputs;
+    auto made = neomcp::Session::create_tagged(http_options(), host, [&](neomcp::Output output) {
+        const bool first_of_unit = output.unit == 1u && outputs.empty();
+        outputs.push_back(std::move(output));
+        if (first_of_unit) session->abandon(1);  // would wait for itself if it did not know it is the writer
+    });
+    ASSERT_TRUE(std::holds_alternative<std::unique_ptr<neomcp::Session>>(made));
+    session = std::move(std::get<std::unique_ptr<neomcp::Session>>(made));
+    ASSERT_TRUE(session->receive(1, line_of(gated_call(*builtin(modern_revision), "c", "t"))));
+    auto parked = host.wait_parked(patience);
+    ASSERT_TRUE(parked);
+    parked->control.progress(1);
+    EXPECT_TRUE(parked->control.stop_token().stop_requested());
+    parked->control.progress(2);
+    parked->done(text_result("c"));
+    EXPECT_EQ(outputs.size(), 1u);
+}
+
+// The guarantee is "after abandon() returns": a write of the unit in progress on another thread when abandon() is
+// called ends before abandon() returns. The sink logs the end of that write and the abandoning thread logs its return;
+// the release of the held write is sent only after the abandoning thread is about to call abandon().
+TEST(Abandon, ReturnsOnlyAfterAWriteOfTheUnitOnAnotherThreadEnded) {
+    const auto modern = builtin(modern_revision);
+    for (int round = 0; round < 50; ++round) {
+        SCOPED_TRACE(round);
+        FakeHost host;
+        Recorder recorder;
+        std::mutex events_mutex;
+        std::vector<std::string> events;
+        const auto note = [&](std::string event) {
+            const std::lock_guard<std::mutex> lock(events_mutex);
+            events.push_back(std::move(event));
+        };
+        auto made = neomcp::Session::create_tagged(http_options(), host, [&](neomcp::Output output) {
+            const auto unit = output.unit;
+            recorder.write(std::move(output));
+            if (unit == 1u) note("write of unit 1 ended");
+        });
+        ASSERT_TRUE(std::holds_alternative<std::unique_ptr<neomcp::Session>>(made));
+        auto session = std::move(std::get<std::unique_ptr<neomcp::Session>>(made));
+        ASSERT_TRUE(session->receive(1, line_of(gated_call(*modern, "c", "t"))));
+        auto parked = host.wait_parked(patience);
+        ASSERT_TRUE(parked);
+        recorder.hold_on(1);
+        std::thread writer([call = *parked] { call.control.progress(1); });
+        ASSERT_TRUE(recorder.wait_held());
+        Gate calling;
+        std::thread abandoner([&] {
+            calling.open();
+            session->abandon(1);
+            note("abandon returned");
+        });
+        calling.wait();
+        recorder.release();
+        writer.join();
+        abandoner.join();
+        {
+            const std::lock_guard<std::mutex> lock(events_mutex);
+            ASSERT_EQ(events, (std::vector<std::string>{"write of unit 1 ended", "abandon returned"}));
+        }
+        parked->control.progress(2);
+        parked->done(text_result("c"));
+        ASSERT_TRUE(session->receive(2, line_of(Peer::make_request(*modern, "flush", "server/discover"))));
+        ASSERT_EQ(recorder.unit(1).outputs.size(), 1u);
+    }
+}
+
+TEST(Abandon, NothingOfTheUnitIsWrittenAfterAbandonReturns) {
+    const auto modern = builtin(modern_revision);
+    for (int round = 0; round < 200; ++round) {
+        SCOPED_TRACE(round);
+        FakeHost host;
+        Recorder recorder;
+        auto session = tagged_session(host, recorder, http_options());
+        ASSERT_TRUE(session->receive(1, line_of(gated_call(*modern, "c", "t"))));
+        auto parked = host.wait_parked(patience);
+        ASSERT_TRUE(parked);
+        Gate gate;
+        std::thread tool([&gate, call = *parked] {
+            gate.wait();
+            for (int value = 1; value <= 50; ++value) call.control.progress(value);
+            call.done(text_result("c"));
+        });
+        gate.open();
+        session->abandon(1);
+        const std::size_t at_return = recorder.unit(1).outputs.size();
+        tool.join();
+        const auto written = recorder.unit(1);
+        // The unit either ended before abandon() (which then ignored it) or was frozen when abandon() returned.
+        if (written.ends == 0) {
+            ASSERT_EQ(written.outputs.size(), at_return);
+        }
+        ASSERT_EQ(recorder.outputs_after_an_end(), 0);
+    }
+}
+
 }  // namespace
