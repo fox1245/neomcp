@@ -158,6 +158,18 @@ target_link_libraries(neomcp_server PUBLIC neomcp::core neomcp::describe neomcp:
 target_compile_features(neomcp_server PUBLIC cxx_std_20)
 neomcp_configure_target(neomcp_server)
 
+# The stdio transport: serve one client on standard input and output (or on any pair of byte streams).
+add_library(neomcp_stdio
+    src/stdio/stdio.cpp
+    src/stdio/fd_streams.cpp)
+add_library(neomcp::stdio ALIAS neomcp_stdio)
+target_include_directories(neomcp_stdio
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(neomcp_stdio PUBLIC neomcp::server)
+target_compile_features(neomcp_stdio PUBLIC cxx_std_20)
+neomcp_configure_target(neomcp_stdio)
+
 if(NEOMCP_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
