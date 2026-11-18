@@ -1019,8 +1019,9 @@ TEST(HttpEndpointForm, AnAnswerTooLargeForTheStreamEndsTheStreamInsteadOfWaiting
         modern_call(harness.port, 1, "tools/call", with_progress(call_params("large"), "l"), "large");
     EXPECT_EQ(reply.status, 200);
     EXPECT_FALSE(reply.ok) << "the stream was cut, not ended as if it were complete";
+    // Closing a stream discards what the listener has not written yet, so the notification before the answer may or
+    // may not have reached the client.
     EXPECT_FALSE(has_answer(reply.body));
-    EXPECT_EQ(events(reply.body).size(), 1U) << "the notification before the answer arrived";
     // The endpoint is still fine.
     EXPECT_EQ(modern_call(harness.port, 2, "tools/list").status, 200);
 }
