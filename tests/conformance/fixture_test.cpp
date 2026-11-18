@@ -4,8 +4,11 @@
 // and runs with the rest of the suite.
 //
 // The scenarios covered are those of resources (list, read of text, of binary and of a template, a URI nothing
-// serves), prompts (list and the four gets), completion, and the caching hints of the revision that has them. One
-// connection per test; the HTTP library's client is used here, in the tests only.
+// serves), prompts (list and the four gets), completion, and the caching hints of the revision that has them, and the
+// ones in which the server asks its client for input while it serves a call: where the result asks and the client
+// retries the call with the answers, and where the server sends its requests on the stream of the call and the client
+// answers them with requests of its own. One connection per test; the HTTP library's client is used here, in the
+// tests only.
 #if defined(_MSC_VER)
 #pragma warning(push, 0)
 #endif
@@ -14,8 +17,11 @@
 #pragma warning(pop)
 #endif
 
+#include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <set>
@@ -69,7 +75,8 @@ struct Fixture {
 // its revision in every request, as the runner's stateless connection does.
 class Client {
 public:
-    Client(std::uint16_t port, std::string revision) : revision_(std::move(revision)), http_("127.0.0.1", port) {
+    Client(std::uint16_t port, std::string revision, json capabilities = default_capabilities())
+        : revision_(std::move(revision)), capabilities_(std::move(capabilities)), port_(port), http_("127.0.0.1", port) {
         http_.set_keep_alive(false);
         http_.set_connection_timeout(30, 0);
         http_.set_read_timeout(60, 0);
@@ -97,7 +104,7 @@ public:
     // Sends a request and returns the whole JSON-RPC answer, a result or an error.
     json call(const std::string& method, json params = json::object()) {
         httplib::Headers headers = modern() ? modern_headers(method, params) : legacy_headers();
-        if (modern()) params["_meta"] = modern_meta();
+        if (modern()) params["_meta"] = modern_meta(params);
         const auto answer = http_.Post(path, headers, rpc(next_id_++, method, std::move(params)), json_type);
         if (!answer) throw std::runtime_error(method + " was not answered");
         last_status_ = answer->status;
@@ -108,6 +115,41 @@ public:
 
     int last_status() const { return last_status_; }
 
+    // What the runner's client declares.
+    static json default_capabilities() {
+        return json{{"sampling", json::object()}, {"elicitation", json::object()}, {"roots", {{"listChanged", true}}}};
+    }
+
+    // ---- Calls that ask the client for input -------------------------------------------------------------------
+
+    // The request a server made of its client while it served a call: the key it was asked by (only where the result
+    // asks), the method and the params.
+    struct Asked {
+        std::string key;
+        std::string method;
+        json params;
+    };
+
+    // What one call came to: every request the server made of the client, in order, the states it sent along, the
+    // answer that ended the call, and the HTTP status of the reply the client gave to a request of the server.
+    struct Journey {
+        std::vector<Asked> asked;
+        std::vector<std::string> states;
+        json answer;
+        int rounds = 0;
+        std::vector<int> reply_statuses;
+        std::vector<json> notifications;
+    };
+
+    using Responder = std::function<json(const std::string& method, const json& params)>;
+
+    // Calls `method` and answers what the server asks with `respond`, in the way of the revision: where the result
+    // asks, the call is retried with the answers and the state; where the server sends requests, the client answers
+    // them with requests of its own.
+    Journey travel(const std::string& method, const json& params, const Responder& respond) {
+        return modern() ? retried(method, params, respond) : streamed(method, params, respond);
+    }
+
     // The result of a request that must have one.
     json result(const std::string& method, json params = json::object()) {
         json answer = call(method, std::move(params));
@@ -116,6 +158,116 @@ public:
     }
 
 private:
+    // The 2026-07-28 way: an answer that asks is followed by a call with the answers and the state.
+    Journey retried(const std::string& method, json params, const Responder& respond) {
+        Journey trip;
+        for (int round = 0; round < 8; ++round) {
+            trip.answer = call(method, params);
+            if (!trip.answer.contains("result")) return trip;
+            const json& reply = trip.answer.at("result");
+            if (!reply.contains("resultType") || reply.at("resultType") != "input_required") return trip;
+            ++trip.rounds;
+            json answers = json::object();
+            if (reply.contains("inputRequests")) {
+                for (const auto& item : reply.at("inputRequests").items()) {
+                    const json& request = item.value();
+                    const json asked_params = request.contains("params") ? request.at("params") : json::object();
+                    trip.asked.push_back(Asked{item.key(), request.at("method").get<std::string>(), asked_params});
+                    answers[item.key()] = respond(request.at("method").get<std::string>(), asked_params);
+                }
+            }
+            params["inputResponses"] = std::move(answers);
+            if (reply.contains("requestState")) {
+                trip.states.push_back(reply.at("requestState").get<std::string>());
+                params["requestState"] = reply.at("requestState");
+            }
+        }
+        throw std::runtime_error(method + " kept asking");
+    }
+
+    // The 2025-11-25 way: the server's requests arrive on the stream that carries the call's answer, and the client
+    // answers each with a POST of its own that carries the response.
+    Journey streamed(const std::string& method, const json& params, const Responder& respond) {
+        Journey trip;
+        httplib::Client replies("127.0.0.1", port_);
+        replies.set_keep_alive(false);
+        replies.set_connection_timeout(30, 0);
+        replies.set_read_timeout(60, 0);
+        replies.set_write_timeout(60, 0);
+
+        std::string type;
+        std::string whole;
+        std::string pending;  // the bytes of an event that is not complete yet
+        std::string data;     // the data lines of the event being read
+        bool has_data = false;
+        const auto handle = [&](const json& message) {
+            if (message.contains("method")) {
+                if (!message.contains("id")) {
+                    trip.notifications.push_back(message);
+                    return;
+                }
+                const std::string asked_method = message.at("method").get<std::string>();
+                const json asked_params = message.contains("params") ? message.at("params") : json::object();
+                trip.asked.push_back(Asked{std::string(), asked_method, asked_params});
+                const json response{{"jsonrpc", "2.0"}, {"id", message.at("id")}, {"result", respond(asked_method, asked_params)}};
+                const auto posted = replies.Post(path, legacy_headers(), response.dump(), json_type);
+                trip.reply_statuses.push_back(posted ? posted->status : 0);
+            } else if (message.contains("result") || message.contains("error")) {
+                trip.answer = message;
+            }
+        };
+        const auto take_lines = [&] {
+            for (;;) {
+                const std::size_t end = pending.find('\n');
+                if (end == std::string::npos) return;
+                std::string line = pending.substr(0, end);
+                pending.erase(0, end + 1);
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.empty()) {
+                    if (has_data) handle(json::parse(data));
+                    data.clear();
+                    has_data = false;
+                } else if (line.rfind("data:", 0) == 0) {
+                    std::string value = line.substr(5);
+                    if (!value.empty() && value.front() == ' ') value.erase(0, 1);
+                    if (has_data) data += '\n';
+                    data += value;
+                    has_data = true;
+                }
+            }
+        };
+
+        httplib::Request request;
+        request.method = "POST";
+        request.path = path;
+        request.headers = legacy_headers();
+        request.headers.emplace("Content-Type", json_type);
+        request.body = rpc(next_id_++, method, params);
+        request.response_handler = [&](const httplib::Response& response) {
+            type = response.get_header_value("Content-Type");
+            last_status_ = response.status;
+            return true;
+        };
+        request.content_receiver = [&](const char* bytes, std::size_t length, std::size_t, std::size_t) {
+            if (type.rfind("text/event-stream", 0) == 0) {
+                pending.append(bytes, length);
+                take_lines();
+            } else {
+                whole.append(bytes, length);
+            }
+            return true;
+        };
+        const auto sent = http_.send(request);
+        if (!sent) throw std::runtime_error(method + " was not answered");
+        if (type.rfind("text/event-stream", 0) == 0) {
+            pending += "\n\n";
+            take_lines();
+        } else {
+            trip.answer = json::parse(whole);
+        }
+        return trip;
+    }
+
     static std::string rpc(int id, const std::string& method, json params) {
         return json{{"jsonrpc", "2.0"}, {"id", id}, {"method", method}, {"params", std::move(params)}}.dump();
     }
@@ -124,16 +276,18 @@ private:
     }
     json initialize_params() const {
         return json{{"protocolVersion", revision_},
-                    {"capabilities", client_capabilities()},
+                    {"capabilities", capabilities_},
                     {"clientInfo", {{"name", "conformance-test-client"}, {"version", "1.0.0"}}}};
     }
-    static json client_capabilities() {
-        return json{{"sampling", json::object()}, {"elicitation", json::object()}, {"roots", {{"listChanged", true}}}};
-    }
-    json modern_meta() const {
-        return json{{"io.modelcontextprotocol/protocolVersion", revision_},
-                    {"io.modelcontextprotocol/clientInfo", {{"name", "conformance-test-client"}, {"version", "1.0.0"}}},
-                    {"io.modelcontextprotocol/clientCapabilities", client_capabilities()}};
+    // The members of the request's own `_meta` win over the ones the client writes, as they do in the runner.
+    json modern_meta(const json& params) const {
+        json meta{{"io.modelcontextprotocol/protocolVersion", revision_},
+                  {"io.modelcontextprotocol/clientInfo", {{"name", "conformance-test-client"}, {"version", "1.0.0"}}},
+                  {"io.modelcontextprotocol/clientCapabilities", capabilities_}};
+        if (params.contains("_meta") && params.at("_meta").is_object()) {
+            for (const auto& item : params.at("_meta").items()) meta[item.key()] = item.value();
+        }
+        return meta;
     }
     httplib::Headers legacy_headers() const {
         return {{"Accept", both_types}, {"MCP-Protocol-Version", revision_}, {"Mcp-Session-Id", session_}};
@@ -148,6 +302,8 @@ private:
     }
 
     std::string revision_;
+    json capabilities_;
+    std::uint16_t port_ = 0;
     httplib::Client http_;
     std::string session_;
     json opening_;
@@ -283,7 +439,8 @@ TEST_P(FixtureScenarios, PromptsListHasEachPromptWithANameAndADescription) {
         names.insert(prompt.at("name").get<std::string>());
     }
     EXPECT_EQ(names, (std::set<std::string>{"test_simple_prompt", "test_prompt_with_arguments",
-                                            "test_prompt_with_embedded_resource", "test_prompt_with_image"}));
+                                            "test_prompt_with_embedded_resource", "test_prompt_with_image",
+                                            "test_input_required_result_prompt"}));
 
     const json with_arguments = entry_of(prompts, "name", "test_prompt_with_arguments");
     ASSERT_TRUE(with_arguments.contains("arguments")) << with_arguments.dump();
@@ -403,5 +560,548 @@ TEST_P(FixtureScenarios, TheListsAndTheReadCarryTheCachingHintsOfTheRevisionThat
         EXPECT_TRUE(scope == "public" || scope == "private") << scope;
     }
 }
+
+// ---- Input: what the scenarios that ask the client for input do ------------------------------------------------------
+
+// The value a user would enter into a field of a form: the field's default or first choice, else a text.
+json value_for(const std::string& field, const json& schema) {
+    if (field == "name") return "Alice";
+    if (field == "color") return "blue";
+    if (schema.contains("default")) return schema.at("default");
+    const std::string kind = schema.contains("type") ? schema.at("type").get<std::string>() : std::string("string");
+    if (kind == "boolean") return true;
+    if (kind == "integer") return 1;
+    if (kind == "number") return 1.5;
+    if (kind == "array") {
+        const json& items = schema.at("items");
+        json chosen = json::array();
+        if (items.contains("enum")) chosen.push_back(items.at("enum").at(0));
+        if (items.contains("anyOf")) chosen.push_back(items.at("anyOf").at(0).at("const"));
+        return chosen;
+    }
+    if (schema.contains("enum")) return schema.at("enum").at(0);
+    if (schema.contains("oneOf")) return schema.at("oneOf").at(0).at("const");
+    return "test";
+}
+
+// What the client's user, model and roots answer.
+json user_answer(const std::string& method, const json& params) {
+    if (method == "elicitation/create") {
+        json content = json::object();
+        for (const auto& item : params.at("requestedSchema").at("properties").items()) {
+            content[item.key()] = value_for(item.key(), item.value());
+        }
+        return json{{"action", "accept"}, {"content", content}};
+    }
+    if (method == "sampling/createMessage") {
+        return json{{"role", "assistant"},
+                    {"content", {{"type", "text"}, {"text", "The capital of France is Paris."}}},
+                    {"model", "test-model"},
+                    {"stopReason", "endTurn"}};
+    }
+    if (method == "roots/list") {
+        return json{{"roots", json::array({json{{"uri", "file:///test/root"}, {"name", "Test Root"}}})}};
+    }
+    throw std::runtime_error("a request nobody answers: " + method);
+}
+
+std::string first_text(const json& result) { return result.at("content").at(0).at("text").get<std::string>(); }
+
+json tool_params(const std::string& name) { return json{{"name", name}, {"arguments", json::object()}}; }
+
+std::vector<std::string> methods_of(const std::vector<Client::Asked>& asked) {
+    std::vector<std::string> methods;
+    for (const Client::Asked& request : asked) methods.push_back(request.method);
+    std::sort(methods.begin(), methods.end());
+    return methods;
+}
+
+bool failed(const json& result) { return result.contains("isError") && result.at("isError") == true; }
+
+bool asks(const json& result) { return result.contains("resultType") && result.at("resultType") == "input_required"; }
+
+// The forms of the two scenarios that check what the server puts into a form.
+void expect_form_of_defaults(const json& schema) {
+    const json& properties = schema.at("properties");
+    EXPECT_EQ(properties.at("name").at("type"), "string");
+    EXPECT_EQ(properties.at("name").at("default"), "John Doe");
+    EXPECT_EQ(properties.at("age").at("type"), "integer");
+    EXPECT_TRUE(properties.at("age").at("default").is_number_integer());
+    EXPECT_EQ(properties.at("age").at("default").get<std::int64_t>(), 30);
+    EXPECT_EQ(properties.at("score").at("type"), "number");
+    EXPECT_DOUBLE_EQ(properties.at("score").at("default").get<double>(), 95.5);
+    EXPECT_EQ(properties.at("status").at("type"), "string");
+    EXPECT_TRUE(properties.at("status").at("enum").is_array());
+    EXPECT_EQ(properties.at("status").at("default"), "active");
+    bool member = false;
+    for (const json& choice : properties.at("status").at("enum")) member = member || choice == "active";
+    EXPECT_TRUE(member) << "the default is one of the choices";
+    EXPECT_EQ(properties.at("verified").at("type"), "boolean");
+    EXPECT_EQ(properties.at("verified").at("default"), true);
+}
+
+void expect_form_of_enums(const json& schema) {
+    const json& properties = schema.at("properties");
+    const json& untitled = properties.at("untitledSingle");
+    EXPECT_EQ(untitled.at("type"), "string");
+    EXPECT_TRUE(untitled.at("enum").is_array());
+    EXPECT_FALSE(untitled.contains("oneOf"));
+    EXPECT_FALSE(untitled.contains("enumNames"));
+
+    const json& titled = properties.at("titledSingle");
+    EXPECT_EQ(titled.at("type"), "string");
+    ASSERT_TRUE(titled.at("oneOf").is_array());
+    for (const json& choice : titled.at("oneOf")) {
+        EXPECT_TRUE(choice.at("const").is_string());
+        EXPECT_TRUE(choice.at("title").is_string());
+    }
+    EXPECT_FALSE(titled.contains("enum"));
+
+    const json& legacy = properties.at("legacyEnum");
+    EXPECT_EQ(legacy.at("type"), "string");
+    ASSERT_TRUE(legacy.at("enum").is_array());
+    ASSERT_TRUE(legacy.at("enumNames").is_array());
+    EXPECT_EQ(legacy.at("enumNames").size(), legacy.at("enum").size());
+
+    const json& many = properties.at("untitledMulti");
+    EXPECT_EQ(many.at("type"), "array");
+    EXPECT_EQ(many.at("items").at("type"), "string");
+    EXPECT_TRUE(many.at("items").at("enum").is_array());
+    EXPECT_FALSE(many.at("items").contains("anyOf"));
+
+    const json& titled_many = properties.at("titledMulti");
+    EXPECT_EQ(titled_many.at("type"), "array");
+    ASSERT_TRUE(titled_many.at("items").at("anyOf").is_array());
+    for (const json& choice : titled_many.at("items").at("anyOf")) {
+        EXPECT_TRUE(choice.at("const").is_string());
+        EXPECT_TRUE(choice.at("title").is_string());
+    }
+    EXPECT_FALSE(titled_many.at("items").contains("enum"));
+}
+
+// Both eras: the tools that ask are called, what they ask is answered as the scenarios answer it, and the call ends
+// with a result that has content.
+struct InputTool {
+    const char* name;
+    std::vector<std::string> methods;  // what is asked over the whole call, sorted
+    const char* text;                  // what the result says
+};
+
+TEST_P(FixtureScenarios, EveryToolThatAsksIsAnsweredAndTheCallEnds) {
+    const std::vector<InputTool> tools{
+        {"test_input_required_result_elicitation", {"elicitation/create"}, "Hello, Alice!"},
+        {"test_input_required_result_sampling", {"sampling/createMessage"}, "The model said: The capital of France is Paris."},
+        {"test_input_required_result_list_roots", {"roots/list"}, "Roots (1): file:///test/root"},
+        {"test_input_required_result_request_state", {"elicitation/create"}, "state-ok"},
+        {"test_input_required_result_multiple_inputs",
+         {"elicitation/create", "roots/list", "sampling/createMessage"},
+         "All three answers came"},
+        {"test_input_required_result_multi_round", {"elicitation/create", "elicitation/create"}, "Both steps are done"},
+        {"test_input_required_result_tampered_state", {"elicitation/create"}, "The state was accepted"},
+        {"test_input_required_result_capabilities", {"elicitation/create"}, "Answered"},
+        {"test_missing_capability", {"sampling/createMessage"}, "The model said"},
+        {"test_streaming_elicitation", {"elicitation/create"}, "Elicitation completed: action=accept"},
+        {"test_elicitation_sep1034_defaults", {"elicitation/create"}, "Elicitation completed: action=accept"},
+        {"test_elicitation_sep1330_enums", {"elicitation/create"}, "Elicitation completed: action=accept"},
+    };
+    for (const InputTool& tool : tools) {
+        SCOPED_TRACE(tool.name);
+        const Client::Journey trip = client.travel("tools/call", tool_params(tool.name), user_answer);
+        ASSERT_TRUE(trip.answer.contains("result")) << trip.answer.dump();
+        const json& result = trip.answer.at("result");
+        EXPECT_FALSE(asks(result));
+        EXPECT_FALSE(failed(result)) << result.dump();
+        ASSERT_TRUE(result.at("content").is_array());
+        EXPECT_NE(first_text(result).find(tool.text), std::string::npos) << result.dump();
+        EXPECT_EQ(methods_of(trip.asked), tool.methods);
+        for (const int status : trip.reply_statuses) EXPECT_EQ(status, 202);
+    }
+}
+
+TEST_P(FixtureScenarios, TheToolsThatAskTakeTheirArgumentsAndPutThemIntoWhatTheyAsk) {
+    const Client::Journey sampling = client.travel(
+        "tools/call", json{{"name", "test_sampling"}, {"arguments", {{"prompt", "Test prompt for sampling"}}}}, user_answer);
+    ASSERT_EQ(sampling.asked.size(), 1U);
+    EXPECT_EQ(sampling.asked.at(0).method, "sampling/createMessage");
+    const json& message = sampling.asked.at(0).params.at("messages").at(0);
+    EXPECT_EQ(message.at("role"), "user");
+    EXPECT_EQ(message.at("content").at("type"), "text");
+    EXPECT_EQ(message.at("content").at("text"), "Test prompt for sampling");
+    EXPECT_EQ(sampling.asked.at(0).params.at("maxTokens").get<std::int64_t>(), 100);
+    ASSERT_TRUE(sampling.answer.contains("result")) << sampling.answer.dump();
+    EXPECT_EQ(first_text(sampling.answer.at("result")), "LLM response: The capital of France is Paris.");
+
+    const Client::Journey form = client.travel(
+        "tools/call", json{{"name", "test_elicitation"}, {"arguments", {{"message", "Please provide your information"}}}},
+        user_answer);
+    ASSERT_EQ(form.asked.size(), 1U);
+    EXPECT_EQ(form.asked.at(0).method, "elicitation/create");
+    EXPECT_EQ(form.asked.at(0).params.at("message"), "Please provide your information");
+    const json& schema = form.asked.at(0).params.at("requestedSchema");
+    EXPECT_EQ(schema.at("type"), "object");
+    EXPECT_TRUE(schema.at("properties").contains("username"));
+    EXPECT_TRUE(schema.at("properties").contains("email"));
+    ASSERT_TRUE(form.answer.contains("result")) << form.answer.dump();
+    EXPECT_EQ(first_text(form.answer.at("result")).rfind("User response: action=accept", 0), 0U);
+}
+
+TEST_P(FixtureScenarios, TheFormWithDefaultsHasADefaultForEveryKindOfField) {
+    const Client::Journey trip = client.travel("tools/call", tool_params("test_elicitation_sep1034_defaults"), user_answer);
+    ASSERT_EQ(trip.asked.size(), 1U);
+    expect_form_of_defaults(trip.asked.at(0).params.at("requestedSchema"));
+}
+
+TEST_P(FixtureScenarios, TheFormWithChoicesHasEveryKindOfChoice) {
+    const Client::Journey trip = client.travel("tools/call", tool_params("test_elicitation_sep1330_enums"), user_answer);
+    ASSERT_EQ(trip.asked.size(), 1U);
+    expect_form_of_enums(trip.asked.at(0).params.at("requestedSchema"));
+}
+
+TEST_P(FixtureScenarios, ThePromptThatAsksIsAnsweredAndEndsWithMessages) {
+    const Client::Journey trip = client.travel("prompts/get", json{{"name", "test_input_required_result_prompt"}}, user_answer);
+    ASSERT_EQ(trip.asked.size(), 1U);
+    EXPECT_EQ(trip.asked.at(0).method, "elicitation/create");
+    ASSERT_TRUE(trip.answer.contains("result")) << trip.answer.dump();
+    const json& result = trip.answer.at("result");
+    EXPECT_FALSE(asks(result));
+    ASSERT_TRUE(result.at("messages").is_array());
+    ASSERT_GE(result.at("messages").size(), 1U);
+    EXPECT_EQ(result.at("messages").at(0).at("role"), "user");
+    EXPECT_EQ(result.at("messages").at(0).at("content").at("type"), "text");
+}
+
+TEST_P(FixtureScenarios, TheListsAreNeverAnsweredWithARequestForInput) {
+    for (const char* method : {"tools/list", "prompts/list"}) {
+        SCOPED_TRACE(method);
+        const json answer = client.call(method);
+        ASSERT_TRUE(answer.contains("result")) << answer.dump();
+        EXPECT_FALSE(asks(answer.at("result")));
+    }
+}
+
+TEST_P(FixtureScenarios, EveryToolAndThePromptThatAskAreListed) {
+    const json tools = client.result("tools/list").at("tools");
+    for (const char* name :
+         {"test_input_required_result_elicitation", "test_input_required_result_sampling",
+          "test_input_required_result_list_roots", "test_input_required_result_request_state",
+          "test_input_required_result_multiple_inputs", "test_input_required_result_multi_round",
+          "test_input_required_result_tampered_state", "test_input_required_result_capabilities", "test_sampling",
+          "test_elicitation", "test_elicitation_sep1034_defaults", "test_elicitation_sep1330_enums",
+          "test_missing_capability", "test_streaming_elicitation"}) {
+        const json found = entry_of(tools, "name", name);
+        EXPECT_FALSE(found.is_null()) << name;
+    }
+    const json sampling = entry_of(tools, "name", "test_sampling");
+    ASSERT_FALSE(sampling.is_null());
+    EXPECT_TRUE(sampling.at("inputSchema").at("properties").contains("prompt"));
+    const json elicitation = entry_of(tools, "name", "test_elicitation");
+    ASSERT_FALSE(elicitation.is_null());
+    EXPECT_TRUE(elicitation.at("inputSchema").at("properties").contains("message"));
+}
+
+// ---- Input where the result asks (2026-07-28): what each scenario sends and accepts ---------------------------------
+
+class ModernInput : public ::testing::Test {
+protected:
+    ModernInput() : client(fixture.port, modern_revision) {}
+
+    // The tool called without arguments, with `extra` beside its name and arguments (inputResponses, requestState,
+    // _meta).
+    json call_tool(const std::string& name, const json& extra = json::object()) {
+        json params = tool_params(name);
+        for (const auto& item : extra.items()) params[item.key()] = item.value();
+        return client.call("tools/call", params);
+    }
+    // The key of the first request, its method and its params.
+    static std::string first_key(const json& result) {
+        for (const auto& item : result.at("inputRequests").items()) return item.key();
+        return std::string();
+    }
+    static std::string method_of_first(const json& result) {
+        for (const auto& item : result.at("inputRequests").items()) return item.value().at("method").get<std::string>();
+        return std::string();
+    }
+    static json params_of_first(const json& result) {
+        for (const auto& item : result.at("inputRequests").items()) {
+            return item.value().contains("params") ? item.value().at("params") : json::object();
+        }
+        return json::object();
+    }
+
+    Fixture fixture;
+    Client client;
+};
+
+TEST_F(ModernInput, TheElicitationAsksByTheKeyUserNameAndEndsWithGreetingsAfterTheRetry) {
+    const json first = call_tool("test_input_required_result_elicitation");
+    ASSERT_TRUE(first.contains("result")) << first.dump();
+    const json& result = first.at("result");
+    ASSERT_TRUE(result.contains("resultType"));
+    EXPECT_EQ(result.at("resultType"), "input_required");
+    ASSERT_TRUE(result.at("inputRequests").contains("user_name"));
+    EXPECT_EQ(result.at("inputRequests").at("user_name").at("method"), "elicitation/create");
+    EXPECT_TRUE(result.at("inputRequests").at("user_name").at("params").contains("requestedSchema"));
+
+    json extra{{"inputResponses", {{"user_name", {{"action", "accept"}, {"content", {{"name", "Alice"}}}}}}}};
+    if (result.contains("requestState")) extra["requestState"] = result.at("requestState");
+    const json second = call_tool("test_input_required_result_elicitation", extra);
+    ASSERT_TRUE(second.contains("result")) << second.dump();
+    EXPECT_FALSE(asks(second.at("result")));
+    ASSERT_TRUE(second.at("result").at("content").is_array());
+    EXPECT_EQ(first_text(second.at("result")), "Hello, Alice!");
+}
+
+TEST_F(ModernInput, TheSamplingAndTheRootsAreAskedAndAnsweredAfterTheRetry) {
+    for (const char* name : {"test_input_required_result_sampling", "test_input_required_result_list_roots"}) {
+        SCOPED_TRACE(name);
+        const json first = call_tool(name);
+        ASSERT_TRUE(first.contains("result")) << first.dump();
+        ASSERT_TRUE(asks(first.at("result"))) << first.dump();
+        const std::string method = method_of_first(first.at("result"));
+        EXPECT_EQ(method, std::string(name) == "test_input_required_result_sampling" ? "sampling/createMessage" : "roots/list");
+        json extra{{"inputResponses", {{first_key(first.at("result")), user_answer(method, params_of_first(first.at("result")))}}}};
+        extra["requestState"] = first.at("result").at("requestState");
+        const json second = call_tool(name, extra);
+        ASSERT_TRUE(second.contains("result")) << second.dump();
+        EXPECT_FALSE(asks(second.at("result")));
+    }
+}
+
+TEST_F(ModernInput, TheRequestStateComesWithTheRequestAndIsCheckedWhenItComesBack) {
+    const json first = call_tool("test_input_required_result_request_state");
+    ASSERT_TRUE(first.contains("result")) << first.dump();
+    const json& result = first.at("result");
+    ASSERT_TRUE(asks(result));
+    ASSERT_TRUE(result.contains("inputRequests"));
+    ASSERT_TRUE(result.at("requestState").is_string());
+    EXPECT_FALSE(result.at("requestState").get<std::string>().empty());
+
+    const json answers{{"confirm", {{"action", "accept"}, {"content", {{"ok", true}}}}}};
+    const json second = call_tool("test_input_required_result_request_state",
+                                  json{{"inputResponses", answers}, {"requestState", result.at("requestState")}});
+    ASSERT_TRUE(second.contains("result")) << second.dump();
+    EXPECT_FALSE(asks(second.at("result")));
+    EXPECT_NE(first_text(second.at("result")).find("state-ok"), std::string::npos);
+}
+
+TEST_F(ModernInput, ThreeKindsOfRequestAreAskedAtOnceWithAState) {
+    const json first = call_tool("test_input_required_result_multiple_inputs");
+    ASSERT_TRUE(first.contains("result")) << first.dump();
+    const json& result = first.at("result");
+    ASSERT_TRUE(asks(result));
+    EXPECT_FALSE(result.at("requestState").get<std::string>().empty());
+    std::set<std::string> methods;
+    json answers = json::object();
+    for (const auto& item : result.at("inputRequests").items()) {
+        const std::string method = item.value().at("method").get<std::string>();
+        methods.insert(method);
+        answers[item.key()] = user_answer(method, item.value().contains("params") ? item.value().at("params") : json::object());
+    }
+    EXPECT_GE(result.at("inputRequests").size(), 3U);
+    EXPECT_EQ(methods, (std::set<std::string>{"elicitation/create", "sampling/createMessage", "roots/list"}));
+    const json second = call_tool("test_input_required_result_multiple_inputs",
+                                  json{{"inputResponses", answers}, {"requestState", result.at("requestState")}});
+    ASSERT_TRUE(second.contains("result")) << second.dump();
+    EXPECT_FALSE(asks(second.at("result")));
+}
+
+TEST_F(ModernInput, TheMultiRoundCallAsksTwiceWithAStateOfEachAndThenEnds) {
+    const json first = call_tool("test_input_required_result_multi_round");
+    ASSERT_TRUE(first.contains("result")) << first.dump();
+    ASSERT_TRUE(asks(first.at("result")));
+    ASSERT_TRUE(first.at("result").contains("requestState"));
+    const std::string key_one = first_key(first.at("result"));
+
+    const json second = call_tool(
+        "test_input_required_result_multi_round",
+        json{{"inputResponses", {{key_one, {{"action", "accept"}, {"content", {{"name", "Alice"}}}}}}},
+             {"requestState", first.at("result").at("requestState")}});
+    ASSERT_TRUE(second.contains("result")) << second.dump();
+    ASSERT_TRUE(asks(second.at("result"))) << second.dump();
+    ASSERT_TRUE(second.at("result").contains("requestState"));
+    EXPECT_NE(second.at("result").at("requestState"), first.at("result").at("requestState"));
+    const std::string key_two = first_key(second.at("result"));
+    EXPECT_NE(key_two, key_one);
+
+    const json third = call_tool(
+        "test_input_required_result_multi_round",
+        json{{"inputResponses", {{key_two, {{"action", "accept"}, {"content", {{"color", "blue"}}}}}}},
+             {"requestState", second.at("result").at("requestState")}});
+    ASSERT_TRUE(third.contains("result")) << third.dump();
+    EXPECT_FALSE(asks(third.at("result")));
+}
+
+TEST_F(ModernInput, AnswersThatCameWithoutTheStateTheServerIssuedAreNotAnswers) {
+    // Wrong keys, no state: the call asks again, with a result and not with an error.
+    const json wrong = call_tool("test_input_required_result_elicitation",
+                                 json{{"inputResponses", {{"wrong_key", {{"action", "accept"}, {"content", {{"data", "wrong"}}}}}}}});
+    ASSERT_TRUE(wrong.contains("result")) << wrong.dump();
+    ASSERT_TRUE(asks(wrong.at("result")));
+    EXPECT_TRUE(wrong.at("result").at("inputRequests").contains("user_name"));
+
+    // The right key and extra ones, no state: asks again as well, because no state says that anything was asked.
+    const json extra = call_tool(
+        "test_input_required_result_elicitation",
+        json{{"inputResponses",
+              {{"user_name", {{"action", "accept"}, {"content", {{"name", "Alice"}}}}},
+               {"unknown_extra_key", {{"action", "accept"}, {"content", {{"foo", "bar"}}}}},
+               {"another_unexpected", {{"action", "accept"}, {"content", {{"baz", 123}}}}}}}});
+    ASSERT_TRUE(extra.contains("result")) << extra.dump();
+    EXPECT_TRUE(asks(extra.at("result")));
+
+    // With the state, the same extra keys are ignored and the call ends.
+    const json first = call_tool("test_input_required_result_elicitation");
+    const json with_state = call_tool(
+        "test_input_required_result_elicitation",
+        json{{"inputResponses",
+              {{"user_name", {{"action", "accept"}, {"content", {{"name", "Alice"}}}}},
+               {"unknown_extra_key", {{"action", "accept"}, {"content", {{"foo", "bar"}}}}}}},
+             {"requestState", first.at("result").at("requestState")}});
+    ASSERT_TRUE(with_state.contains("result")) << with_state.dump();
+    EXPECT_FALSE(asks(with_state.at("result")));
+    EXPECT_EQ(first_text(with_state.at("result")), "Hello, Alice!");
+}
+
+TEST_F(ModernInput, AnswersOfTheWrongShapeAreNeverTakenForAComplete) {
+    // A number for the answer, and a null for the whole of them.
+    const json number = call_tool("test_input_required_result_elicitation", json{{"inputResponses", {{"user_name", 12345}}}});
+    ASSERT_TRUE(number.contains("result") || number.contains("error")) << number.dump();
+    if (number.contains("result")) {
+        EXPECT_TRUE(asks(number.at("result")));
+    }
+    const json nothing = call_tool("test_input_required_result_elicitation", json{{"inputResponses", nullptr}});
+    EXPECT_TRUE(nothing.contains("error")) << nothing.dump();
+
+    // With a state that was issued, an answer that is not an object is a malformed answer.
+    const json first = call_tool("test_input_required_result_elicitation");
+    const json malformed = call_tool("test_input_required_result_elicitation",
+                                     json{{"inputResponses", {{"user_name", 12345}}},
+                                          {"requestState", first.at("result").at("requestState")}});
+    ASSERT_TRUE(malformed.contains("error")) << malformed.dump();
+    EXPECT_EQ(malformed.at("error").at("code"), -32602);
+}
+
+TEST_F(ModernInput, AStateThatWasChangedIsAnErrorAndAnUnchangedOneStillWorks) {
+    const json first = call_tool("test_input_required_result_tampered_state");
+    ASSERT_TRUE(first.contains("result")) << first.dump();
+    ASSERT_TRUE(asks(first.at("result")));
+    const std::string state = first.at("result").at("requestState").get<std::string>();
+    ASSERT_FALSE(state.empty());
+    const std::string key = first_key(first.at("result"));
+    const json answers{{key, {{"action", "accept"}, {"content", {{"ok", true}}}}}};
+
+    const json tampered = call_tool("test_input_required_result_tampered_state",
+                                    json{{"inputResponses", answers}, {"requestState", state + "-TAMPERED"}});
+    EXPECT_FALSE(tampered.contains("result")) << tampered.dump();
+    ASSERT_TRUE(tampered.contains("error")) << tampered.dump();
+    EXPECT_EQ(tampered.at("error").at("code"), -32602);
+
+    const json whole = call_tool("test_input_required_result_tampered_state",
+                                 json{{"inputResponses", answers}, {"requestState", state}});
+    ASSERT_TRUE(whole.contains("result")) << whole.dump();
+    EXPECT_FALSE(asks(whole.at("result")));
+
+    // The state belongs to the call it was issued for.
+    const json other = call_tool("test_input_required_result_request_state",
+                                 json{{"inputResponses", answers}, {"requestState", state}});
+    EXPECT_TRUE(other.contains("error")) << other.dump();
+}
+
+TEST_F(ModernInput, TheRequestsAreOnlyThoseTheClientDeclaredItCanAnswer) {
+    // The runner's capability scenario: the client declares sampling and no elicitation.
+    const json meta{{"io.modelcontextprotocol/clientCapabilities", {{"sampling", json::object()}}}};
+    const json sampling_only = call_tool("test_input_required_result_capabilities", json{{"_meta", meta}});
+    ASSERT_TRUE(sampling_only.contains("result")) << sampling_only.dump();
+    ASSERT_TRUE(asks(sampling_only.at("result")));
+    ASSERT_GE(sampling_only.at("result").at("inputRequests").size(), 1U);
+    for (const auto& item : sampling_only.at("result").at("inputRequests").items()) {
+        EXPECT_EQ(item.value().at("method"), "sampling/createMessage");
+    }
+
+    // With the runner's declaration, the form is asked.
+    const json all = call_tool("test_input_required_result_capabilities");
+    ASSERT_TRUE(all.contains("result")) << all.dump();
+    ASSERT_TRUE(asks(all.at("result")));
+    EXPECT_EQ(method_of_first(all.at("result")), "elicitation/create");
+
+    // A client that declares neither is not asked at all.
+    const json neither = call_tool("test_input_required_result_capabilities",
+                                   json{{"_meta", {{"io.modelcontextprotocol/clientCapabilities", json::object()}}}});
+    ASSERT_TRUE(neither.contains("result")) << neither.dump();
+    EXPECT_FALSE(asks(neither.at("result")));
+}
+
+TEST_F(ModernInput, ThePromptThatAsksAnswersWithARequestAndThenWithMessages) {
+    const json first = client.call("prompts/get", json{{"name", "test_input_required_result_prompt"}});
+    ASSERT_TRUE(first.contains("result")) << first.dump();
+    const json& result = first.at("result");
+    ASSERT_TRUE(asks(result));
+    ASSERT_TRUE(result.at("inputRequests").contains("user_context"));
+    EXPECT_EQ(result.at("inputRequests").at("user_context").at("method"), "elicitation/create");
+    const json second = client.call(
+        "prompts/get", json{{"name", "test_input_required_result_prompt"},
+                            {"inputResponses", {{"user_context", {{"action", "accept"}, {"content", {{"context", "test context"}}}}}}},
+                            {"requestState", result.at("requestState")}});
+    ASSERT_TRUE(second.contains("result")) << second.dump();
+    EXPECT_FALSE(asks(second.at("result")));
+    EXPECT_TRUE(second.at("result").at("messages").is_array());
+    EXPECT_NE(second.at("result").at("messages").dump().find("test context"), std::string::npos);
+}
+
+TEST_F(ModernInput, ACallThatNeedsTheModelOfAClientWithoutOneIsRefusedWithWhatItLacks) {
+    Client bare(fixture.port, modern_revision, json::object());
+    const json answer = bare.call("tools/call", tool_params("test_missing_capability"));
+    ASSERT_TRUE(answer.contains("error")) << answer.dump();
+    EXPECT_EQ(answer.at("error").at("code"), -32021);
+    EXPECT_EQ(bare.last_status(), 400);
+    ASSERT_TRUE(answer.at("error").at("data").at("requiredCapabilities").at("sampling").is_object());
+    ASSERT_TRUE(answer.contains("id"));
+    EXPECT_FALSE(answer.at("id").is_null());
+}
+
+TEST_F(ModernInput, ACallThatAsksTheUserSendsNothingButItsResult) {
+    Client asking(fixture.port, modern_revision, json{{"elicitation", json::object()}});
+    const json answer = asking.call("tools/call", tool_params("test_streaming_elicitation"));
+    ASSERT_TRUE(answer.contains("result")) << answer.dump();
+    EXPECT_TRUE(asks(answer.at("result")));
+    EXPECT_EQ(method_of_first(answer.at("result")), "elicitation/create");
+}
+
+// ---- Input where the server sends requests (2025-11-25) ------------------------------------------------------------
+
+class LegacyInput : public ::testing::Test {
+protected:
+    Fixture fixture;
+};
+
+TEST_F(LegacyInput, TheRequestsAreOnlyThoseTheClientDeclaredItCanAnswer) {
+    Client model_only(fixture.port, legacy_revision, json{{"sampling", json::object()}});
+    const Client::Journey trip = model_only.travel("tools/call", tool_params("test_input_required_result_capabilities"), user_answer);
+    ASSERT_EQ(trip.asked.size(), 1U);
+    EXPECT_EQ(trip.asked.at(0).method, "sampling/createMessage");
+    ASSERT_TRUE(trip.answer.contains("result")) << trip.answer.dump();
+    EXPECT_FALSE(failed(trip.answer.at("result")));
+}
+
+TEST_F(LegacyInput, AClientThatCannotTakeTheRequestIsToldSoAndIsNotAsked) {
+    Client bare(fixture.port, legacy_revision, json::object());
+    const Client::Journey trip = bare.travel("tools/call", tool_params("test_missing_capability"), user_answer);
+    EXPECT_TRUE(trip.asked.empty());
+    ASSERT_TRUE(trip.answer.contains("result")) << trip.answer.dump();
+    EXPECT_TRUE(failed(trip.answer.at("result")));
+}
+
+TEST_F(LegacyInput, TheThreeRequestsOfOneRoundAreSentTogether) {
+    Client client(fixture.port, legacy_revision);
+    std::vector<std::string> seen;
+    const Client::Journey trip = client.travel("tools/call", tool_params("test_input_required_result_multiple_inputs"),
+                                               [&](const std::string& method, const json& params) {
+                                                   seen.push_back(method);
+                                                   return user_answer(method, params);
+                                               });
+    EXPECT_EQ(seen.size(), 3U);
+    ASSERT_TRUE(trip.answer.contains("result")) << trip.answer.dump();
+}
+
 
 }  // namespace
