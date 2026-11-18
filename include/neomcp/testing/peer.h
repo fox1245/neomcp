@@ -7,14 +7,18 @@
 #pragma once
 
 #include <chrono>
+#include <concepts>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <variant>
 #include <vector>
 
 #include "neomcp/json.h"
@@ -25,12 +29,24 @@
 
 namespace neomcp::testing {
 
+// Something that opens sessions itself, as neomcp::Server::connect does: it builds the session's options and gives
+// the session its tools.
+template <class Factory>
+concept SessionFactory = requires(Factory& factory, Sink sink) {
+    { factory.connect(std::move(sink)) } -> std::same_as<std::variant<std::unique_ptr<Session>, CreateError>>;
+};
+
 class Peer {
 public:
     using Timeout = std::chrono::milliseconds;
 
     // Creates the session; throws std::runtime_error with the session's error message when it cannot be created.
     explicit Peer(ToolHost& host, SessionOptions options = {});
+    // Opens the session through the factory (for example `neomcp::testing::Peer peer(server);`), which must outlive
+    // the peer's use of it as its contract says. Throws like the constructor above.
+    template <SessionFactory Factory>
+    explicit Peer(Factory& factory)
+        : Peer(Connector{[&factory](Sink sink) { return factory.connect(std::move(sink)); }}) {}
     ~Peer();
     Peer(const Peer&) = delete;
     Peer& operator=(const Peer&) = delete;
@@ -70,6 +86,11 @@ public:
                              json params = json::object());
 
 private:
+    struct Connector {
+        std::function<std::variant<std::unique_ptr<Session>, CreateError>(Sink)> open;
+    };
+    explicit Peer(Connector connector);
+
     void deliver(std::string line);
 
     mutable std::mutex mutex_;

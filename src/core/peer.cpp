@@ -16,8 +16,13 @@ std::string id_key(const json& id) { return serialize(id); }
 
 }  // namespace
 
-Peer::Peer(ToolHost& host, SessionOptions options) {
-    auto made = Session::create(std::move(options), host, [this](std::string line) { deliver(std::move(line)); });
+Peer::Peer(ToolHost& host, SessionOptions options)
+    : Peer(Connector{[&host, &options](Sink sink) {
+          return Session::create(std::move(options), host, std::move(sink));
+      }}) {}
+
+Peer::Peer(Connector connector) {
+    auto made = connector.open([this](std::string line) { deliver(std::move(line)); });
     if (const auto* error = std::get_if<CreateError>(&made)) throw std::runtime_error(error->message);
     session_ = std::move(std::get<std::unique_ptr<Session>>(made));
 }
