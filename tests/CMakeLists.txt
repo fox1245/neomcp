@@ -61,3 +61,8 @@ add_executable(neomcp_core_test core_test.cpp)
 target_link_libraries(neomcp_core_test PRIVATE neomcp::core GTest::gtest_main Threads::Threads)
 neomcp_configure_target(neomcp_core_test)
 gtest_discover_tests(neomcp_core_test DISCOVERY_TIMEOUT 120)
+
+add_executable(neomcp_server_test server_test.cpp)
+target_link_libraries(neomcp_server_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_server_test)
+gtest_discover_tests(neomcp_server_test DISCOVERY_TIMEOUT 120)
