@@ -1,0 +1,961 @@
+{
+  "profile_version": 1,
+  "revision": "2025-03-26",
+  "era": "legacy",
+  "evidence": {
+    "verified_at": "2026-11-18",
+    "repository": "https://github.com/modelcontextprotocol/modelcontextprotocol",
+    "commit": "d4b317231161ee96d3eefb2448bda4230c76f4c6",
+    "pages": [
+      "docs/specification/2025-03-26/basic/index.mdx",
+      "docs/specification/2025-03-26/basic/lifecycle.mdx",
+      "docs/specification/2025-03-26/basic/transports.mdx",
+      "docs/specification/2025-03-26/basic/utilities/cancellation.mdx"
+    ],
+    "schema": "schema/2025-03-26/schema.json"
+  },
+  "mechanisms": {
+    "open": "initialize",
+    "state": "connection",
+    "server_input": "server_request",
+    "change_feed": "connection_notifications",
+    "batch": "array"
+  },
+  "transports": {
+    "stdio": {
+      "cancel": "cancelled_notification"
+    },
+    "streamable_http": {
+      "cancel": "cancelled_notification",
+      "session_header": "Mcp-Session-Id",
+      "version_header": null,
+      "get_stream": true,
+      "resumable": true,
+      "delete_ends_session": true
+    }
+  },
+  "errors": {
+    "resource_not_found": -32002
+  },
+  "wire": {
+    "schema": {
+      "dialect": "http://json-schema.org/draft-07/schema#",
+      "sha256": "e720669548c8100a4282c49e580efd6ddf7f28899ea786fc8db251dbdb356131"
+    },
+    "requests": {
+      "completion/complete": {
+        "from": [
+          "client"
+        ],
+        "type": "CompleteRequest",
+        "params": null,
+        "params_required": [
+          "argument",
+          "ref"
+        ]
+      },
+      "initialize": {
+        "from": [
+          "client"
+        ],
+        "type": "InitializeRequest",
+        "params": null,
+        "params_required": [
+          "capabilities",
+          "clientInfo",
+          "protocolVersion"
+        ]
+      },
+      "logging/setLevel": {
+        "from": [
+          "client"
+        ],
+        "type": "SetLevelRequest",
+        "params": null,
+        "params_required": [
+          "level"
+        ]
+      },
+      "ping": {
+        "from": [
+          "client",
+          "server"
+        ],
+        "type": "PingRequest",
+        "params": null,
+        "params_required": []
+      },
+      "prompts/get": {
+        "from": [
+          "client"
+        ],
+        "type": "GetPromptRequest",
+        "params": null,
+        "params_required": [
+          "name"
+        ]
+      },
+      "prompts/list": {
+        "from": [
+          "client"
+        ],
+        "type": "ListPromptsRequest",
+        "params": null,
+        "params_required": []
+      },
+      "resources/list": {
+        "from": [
+          "client"
+        ],
+        "type": "ListResourcesRequest",
+        "params": null,
+        "params_required": []
+      },
+      "resources/read": {
+        "from": [
+          "client"
+        ],
+        "type": "ReadResourceRequest",
+        "params": null,
+        "params_required": [
+          "uri"
+        ]
+      },
+      "resources/subscribe": {
+        "from": [
+          "client"
+        ],
+        "type": "SubscribeRequest",
+        "params": null,
+        "params_required": [
+          "uri"
+        ]
+      },
+      "resources/templates/list": {
+        "from": [
+          "client"
+        ],
+        "type": "ListResourceTemplatesRequest",
+        "params": null,
+        "params_required": []
+      },
+      "resources/unsubscribe": {
+        "from": [
+          "client"
+        ],
+        "type": "UnsubscribeRequest",
+        "params": null,
+        "params_required": [
+          "uri"
+        ]
+      },
+      "roots/list": {
+        "from": [
+          "server"
+        ],
+        "type": "ListRootsRequest",
+        "params": null,
+        "params_required": []
+      },
+      "sampling/createMessage": {
+        "from": [
+          "server"
+        ],
+        "type": "CreateMessageRequest",
+        "params": null,
+        "params_required": [
+          "maxTokens",
+          "messages"
+        ]
+      },
+      "tools/call": {
+        "from": [
+          "client"
+        ],
+        "type": "CallToolRequest",
+        "params": null,
+        "params_required": [
+          "name"
+        ]
+      },
+      "tools/list": {
+        "from": [
+          "client"
+        ],
+        "type": "ListToolsRequest",
+        "params": null,
+        "params_required": []
+      }
+    },
+    "notifications": {
+      "notifications/cancelled": {
+        "from": [
+          "client",
+          "server"
+        ],
+        "type": "CancelledNotification",
+        "params": null,
+        "params_required": [
+          "requestId"
+        ]
+      },
+      "notifications/initialized": {
+        "from": [
+          "client"
+        ],
+        "type": "InitializedNotification",
+        "params": null,
+        "params_required": []
+      },
+      "notifications/message": {
+        "from": [
+          "server"
+        ],
+        "type": "LoggingMessageNotification",
+        "params": null,
+        "params_required": [
+          "data",
+          "level"
+        ]
+      },
+      "notifications/progress": {
+        "from": [
+          "client",
+          "server"
+        ],
+        "type": "ProgressNotification",
+        "params": null,
+        "params_required": [
+          "progress",
+          "progressToken"
+        ]
+      },
+      "notifications/prompts/list_changed": {
+        "from": [
+          "server"
+        ],
+        "type": "PromptListChangedNotification",
+        "params": null,
+        "params_required": []
+      },
+      "notifications/resources/list_changed": {
+        "from": [
+          "server"
+        ],
+        "type": "ResourceListChangedNotification",
+        "params": null,
+        "params_required": []
+      },
+      "notifications/resources/updated": {
+        "from": [
+          "server"
+        ],
+        "type": "ResourceUpdatedNotification",
+        "params": null,
+        "params_required": [
+          "uri"
+        ]
+      },
+      "notifications/roots/list_changed": {
+        "from": [
+          "client"
+        ],
+        "type": "RootsListChangedNotification",
+        "params": null,
+        "params_required": []
+      },
+      "notifications/tools/list_changed": {
+        "from": [
+          "server"
+        ],
+        "type": "ToolListChangedNotification",
+        "params": null,
+        "params_required": []
+      }
+    },
+    "input_requests": {},
+    "unlisted_message_types": [],
+    "types": {
+      "Annotations": {
+        "properties": [
+          "audience",
+          "priority"
+        ],
+        "required": []
+      },
+      "AudioContent": {
+        "properties": [
+          "annotations",
+          "data",
+          "mimeType",
+          "type"
+        ],
+        "required": [
+          "data",
+          "mimeType",
+          "type"
+        ]
+      },
+      "BlobResourceContents": {
+        "properties": [
+          "blob",
+          "mimeType",
+          "uri"
+        ],
+        "required": [
+          "blob",
+          "uri"
+        ]
+      },
+      "CallToolRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method",
+          "params"
+        ]
+      },
+      "CallToolResult": {
+        "properties": [
+          "_meta",
+          "content",
+          "isError"
+        ],
+        "required": [
+          "content"
+        ]
+      },
+      "CancelledNotification": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method",
+          "params"
+        ]
+      },
+      "ClientCapabilities": {
+        "properties": [
+          "experimental",
+          "roots",
+          "sampling"
+        ],
+        "required": []
+      },
+      "CompleteRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method",
+          "params"
+        ]
+      },
+      "CompleteResult": {
+        "properties": [
+          "_meta",
+          "completion"
+        ],
+        "required": [
+          "completion"
+        ]
+      },
+      "CreateMessageRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method",
+          "params"
+        ]
+      },
+      "CreateMessageResult": {
+        "properties": [
+          "_meta",
+          "content",
+          "model",
+          "role",
+          "stopReason"
+        ],
+        "required": [
+          "content",
+          "model",
+          "role"
+        ]
+      },
+      "EmbeddedResource": {
+        "properties": [
+          "annotations",
+          "resource",
+          "type"
+        ],
+        "required": [
+          "resource",
+          "type"
+        ]
+      },
+      "GetPromptRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method",
+          "params"
+        ]
+      },
+      "GetPromptResult": {
+        "properties": [
+          "_meta",
+          "description",
+          "messages"
+        ],
+        "required": [
+          "messages"
+        ]
+      },
+      "ImageContent": {
+        "properties": [
+          "annotations",
+          "data",
+          "mimeType",
+          "type"
+        ],
+        "required": [
+          "data",
+          "mimeType",
+          "type"
+        ]
+      },
+      "Implementation": {
+        "properties": [
+          "name",
+          "version"
+        ],
+        "required": [
+          "name",
+          "version"
+        ]
+      },
+      "InitializeRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method",
+          "params"
+        ]
+      },
+      "InitializeResult": {
+        "properties": [
+          "_meta",
+          "capabilities",
+          "instructions",
+          "protocolVersion",
+          "serverInfo"
+        ],
+        "required": [
+          "capabilities",
+          "protocolVersion",
+          "serverInfo"
+        ]
+      },
+      "InitializedNotification": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method"
+        ]
+      },
+      "JSONRPCError": {
+        "properties": [
+          "error",
+          "id",
+          "jsonrpc"
+        ],
+        "required": [
+          "error",
+          "id",
+          "jsonrpc"
+        ]
+      },
+      "JSONRPCNotification": {
+        "properties": [
+          "jsonrpc",
+          "method",
+          "params"
+        ],
+        "required": [
+          "jsonrpc",
+          "method"
+        ]
+      },
+      "JSONRPCRequest": {
+        "properties": [
+          "id",
+          "jsonrpc",
+          "method",
+          "params"
+        ],
+        "required": [
+          "id",
+          "jsonrpc",
+          "method"
+        ]
+      },
+      "JSONRPCResponse": {
+        "properties": [
+          "id",
+          "jsonrpc",
+          "result"
+        ],
+        "required": [
+          "id",
+          "jsonrpc",
+          "result"
+        ]
+      },
+      "ListPromptsRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method"
+        ]
+      },
+      "ListPromptsResult": {
+        "properties": [
+          "_meta",
+          "nextCursor",
+          "prompts"
+        ],
+        "required": [
+          "prompts"
+        ]
+      },
+      "ListResourceTemplatesRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method"
+        ]
+      },
+      "ListResourceTemplatesResult": {
+        "properties": [
+          "_meta",
+          "nextCursor",
+          "resourceTemplates"
+        ],
+        "required": [
+          "resourceTemplates"
+        ]
+      },
+      "ListResourcesRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method"
+        ]
+      },
+      "ListResourcesResult": {
+        "properties": [
+          "_meta",
+          "nextCursor",
+          "resources"
+        ],
+        "required": [
+          "resources"
+        ]
+      },
+      "ListRootsRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method"
+        ]
+      },
+      "ListRootsResult": {
+        "properties": [
+          "_meta",
+          "roots"
+        ],
+        "required": [
+          "roots"
+        ]
+      },
+      "ListToolsRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method"
+        ]
+      },
+      "ListToolsResult": {
+        "properties": [
+          "_meta",
+          "nextCursor",
+          "tools"
+        ],
+        "required": [
+          "tools"
+        ]
+      },
+      "LoggingMessageNotification": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method",
+          "params"
+        ]
+      },
+      "ModelHint": {
+        "properties": [
+          "name"
+        ],
+        "required": []
+      },
+      "ModelPreferences": {
+        "properties": [
+          "costPriority",
+          "hints",
+          "intelligencePriority",
+          "speedPriority"
+        ],
+        "required": []
+      },
+      "Notification": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method"
+        ]
+      },
+      "PaginatedRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method"
+        ]
+      },
+      "PaginatedResult": {
+        "properties": [
+          "_meta",
+          "nextCursor"
+        ],
+        "required": []
+      },
+      "PingRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method"
+        ]
+      },
+      "ProgressNotification": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method",
+          "params"
+        ]
+      },
+      "Prompt": {
+        "properties": [
+          "arguments",
+          "description",
+          "name"
+        ],
+        "required": [
+          "name"
+        ]
+      },
+      "PromptArgument": {
+        "properties": [
+          "description",
+          "name",
+          "required"
+        ],
+        "required": [
+          "name"
+        ]
+      },
+      "PromptListChangedNotification": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method"
+        ]
+      },
+      "PromptMessage": {
+        "properties": [
+          "content",
+          "role"
+        ],
+        "required": [
+          "content",
+          "role"
+        ]
+      },
+      "PromptReference": {
+        "properties": [
+          "name",
+          "type"
+        ],
+        "required": [
+          "name",
+          "type"
+        ]
+      },
+      "ReadResourceRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method",
+          "params"
+        ]
+      },
+      "ReadResourceResult": {
+        "properties": [
+          "_meta",
+          "contents"
+        ],
+        "required": [
+          "contents"
+        ]
+      },
+      "Request": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method"
+        ]
+      },
+      "Resource": {
+        "properties": [
+          "annotations",
+          "description",
+          "mimeType",
+          "name",
+          "size",
+          "uri"
+        ],
+        "required": [
+          "name",
+          "uri"
+        ]
+      },
+      "ResourceContents": {
+        "properties": [
+          "mimeType",
+          "uri"
+        ],
+        "required": [
+          "uri"
+        ]
+      },
+      "ResourceListChangedNotification": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method"
+        ]
+      },
+      "ResourceReference": {
+        "properties": [
+          "type",
+          "uri"
+        ],
+        "required": [
+          "type",
+          "uri"
+        ]
+      },
+      "ResourceTemplate": {
+        "properties": [
+          "annotations",
+          "description",
+          "mimeType",
+          "name",
+          "uriTemplate"
+        ],
+        "required": [
+          "name",
+          "uriTemplate"
+        ]
+      },
+      "ResourceUpdatedNotification": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method",
+          "params"
+        ]
+      },
+      "Result": {
+        "properties": [
+          "_meta"
+        ],
+        "required": []
+      },
+      "Root": {
+        "properties": [
+          "name",
+          "uri"
+        ],
+        "required": [
+          "uri"
+        ]
+      },
+      "RootsListChangedNotification": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method"
+        ]
+      },
+      "SamplingMessage": {
+        "properties": [
+          "content",
+          "role"
+        ],
+        "required": [
+          "content",
+          "role"
+        ]
+      },
+      "ServerCapabilities": {
+        "properties": [
+          "completions",
+          "experimental",
+          "logging",
+          "prompts",
+          "resources",
+          "tools"
+        ],
+        "required": []
+      },
+      "SetLevelRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method",
+          "params"
+        ]
+      },
+      "SubscribeRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method",
+          "params"
+        ]
+      },
+      "TextContent": {
+        "properties": [
+          "annotations",
+          "text",
+          "type"
+        ],
+        "required": [
+          "text",
+          "type"
+        ]
+      },
+      "TextResourceContents": {
+        "properties": [
+          "mimeType",
+          "text",
+          "uri"
+        ],
+        "required": [
+          "text",
+          "uri"
+        ]
+      },
+      "Tool": {
+        "properties": [
+          "annotations",
+          "description",
+          "inputSchema",
+          "name"
+        ],
+        "required": [
+          "inputSchema",
+          "name"
+        ]
+      },
+      "ToolAnnotations": {
+        "properties": [
+          "destructiveHint",
+          "idempotentHint",
+          "openWorldHint",
+          "readOnlyHint",
+          "title"
+        ],
+        "required": []
+      },
+      "ToolListChangedNotification": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method"
+        ]
+      },
+      "UnsubscribeRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method",
+          "params"
+        ]
+      }
+    }
+  }
+}
