@@ -1924,9 +1924,10 @@ void SessionCore::ask(const std::shared_ptr<CallState>& call, InputRequired aske
             finish_call(call, make_error(call->id, *code, "Missing required client capability", std::move(data)),
                         RefusalReason::missing_client_capability);
         } else {
-            fail_call(call, "the client did not declare a capability this call needs: " +
-                                serialize(data.at(std::string(required_capabilities_member))),
-                      std::move(data));
+            // The text first: the arguments of a call are evaluated in no fixed order, and the data moves.
+            const std::string text = "the client did not declare a capability this call needs: " +
+                                     serialize(data.at(std::string(required_capabilities_member)));
+            fail_call(call, text, std::move(data));
         }
         return;
     }
@@ -2527,12 +2528,25 @@ const json& CallControl::client_capabilities() const noexcept { return state_->c
 
 void Completion::operator()(CallOutcome outcome) const {
     if (!state_ || state_->called.exchange(true)) return;
-    if (auto core = state_->call->core.lock()) core->complete(state_->call, std::move(outcome));
+    auto core = state_->call->core.lock();
+    if (!core) return;
+    try {
+        core->complete(state_->call, std::move(outcome));
+    } catch (...) {
+        // Answering failed inside the session (it ran out of memory, say): the call still gets an answer.
+        core->complete_dropped(state_->call);
+    }
 }
 
 void Completion::operator()(FeatureOutcome outcome) const {
     if (!state_ || state_->called.exchange(true)) return;
-    if (auto core = state_->call->core.lock()) core->complete(state_->call, std::move(outcome));
+    auto core = state_->call->core.lock();
+    if (!core) return;
+    try {
+        core->complete(state_->call, std::move(outcome));
+    } catch (...) {
+        core->complete_dropped(state_->call);
+    }
 }
 
 }  // namespace neomcp

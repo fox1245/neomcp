@@ -20,7 +20,7 @@ repository and the date they were read.
 | `evidence` | Where the hand-written members were read. |
 | `mechanisms.open` | How a peer starts: `initialize` (a handshake) or `request_meta` (every request carries its version and capabilities). |
 | `mechanisms.state` | What the server may remember: `connection` (the handshake's result, per stdio process or HTTP session) or `none`. |
-| `mechanisms.server_input` | How a server asks its client for something: `server_request` (a JSON-RPC request to the client) or `input_required_result` (a result that asks, and a retried call that answers). |
+| `mechanisms.server_input` | How a server asks its client for something: `server_request` (a JSON-RPC request to the client) or `input_required_result` (a result that asks, and a retried call that answers). Under `input_required_result` the requests that may ask are read from `wire`: those whose params type has the members `inputResponses` and `requestState`. |
 | `mechanisms.change_feed` | How change notifications reach a client: `connection_notifications` or `subscriptions_listen`. |
 | `mechanisms.batch` | `array` when a JSON-RPC batch is allowed, else `none`. |
 | `transports` | The transports of the revision and, per transport, how a request is cancelled and which headers, streams and session rules apply. |

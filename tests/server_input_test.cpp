@@ -354,7 +354,8 @@ TEST(ServerInput, AWaitTimesOut) {
     ASSERT_TRUE(done);
     EXPECT_TRUE(done->at("result").at("isError").get<bool>()) << done->dump();
     client.answer(*request, accept_ok());  // too late: ignored
-    EXPECT_TRUE(client.peer.request(J(R"({"jsonrpc":"2.0","id":"p","method":"ping"})"), patience));
+    const json ping = J(R"({"jsonrpc":"2.0","id":"p","method":"ping"})");
+    EXPECT_TRUE(client.peer.request(ping, patience));
     EXPECT_EQ(effects.entered.load(), 1);
 }
 

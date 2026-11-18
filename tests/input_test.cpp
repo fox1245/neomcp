@@ -509,7 +509,8 @@ TEST(InputRequiredResult, TamperedStateIsAnError) {
     ASSERT_TRUE(second.contains("error")) << second.dump();
     EXPECT_EQ(second.at("error").at("code"), neomcp::error_code::invalid_params);
     EXPECT_EQ(second.at("error").at("message"), "Invalid or expired requestState");
-    EXPECT_EQ(second.at("error").at("data"), J(R"({"reason":"invalid_request_state"})"));
+    const json refusal_data = J(R"({"reason":"invalid_request_state"})");
+    EXPECT_EQ(second.at("error").at("data"), refusal_data);
     EXPECT_EQ(client.host.entries("test_input_required_result_tampered_state"), 1) << "refused before the host";
 }
 
@@ -662,7 +663,8 @@ TEST(InputRequiredResult, ArgumentsBindTheStateWhateverTheirOrder) {
     const json first = client.call(tool, params);
     ASSERT_TRUE(asks(first));
     const json answers = one("user_name", accept(J(R"({"name":"Alice"})")));
-    EXPECT_TRUE(completes(client.retry(tool, first, answers, J(R"({"a":{"x":[1,2],"y":2},"b":1})"))));
+    const json reordered = J(R"({"a":{"x":[1,2],"y":2},"b":1})");
+    EXPECT_TRUE(completes(client.retry(tool, first, answers, reordered)));
     const json changed = client.retry(tool, first, answers, J(R"({"a":{"x":[2,1],"y":2},"b":1})"));
     ASSERT_TRUE(changed.contains("error")) << changed.dump();
     EXPECT_EQ(changed.at("error").at("message"), "Invalid or expired requestState");
@@ -732,7 +734,8 @@ TEST(Capabilities, AMissingCapabilityIsTheRevisionsErrorWithItsReason) {
     const json answer = json::parse(output->line);
     ASSERT_TRUE(answer.contains("error")) << answer.dump();
     EXPECT_EQ(answer.at("error").at("code"), -32021);
-    EXPECT_EQ(answer.at("error").at("data"), J(R"({"requiredCapabilities":{"elicitation":{"form":{}}}})"));
+    const json required = J(R"({"requiredCapabilities":{"elicitation":{"form":{}}}})");
+    EXPECT_EQ(answer.at("error").at("data"), required);
     EXPECT_EQ(neomcp::to_string(neomcp::RefusalReason::missing_client_capability), "missing_client_capability");
 }
 
@@ -929,12 +932,18 @@ TEST(Sealing, TheSealerOpensWhatItSealedAndNothingElse) {
 
 TEST(Sealing, CanonicalArgumentsIgnoreMemberOrderAndIntegerSpelling) {
     using neomcp::detail::canonical_json;
-    EXPECT_EQ(canonical_json(J(R"({"b":1,"a":[3,{"d":true,"c":null}]})")), R"({"a":[3,{"c":null,"d":true}],"b":1})");
+    const json nested = J(R"({"b":1,"a":[3,{"d":true,"c":null}]})");
+    const std::string sorted = R"({"a":[3,{"c":null,"d":true}],"b":1})";
+    EXPECT_EQ(canonical_json(nested), sorted);
     EXPECT_EQ(canonical_json(J("1.0")), "1");
     EXPECT_EQ(canonical_json(J("-0.0")), "0");
     EXPECT_NE(canonical_json(J("1.5")), canonical_json(J("1")));
-    EXPECT_EQ(neomcp::detail::arguments_digest(J(R"({"x":1,"y":2})")), neomcp::detail::arguments_digest(J(R"({"y":2,"x":1.0})")));
-    EXPECT_NE(neomcp::detail::arguments_digest(J(R"({"x":1})")), neomcp::detail::arguments_digest(J(R"({"x":"1"})")));
+    const json in_order = J(R"({"x":1,"y":2})");
+    const json reordered = J(R"({"y":2,"x":1.0})");
+    const json number = J(R"({"x":1})");
+    const json text = J(R"({"x":"1"})");
+    EXPECT_EQ(neomcp::detail::arguments_digest(in_order), neomcp::detail::arguments_digest(reordered));
+    EXPECT_NE(neomcp::detail::arguments_digest(number), neomcp::detail::arguments_digest(text));
 }
 
 TEST(Sealing, Base64UrlIsStrict) {
@@ -1061,7 +1070,8 @@ TEST(ServerRequest, AnOlderRevisionWritesFormsWithoutAMode) {
     ScriptedHost host;
     Peer peer(host, options);
     const auto older = builtin(older_revision);
-    ASSERT_TRUE(peer.request(Peer::initialize_request(*older, neomcp::RequestId("init"), J(R"({"elicitation":{}})")), patience));
+    const json forms = J(R"({"elicitation":{}})");
+    ASSERT_TRUE(peer.request(Peer::initialize_request(*older, neomcp::RequestId("init"), forms), patience));
     peer.send(R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo_answer"}})");
     const auto request = peer.next_request(patience);
     ASSERT_TRUE(request);
