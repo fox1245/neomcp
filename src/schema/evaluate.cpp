@@ -75,8 +75,6 @@ std::size_t code_points(const std::string& text) {
     return count;
 }
 
-std::string quoted(std::string_view text) { return json(std::string(text)).dump(); }
-
 std::string describe_types(std::uint8_t types) {
     std::string out;
     const auto add = [&](std::uint8_t bit, const char* name) {
@@ -298,7 +296,7 @@ private:
         if (node.pattern) {
             const Match match = search(*node.pattern, text);
             if (match == Match::absent) {
-                return fail(issue, node, "pattern", [&] { return "does not match pattern " + quoted(node.pattern->source); });
+                return fail(issue, node, "pattern", [&] { return "does not match pattern " + quote(node.pattern->source); });
             }
             if (match != Match::found) return stop_for_pattern(node, "pattern", match, "the string");
         }
@@ -392,7 +390,7 @@ private:
         const auto has = [&](const std::string& name) { return members.find(std::string_view(name)) != members.end(); };
         for (const std::string& name : node.required) {
             if (!has(name)) {
-                return fail(issue, node, "required", [&] { return "is missing required property " + quoted(name); });
+                return fail(issue, node, "required", [&] { return "is missing required property " + quote(name); });
             }
         }
         for (const auto& [trigger, names] : node.dependent_required) {
@@ -400,7 +398,7 @@ private:
             for (const std::string& name : names) {
                 if (!has(name)) {
                     return fail(issue, node, "dependentRequired", [&] {
-                        return "is missing property " + quoted(name) + " required by " + quoted(trigger);
+                        return "is missing property " + quote(name) + " required by " + quote(trigger);
                     });
                 }
             }
@@ -416,7 +414,7 @@ private:
                 const Match match = search(*entry.pattern, key);
                 if (match == Match::found) by_pattern.push_back(entry.schema);
                 if (match == Match::too_long || match == Match::gave_up) {
-                    return stop_for_pattern(node, "patternProperties", match, "the property name " + quoted(key));
+                    return stop_for_pattern(node, "patternProperties", match, "the property name " + quote(key));
                 }
             }
             bool evaluated = false;
@@ -446,7 +444,7 @@ private:
                 if (stopped_) return false;
                 if (!ok) {
                     return fail(issue, node, "propertyNames", [&] {
-                        return "has a property name " + quoted(key) + " that propertyNames rejects: " + inner.message;
+                        return "has a property name " + quote(key) + " that propertyNames rejects: " + inner.message;
                     });
                 }
             }
@@ -478,8 +476,8 @@ private:
             }
             if (!matched) {
                 return fail(issue, node, "anyOf", [&] {
-                    return "does not match any schema in anyOf (the first fails at " + quoted(first.instance_pointer) +
-                           " with " + quoted(first.message) + ")";
+                    return "does not match any schema in anyOf (the first fails at " + quote(first.instance_pointer) +
+                           " with " + quote(first.message) + ")";
                 });
             }
         }
@@ -500,8 +498,8 @@ private:
             }
             if (matched == 0) {
                 return fail(issue, node, "oneOf", [&] {
-                    return "does not match any schema in oneOf (the first fails at " + quoted(first.instance_pointer) +
-                           " with " + quoted(first.message) + ")";
+                    return "does not match any schema in oneOf (the first fails at " + quote(first.instance_pointer) +
+                           " with " + quote(first.message) + ")";
                 });
             }
             if (matched > 1) return fail(issue, node, "oneOf", "matches more than one schema in oneOf");

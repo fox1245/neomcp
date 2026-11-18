@@ -55,8 +55,6 @@ std::string child_pointer(const std::string& parent, std::string_view token) {
     return parent + "/" + escape_token(token);
 }
 
-std::string quoted(std::string_view text) { return json(std::string(text)).dump(); }
-
 const json* find_member(const json::object_t& object, std::string_view name) {
     const auto it = object.find(name);
     return it == object.end() ? nullptr : &it->second;
@@ -166,7 +164,7 @@ private:
     void register_resource(const std::string& key, const json& schema, const std::string& pointer,
                            const std::string& id_pointer) {
         if (!resources_.emplace(key, Resource{&schema, pointer}).second) {
-            fail(id_pointer, "$id " + quoted(key) + " is already the identifier of another schema");
+            fail(id_pointer, "$id " + quote(key) + " is already the identifier of another schema");
         }
     }
 
@@ -177,7 +175,7 @@ private:
         try {
             pattern->regex = std::regex(source, std::regex::ECMAScript);
         } catch (const std::regex_error&) {
-            fail(pointer, "pattern " + quoted(source) + " is not a supported regular expression");
+            fail(pointer, "pattern " + quote(source) + " is not a supported regular expression");
         }
         patterns_.emplace(source, pattern);
         return pattern;
@@ -248,7 +246,7 @@ private:
             if (!text) fail(keyword_pointer("$id"), "$id must be a string");
             Uri resolved = resolve_uri(parse_uri(loc.base), parse_uri(*text));
             if (resolved.fragment && !resolved.fragment->empty()) {
-                fail(keyword_pointer("$id"), "$id " + quoted(*text) + " must not have a fragment");
+                fail(keyword_pointer("$id"), "$id " + quote(*text) + " must not have a fragment");
             }
             resolved.fragment.reset();
             base = to_string(resolved);
@@ -257,7 +255,7 @@ private:
         if (const json* dialect = find_member(object, "$schema")) {
             const auto* text = dialect->get_ptr<const json::string_t*>();
             if (!text || !supported_dialect(*text)) {
-                fail(keyword_pointer("$schema"), "dialect " + dialect->dump() + " is not supported (only " +
+                fail(keyword_pointer("$schema"), "dialect " + dump_text(*dialect) + " is not supported (only " +
                                                      std::string(dialect_uri) + " is)");
             }
         }
@@ -274,7 +272,7 @@ private:
             if (!name) fail(keyword_pointer(anchor_keyword), std::string(anchor_keyword) + " must be a string");
             if (loc.register_ids && !anchors_.emplace(base + "#" + *name, &schema).second) {
                 fail(keyword_pointer(anchor_keyword),
-                     std::string(anchor_keyword) + " " + quoted(*name) + " is already used in this resource");
+                     std::string(anchor_keyword) + " " + quote(*name) + " is already used in this resource");
             }
         }
         if (const json* reference = find_member(object, "$ref")) {
@@ -424,7 +422,7 @@ private:
     }
 
     [[noreturn]] static void unresolved(const Pending& pending) {
-        fail(pending.keyword_pointer, "$ref " + quoted(pending.reference) +
+        fail(pending.keyword_pointer, "$ref " + quote(pending.reference) +
                                           " does not resolve inside this schema (only references to schemas of the "
                                           "same document are supported)");
     }

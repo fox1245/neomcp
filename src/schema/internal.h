@@ -9,6 +9,7 @@
 #include <optional>
 #include <regex>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -122,5 +123,14 @@ std::optional<Issue> evaluate(const Compiled& compiled, const json& value);
 
 // Escape a member name for use as an RFC 6901 reference token.
 std::string escape_token(std::string_view token);
+
+// A value as JSON text for a message. Text that is not valid UTF-8 is printed with replacement characters instead of
+// failing.
+inline std::string dump_text(const json& value) {
+    return value.dump(-1, ' ', false, json::error_handler_t::replace);
+}
+
+// A string as a JSON string literal, for a message.
+inline std::string quote(std::string_view text) { return dump_text(json(std::string(text))); }
 
 }  // namespace neomcp::json_schema::detail

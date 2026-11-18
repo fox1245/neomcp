@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -249,6 +250,77 @@ TEST(JsonSchema, RelativeIdsAndRefsResolveAgainstTheirBase) {
     EXPECT_FALSE(accepts(schema, parse(R"({"i":"x"})")));
     EXPECT_FALSE(accepts(schema, parse(R"({"u":1})")));
     EXPECT_FALSE(accepts(schema, parse(R"({"abs":"x"})")));
+}
+
+TEST(JsonSchema, ReferencesResolveLikeRfc3986) {
+    // The examples of RFC 3986 section 5.4, with the base http://a/b/c/d;p?q: a schema that names itself by the
+    // reference is found by the absolute URI the RFC resolves it to.
+    const std::vector<std::pair<const char*, const char*>> cases = {
+        {"g:h", "g:h"},
+        {"g", "http://a/b/c/g"},
+        {"./g", "http://a/b/c/g"},
+        {"g/", "http://a/b/c/g/"},
+        {"/g", "http://a/g"},
+        {"//g", "http://g"},
+        {"?y", "http://a/b/c/d;p?y"},
+        {"g?y", "http://a/b/c/g?y"},
+        {";x", "http://a/b/c/;x"},
+        {"g;x", "http://a/b/c/g;x"},
+        {".", "http://a/b/c/"},
+        {"./", "http://a/b/c/"},
+        {"..", "http://a/b/"},
+        {"../", "http://a/b/"},
+        {"../g", "http://a/b/g"},
+        {"../..", "http://a/"},
+        {"../../", "http://a/"},
+        {"../../g", "http://a/g"},
+        {"../../../g", "http://a/g"},
+        {"../../../../g", "http://a/g"},
+        {"/./g", "http://a/g"},
+        {"/../g", "http://a/g"},
+        {"g.", "http://a/b/c/g."},
+        {".g", "http://a/b/c/.g"},
+        {"g..", "http://a/b/c/g.."},
+        {"..g", "http://a/b/c/..g"},
+        {"./../g", "http://a/b/g"},
+        {"./g/.", "http://a/b/c/g/"},
+        {"g/./h", "http://a/b/c/g/h"},
+        {"g/../h", "http://a/b/c/h"},
+        {"g;x=1/./y", "http://a/b/c/g;x=1/y"},
+        {"g;x=1/../y", "http://a/b/c/y"},
+    };
+    for (const auto& [relative, absolute] : cases) {
+        const json schema = json{{"$id", "http://a/b/c/d;p?q"},
+                                 {"$defs", json{{"target", json{{"$id", relative}, {"type", "integer"}}}}},
+                                 {"properties", json{{"v", json{{"$ref", absolute}}}}}};
+        const auto validator = compiled(schema);
+        ASSERT_TRUE(validator) << relative;
+        EXPECT_FALSE(validator->validate(parse(R"({"v":1})"))) << relative;
+        EXPECT_TRUE(validator->validate(parse(R"({"v":"s"})"))) << relative;
+    }
+}
+
+TEST(JsonSchema, TextThatIsNotUtf8DoesNotBreakMessages) {
+    const std::string bad = "bad\xff" "name";
+    const Issue dialect = refusal(json{{"$schema", bad}});
+    EXPECT_EQ(dialect.schema_pointer, "/$schema");
+    const auto missing = check(json{{"required", json::array({bad})}}, json::object());
+    ASSERT_TRUE(missing);
+    EXPECT_EQ(missing->schema_pointer, "/required");
+    EXPECT_TRUE(contains(missing->message, "is missing required property"));
+    const Issue pattern = refusal(json{{"pattern", "(" + bad}});
+    EXPECT_EQ(pattern.schema_pointer, "/pattern");
+}
+
+TEST(JsonSchema, SignedAndUnsignedIntegersBuiltInCodeAreTheSameNumber) {
+    const json schema = parse(R"({"const":5,"type":"integer","minimum":5,"maximum":5,"multipleOf":5})");
+    EXPECT_TRUE(accepts(schema, json(5)));
+    EXPECT_TRUE(accepts(schema, json(5U)));
+    EXPECT_TRUE(accepts(schema, json(5LL)));
+    EXPECT_TRUE(accepts(schema, json(5ULL)));
+    EXPECT_TRUE(accepts(schema, json(5.0)));
+    EXPECT_FALSE(accepts(schema, json(6U)));
+    EXPECT_TRUE(accepts(json{{"const", 5U}}, json(5)));
 }
 
 TEST(JsonSchema, UrnIdsAndAnchorsPerResource) {
@@ -591,7 +663,10 @@ TEST(JsonSchemaLimits, MaxSchemaDepthBoundsTheDocument) {
     const Issue issue = refusal(outside, limits);
     EXPECT_EQ(issue.schema_pointer, "/not/not/not/not/not");
     EXPECT_TRUE(contains(issue.message, "nested deeper than 4"));
-    // The default allows 64 levels and not 65.
+    // The default allows 64 levels and not 65; a schema of 80 levels is refused.
+    json eighty = parse(R"({"type":"object"})");
+    for (int i = 0; i < 80; ++i) eighty = json{{"properties", json{{"x", eighty}}}};
+    EXPECT_FALSE(refusal(eighty).schema_pointer.empty());
     json deep = parse(R"({"type":"string"})");
     for (int i = 0; i < 64; ++i) deep = json{{"not", deep}};
     EXPECT_TRUE(compiled(deep));
