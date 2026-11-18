@@ -459,6 +459,12 @@
           "type"
         ]
       },
+      "EmptyResult": {
+        "properties": [
+          "_meta"
+        ],
+        "required": []
+      },
       "EnumSchema": {
         "properties": [
           "description",
@@ -1089,6 +1095,81 @@
           "params"
         ]
       }
+    },
+    "unions": {
+      "ClientNotification": [
+        "CancelledNotification",
+        "InitializedNotification",
+        "ProgressNotification",
+        "RootsListChangedNotification"
+      ],
+      "ClientRequest": [
+        "CallToolRequest",
+        "CompleteRequest",
+        "GetPromptRequest",
+        "InitializeRequest",
+        "ListPromptsRequest",
+        "ListResourceTemplatesRequest",
+        "ListResourcesRequest",
+        "ListToolsRequest",
+        "PingRequest",
+        "ReadResourceRequest",
+        "SetLevelRequest",
+        "SubscribeRequest",
+        "UnsubscribeRequest"
+      ],
+      "ClientResult": [
+        "CreateMessageResult",
+        "ElicitResult",
+        "ListRootsResult",
+        "Result"
+      ],
+      "ContentBlock": [
+        "AudioContent",
+        "EmbeddedResource",
+        "ImageContent",
+        "ResourceLink",
+        "TextContent"
+      ],
+      "JSONRPCMessage": [
+        "JSONRPCError",
+        "JSONRPCNotification",
+        "JSONRPCRequest",
+        "JSONRPCResponse"
+      ],
+      "PrimitiveSchemaDefinition": [
+        "BooleanSchema",
+        "EnumSchema",
+        "NumberSchema",
+        "StringSchema"
+      ],
+      "ServerNotification": [
+        "CancelledNotification",
+        "LoggingMessageNotification",
+        "ProgressNotification",
+        "PromptListChangedNotification",
+        "ResourceListChangedNotification",
+        "ResourceUpdatedNotification",
+        "ToolListChangedNotification"
+      ],
+      "ServerRequest": [
+        "CreateMessageRequest",
+        "ElicitRequest",
+        "ListRootsRequest",
+        "PingRequest"
+      ],
+      "ServerResult": [
+        "CallToolResult",
+        "CompleteResult",
+        "GetPromptResult",
+        "InitializeResult",
+        "ListPromptsResult",
+        "ListResourceTemplatesResult",
+        "ListResourcesResult",
+        "ListToolsResult",
+        "ReadResourceResult",
+        "Result"
+      ]
     }
   }
 }

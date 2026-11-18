@@ -64,7 +64,9 @@
         ],
         "type": "ElicitRequest",
         "params": "ElicitRequestParams",
-        "params_required": []
+        "params_required": [
+          "message"
+        ]
       },
       "initialize": {
         "from": [
@@ -333,7 +335,13 @@
         ],
         "type": "TaskStatusNotification",
         "params": "TaskStatusNotificationParams",
-        "params_required": []
+        "params_required": [
+          "createdAt",
+          "lastUpdatedAt",
+          "status",
+          "taskId",
+          "ttl"
+        ]
       },
       "notifications/tools/list_changed": {
         "from": [
@@ -449,6 +457,25 @@
           "jsonrpc",
           "method",
           "params"
+        ]
+      },
+      "CancelTaskResult": {
+        "properties": [
+          "_meta",
+          "createdAt",
+          "lastUpdatedAt",
+          "pollInterval",
+          "status",
+          "statusMessage",
+          "taskId",
+          "ttl"
+        ],
+        "required": [
+          "createdAt",
+          "lastUpdatedAt",
+          "status",
+          "taskId",
+          "ttl"
         ]
       },
       "CancelledNotification": {
@@ -650,6 +677,12 @@
           "type"
         ]
       },
+      "EmptyResult": {
+        "properties": [
+          "_meta"
+        ],
+        "required": []
+      },
       "Error": {
         "properties": [
           "code",
@@ -727,6 +760,25 @@
           "jsonrpc",
           "method",
           "params"
+        ]
+      },
+      "GetTaskResult": {
+        "properties": [
+          "_meta",
+          "createdAt",
+          "lastUpdatedAt",
+          "pollInterval",
+          "status",
+          "statusMessage",
+          "taskId",
+          "ttl"
+        ],
+        "required": [
+          "createdAt",
+          "lastUpdatedAt",
+          "status",
+          "taskId",
+          "ttl"
         ]
       },
       "Icon": {
@@ -1533,6 +1585,25 @@
           "params"
         ]
       },
+      "TaskStatusNotificationParams": {
+        "properties": [
+          "_meta",
+          "createdAt",
+          "lastUpdatedAt",
+          "pollInterval",
+          "status",
+          "statusMessage",
+          "taskId",
+          "ttl"
+        ],
+        "required": [
+          "createdAt",
+          "lastUpdatedAt",
+          "status",
+          "taskId",
+          "ttl"
+        ]
+      },
       "TextContent": {
         "properties": [
           "_meta",
@@ -1727,6 +1798,134 @@
           "type"
         ]
       }
+    },
+    "unions": {
+      "ClientNotification": [
+        "CancelledNotification",
+        "InitializedNotification",
+        "ProgressNotification",
+        "RootsListChangedNotification",
+        "TaskStatusNotification"
+      ],
+      "ClientRequest": [
+        "CallToolRequest",
+        "CancelTaskRequest",
+        "CompleteRequest",
+        "GetPromptRequest",
+        "GetTaskPayloadRequest",
+        "GetTaskRequest",
+        "InitializeRequest",
+        "ListPromptsRequest",
+        "ListResourceTemplatesRequest",
+        "ListResourcesRequest",
+        "ListTasksRequest",
+        "ListToolsRequest",
+        "PingRequest",
+        "ReadResourceRequest",
+        "SetLevelRequest",
+        "SubscribeRequest",
+        "UnsubscribeRequest"
+      ],
+      "ClientResult": [
+        "CancelTaskResult",
+        "CreateMessageResult",
+        "ElicitResult",
+        "GetTaskPayloadResult",
+        "GetTaskResult",
+        "ListRootsResult",
+        "ListTasksResult",
+        "Result"
+      ],
+      "ContentBlock": [
+        "AudioContent",
+        "EmbeddedResource",
+        "ImageContent",
+        "ResourceLink",
+        "TextContent"
+      ],
+      "ElicitRequestParams": [
+        "ElicitRequestFormParams",
+        "ElicitRequestURLParams"
+      ],
+      "EnumSchema": [
+        "LegacyTitledEnumSchema",
+        "TitledMultiSelectEnumSchema",
+        "TitledSingleSelectEnumSchema",
+        "UntitledMultiSelectEnumSchema",
+        "UntitledSingleSelectEnumSchema"
+      ],
+      "JSONRPCMessage": [
+        "JSONRPCErrorResponse",
+        "JSONRPCNotification",
+        "JSONRPCRequest",
+        "JSONRPCResultResponse"
+      ],
+      "JSONRPCResponse": [
+        "JSONRPCErrorResponse",
+        "JSONRPCResultResponse"
+      ],
+      "MultiSelectEnumSchema": [
+        "TitledMultiSelectEnumSchema",
+        "UntitledMultiSelectEnumSchema"
+      ],
+      "PrimitiveSchemaDefinition": [
+        "BooleanSchema",
+        "LegacyTitledEnumSchema",
+        "NumberSchema",
+        "StringSchema",
+        "TitledMultiSelectEnumSchema",
+        "TitledSingleSelectEnumSchema",
+        "UntitledMultiSelectEnumSchema",
+        "UntitledSingleSelectEnumSchema"
+      ],
+      "SamplingMessageContentBlock": [
+        "AudioContent",
+        "ImageContent",
+        "TextContent",
+        "ToolResultContent",
+        "ToolUseContent"
+      ],
+      "ServerNotification": [
+        "CancelledNotification",
+        "ElicitationCompleteNotification",
+        "LoggingMessageNotification",
+        "ProgressNotification",
+        "PromptListChangedNotification",
+        "ResourceListChangedNotification",
+        "ResourceUpdatedNotification",
+        "TaskStatusNotification",
+        "ToolListChangedNotification"
+      ],
+      "ServerRequest": [
+        "CancelTaskRequest",
+        "CreateMessageRequest",
+        "ElicitRequest",
+        "GetTaskPayloadRequest",
+        "GetTaskRequest",
+        "ListRootsRequest",
+        "ListTasksRequest",
+        "PingRequest"
+      ],
+      "ServerResult": [
+        "CallToolResult",
+        "CancelTaskResult",
+        "CompleteResult",
+        "GetPromptResult",
+        "GetTaskPayloadResult",
+        "GetTaskResult",
+        "InitializeResult",
+        "ListPromptsResult",
+        "ListResourceTemplatesResult",
+        "ListResourcesResult",
+        "ListTasksResult",
+        "ListToolsResult",
+        "ReadResourceResult",
+        "Result"
+      ],
+      "SingleSelectEnumSchema": [
+        "TitledSingleSelectEnumSchema",
+        "UntitledSingleSelectEnumSchema"
+      ]
     }
   }
 }

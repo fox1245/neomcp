@@ -3,7 +3,8 @@
 
 The `wire` member holds what the published schema states about a revision: its
 requests and notifications with their senders, the requests a server may ask of
-a client inside a result, and the properties of every object type. A profile's
+a client inside a result, the properties of every object type, and the unions
+of types. A profile's
 other members are written by hand from the specification's prose.
 
     profile_wire.py SCHEMA                  print the wire member
@@ -72,6 +73,58 @@ def method_of(definitions, name):
     return method
 
 
+def object_shape(definitions, node, seen=()):
+    """The properties and required members of an object type, or None when the
+    node is not one. An object type is written with `properties`, as a
+    reference to an object type, or as an allOf of object types."""
+    if isinstance(node.get("properties"), dict):
+        return set(node["properties"]), set(node.get("required", []))
+    target = ref_name(node)
+    if target:
+        if target in seen:
+            raise SystemExit(f"{target} refers to itself")
+        return object_shape(definitions, definitions[target], (*seen, target))
+    parts = node.get("allOf")
+    if parts is None:
+        return None
+    properties, required = set(), set()
+    for part in parts:
+        shape = object_shape(definitions, part, seen)
+        if shape is None:
+            return None
+        properties |= shape[0]
+        required |= shape[1]
+    return properties, required
+
+
+def union_of_types(node):
+    """The member type names of a union whose alternatives are all references,
+    or None for any other node."""
+    alternatives = node.get("anyOf") or node.get("oneOf")
+    if alternatives is None:
+        return None
+    names = [ref_name(alternative) for alternative in alternatives]
+    return None if None in names else names
+
+
+def required_whatever_the_alternative(definitions, name, seen=()):
+    """The members every alternative of a union of object types requires."""
+    if name in seen:
+        raise SystemExit(f"{name} contains itself")
+    members = union_of_types(definitions[name])
+    common = None
+    for member in members:
+        shape = object_shape(definitions, definitions[member])
+        if shape is not None:
+            required = shape[1]
+        elif union_of_types(definitions[member]) is not None:
+            required = required_whatever_the_alternative(definitions, member, (*seen, name))
+        else:
+            raise SystemExit(f"{name} has the alternative {member}, which is not an object type")
+        common = required if common is None else common & required
+    return common or set()
+
+
 def params_of(definitions, name):
     definition = definitions[name]
     params = definition.get("properties", {}).get("params")
@@ -79,9 +132,14 @@ def params_of(definitions, name):
     if params is None:
         return entry
     target = ref_name(params)
-    shape = definitions[target] if target else params
     entry["params"] = target
-    entry["params_required"] = sorted(shape.get("required", []))
+    shape = object_shape(definitions, params)
+    if shape is not None:
+        entry["params_required"] = sorted(shape[1])
+    elif target and union_of_types(definitions[target]) is not None:
+        entry["params_required"] = sorted(required_whatever_the_alternative(definitions, target))
+    else:
+        raise SystemExit(f"the parameters of {name} are neither an object type nor a union of object types")
     return entry
 
 
@@ -121,14 +179,16 @@ def derive(schema_path):
         if constant_method(definition) is not None and name not in listed
     )
 
-    types = {
-        name: {
-            "properties": sorted(definition["properties"]),
-            "required": sorted(definition.get("required", [])),
-        }
-        for name, definition in definitions.items()
-        if isinstance(definition.get("properties"), dict)
-    }
+    types = {}
+    unions = {}
+    for name, definition in definitions.items():
+        shape = object_shape(definitions, definition)
+        if shape is not None:
+            types[name] = {"properties": sorted(shape[0]), "required": sorted(shape[1])}
+            continue
+        members = union_of_types(definition)
+        if members is not None:
+            unions[name] = sorted(members)
 
     return {
         "schema": {"dialect": document.get("$schema"), "sha256": hashlib.sha256(raw).hexdigest()},
@@ -137,6 +197,7 @@ def derive(schema_path):
         "input_requests": dict(sorted(input_requests.items())),
         "unlisted_message_types": unlisted,
         "types": dict(sorted(types.items())),
+        "unions": dict(sorted(unions.items())),
     }
 
 

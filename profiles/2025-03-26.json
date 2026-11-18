@@ -399,6 +399,12 @@
           "type"
         ]
       },
+      "EmptyResult": {
+        "properties": [
+          "_meta"
+        ],
+        "required": []
+      },
       "GetPromptRequest": {
         "properties": [
           "method",
@@ -956,6 +962,60 @@
           "params"
         ]
       }
+    },
+    "unions": {
+      "ClientNotification": [
+        "CancelledNotification",
+        "InitializedNotification",
+        "ProgressNotification",
+        "RootsListChangedNotification"
+      ],
+      "ClientRequest": [
+        "CallToolRequest",
+        "CompleteRequest",
+        "GetPromptRequest",
+        "InitializeRequest",
+        "ListPromptsRequest",
+        "ListResourceTemplatesRequest",
+        "ListResourcesRequest",
+        "ListToolsRequest",
+        "PingRequest",
+        "ReadResourceRequest",
+        "SetLevelRequest",
+        "SubscribeRequest",
+        "UnsubscribeRequest"
+      ],
+      "ClientResult": [
+        "CreateMessageResult",
+        "ListRootsResult",
+        "Result"
+      ],
+      "ServerNotification": [
+        "CancelledNotification",
+        "LoggingMessageNotification",
+        "ProgressNotification",
+        "PromptListChangedNotification",
+        "ResourceListChangedNotification",
+        "ResourceUpdatedNotification",
+        "ToolListChangedNotification"
+      ],
+      "ServerRequest": [
+        "CreateMessageRequest",
+        "ListRootsRequest",
+        "PingRequest"
+      ],
+      "ServerResult": [
+        "CallToolResult",
+        "CompleteResult",
+        "GetPromptResult",
+        "InitializeResult",
+        "ListPromptsResult",
+        "ListResourceTemplatesResult",
+        "ListResourcesResult",
+        "ListToolsResult",
+        "ReadResourceResult",
+        "Result"
+      ]
     }
   }
 }
