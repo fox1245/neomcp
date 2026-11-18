@@ -105,6 +105,32 @@ neomcp_configure_target(neomcp_schema)
 # The protocol core: JSON-RPC messages, the revision-independent model, the members filter, the mechanisms and their
 # registry, the session engine and the in-memory test peer. It does no I/O of its own.
 find_package(Threads REQUIRED)
+
+# std::stop_token is part of C++20, and a standard library may still ship it behind a flag. The public headers use
+# it, so the flag that makes it available goes to every consumer of the core.
+include(CheckCXXSourceCompiles)
+set(NEOMCP_STOP_TOKEN_PROBE [[
+#include <stop_token>
+int main() {
+    std::stop_source source;
+    return source.get_token().stop_requested() ? 1 : 0;
+}
+]])
+set(NEOMCP_STOP_TOKEN_OPTIONS "")
+set(CMAKE_REQUIRED_FLAGS "${CMAKE_CXX20_STANDARD_COMPILE_OPTION}")
+check_cxx_source_compiles("${NEOMCP_STOP_TOKEN_PROBE}" NEOMCP_HAS_STOP_TOKEN)
+if(NOT NEOMCP_HAS_STOP_TOKEN)
+    set(CMAKE_REQUIRED_FLAGS "${CMAKE_CXX20_STANDARD_COMPILE_OPTION} -fexperimental-library")
+    set(CMAKE_REQUIRED_LINK_OPTIONS -fexperimental-library)
+    check_cxx_source_compiles("${NEOMCP_STOP_TOKEN_PROBE}" NEOMCP_HAS_STOP_TOKEN_WITH_EXPERIMENTAL_LIBRARY)
+    unset(CMAKE_REQUIRED_LINK_OPTIONS)
+    if(NOT NEOMCP_HAS_STOP_TOKEN_WITH_EXPERIMENTAL_LIBRARY)
+        message(FATAL_ERROR "neomcp: the standard library has no std::stop_token (C++20 <stop_token>)")
+    endif()
+    set(NEOMCP_STOP_TOKEN_OPTIONS -fexperimental-library)
+endif()
+unset(CMAKE_REQUIRED_FLAGS)
+
 add_library(neomcp_core
     src/core/jsonrpc.cpp
     src/core/model.cpp
@@ -116,6 +142,8 @@ add_library(neomcp::core ALIAS neomcp_core)
 target_include_directories(neomcp_core PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_link_libraries(neomcp_core PUBLIC neomcp::profile neojson::neojson Threads::Threads)
 target_compile_features(neomcp_core PUBLIC cxx_std_20)
+target_compile_options(neomcp_core PUBLIC ${NEOMCP_STOP_TOKEN_OPTIONS})
+target_link_options(neomcp_core PUBLIC ${NEOMCP_STOP_TOKEN_OPTIONS})
 neomcp_configure_target(neomcp_core)
 
 if(NEOMCP_BUILD_TESTS)

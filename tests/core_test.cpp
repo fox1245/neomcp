@@ -15,6 +15,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <variant>
@@ -339,7 +340,9 @@ TEST(JsonRpc, Classify) {
 TEST(JsonRpc, NestingDepth) {
     EXPECT_FALSE(neomcp::nesting_exceeds("[[1]]", 2));
     EXPECT_TRUE(neomcp::nesting_exceeds("[[[1]]]", 2));
-    EXPECT_FALSE(neomcp::nesting_exceeds(R"(["[[[[\"[[["])", 1)) << "brackets inside strings do not count";
+    // Kept out of the macro's arguments: one compiler in the build matrix misreads a raw string with quotes there.
+    const std::string_view brackets_in_a_string = R"(["[[[[\"[[["])";
+    EXPECT_FALSE(neomcp::nesting_exceeds(brackets_in_a_string, 1)) << "brackets inside strings do not count";
     EXPECT_FALSE(neomcp::nesting_exceeds("[][][][]", 1));
 }
 
