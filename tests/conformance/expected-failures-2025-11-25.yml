@@ -1,11 +1,7 @@
 # The scenarios of the official conformance runner, revision 2025-11-25, that the fixture server cannot pass yet. It
-# serves tools, resources, a resource template, prompts and completion; it does not subscribe a client to the changes
-# of a resource, and it has no tool that asks the client for sampling or elicitation while it runs.
+# serves tools (among them the ones that ask the client for sampling and for forms while they run), resources, a
+# resource template, prompts and completion; it does not subscribe a client to the changes of a resource.
 # An entry that starts to pass fails the run, so this list shrinks as the server grows.
 server:
-  - tools-call-sampling
-  - tools-call-elicitation
-  - elicitation-sep1034-defaults
-  - elicitation-sep1330-enums
   - resources-subscribe
   - resources-unsubscribe

@@ -1,21 +1,10 @@
 # The scenarios and checks of the official conformance runner, revision 2026-07-28, that the fixture server cannot
-# pass yet. It serves tools, resources, a resource template, prompts and completion, and the caching hints of their
-# lists; it has no tool that needs a client capability or asks for input while it runs, and no prompt that does.
+# pass yet. It serves tools (among them the ones that ask the client for input, with a prompt that does too, and the
+# two that probe the client's capabilities and the stream of a call), resources, a resource template, prompts and
+# completion, and the caching hints of their lists.
 # An entry that starts to pass fails the run, so this list shrinks as the server grows.
 server:
-  # Needs the tools test_missing_capability and test_streaming_elicitation.
-  - server-stateless:sep-2575-server-rejects-undeclared-capability
-  - server-stateless:sep-2575-missing-capability-http-400
-  - server-stateless:sep-2575-http-server-no-independent-requests-on-stream
-  - input-required-result-basic-elicitation
-  - input-required-result-basic-sampling
-  - input-required-result-basic-list-roots
-  - input-required-result-request-state
-  - input-required-result-multiple-input-requests
-  - input-required-result-multi-round
-  - input-required-result-missing-input-response
-  - input-required-result-non-tool-request
-  - input-required-result-result-type
-  - input-required-result-tampered-state
-  - input-required-result-capability-check
-  - input-required-result-ignore-extra-params
+  # The scenario retries the call with correct answers (and some it did not ask for) but without the state that the
+  # server issued with its request, and wants the call to end. The library takes answers only together with a state
+  # it signed for the call, so it asks again, and the scenario, which only warns, counts that as a failure here.
+  - input-required-result-ignore-extra-params:sep-2322-ignore-unexpected-params
