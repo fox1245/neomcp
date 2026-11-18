@@ -73,6 +73,10 @@ struct SessionOptions {
     std::size_t max_message_bytes = std::size_t{8} * 1024 * 1024;
     // A line whose arrays and objects nest deeper is answered with Invalid Request and not parsed. Default 128.
     std::size_t max_nesting_depth = 128;
+    // When this many lines already wait to be written, a new progress or log notification is dropped (responses
+    // and errors never are), so that a tool reporting faster than the client reads cannot grow the queue without
+    // limit. Zero is an error. Default 1024.
+    std::size_t max_queued_notifications = 1024;
 
     // Runs before every tools/call; empty: arguments are not checked.
     ArgumentCheck check_arguments;

@@ -448,6 +448,9 @@ TEST(Creation, RejectsBadOptions) {
     neomcp::SessionOptions zero_page = test_options();
     zero_page.tools_page_size = 0;
     EXPECT_TRUE(std::holds_alternative<neomcp::CreateError>(neomcp::Session::create(zero_page, host, [](std::string) {})));
+    neomcp::SessionOptions no_queue = test_options();
+    no_queue.max_queued_notifications = 0;
+    EXPECT_TRUE(std::holds_alternative<neomcp::CreateError>(neomcp::Session::create(no_queue, host, [](std::string) {})));
     neomcp::SessionOptions twice = test_options();
     twice.profiles = profiles_of({modern_revision, modern_revision});
     EXPECT_TRUE(std::holds_alternative<neomcp::CreateError>(neomcp::Session::create(twice, host, [](std::string) {})));
@@ -1615,6 +1618,59 @@ void expect_tool_thread_is_spared(bool through_progress) {
 
 TEST(SinkFailure, ACompletionOnAToolThreadIsSpared) { expect_tool_thread_is_spared(false); }
 TEST(SinkFailure, ProgressOnAToolThreadIsSpared) { expect_tool_thread_is_spared(true); }
+
+// ---------------------------------------------------------------------------------------------------------------
+// A client that reads slower than tools report
+
+TEST(Backpressure, NotificationsBeyondTheQueueBoundAreDropped) {
+    FakeHost host;
+    HoldingSink sink;
+    neomcp::SessionOptions options = test_options();
+    options.max_queued_notifications = 3;
+    options.protocol_logging = true;
+    auto made = neomcp::Session::create(options, host, [&sink](std::string line) { sink.write(std::move(line)); });
+    ASSERT_TRUE(std::holds_alternative<std::unique_ptr<neomcp::Session>>(made));
+    neomcp::Session& session = *std::get<std::unique_ptr<neomcp::Session>>(made);
+    // w's response holds the writer in the sink; p reports; r completes while the queue is full.
+    session.receive(modern_line("w", "tools/call", {{"name", "gated"}}));
+    session.receive(modern_line("p", "tools/call",
+                                {{"name", "gated"}, {"_meta", {{"progressToken", "tp"}, {log_level_key, "debug"}}}}));
+    session.receive(modern_line("r", "tools/call", {{"name", "gated"}}));
+    auto w = host.wait_parked(patience);
+    auto p = host.wait_parked(patience);
+    auto r = host.wait_parked(patience);
+    ASSERT_TRUE(w && p && r);
+    {
+        const std::lock_guard<std::mutex> lock(sink.mutex);
+        sink.hold = true;
+    }
+    std::thread writer([call = *w] { call.done(text_result("w")); });
+    ASSERT_TRUE(sink.wait_held());
+    std::thread burst([reporter = *p, finisher = *r] {
+        for (const double value : {1.0, 2.0, 3.0, 10.0, 11.0}) reporter.control.progress(value);
+        reporter.control.log(neomcp::LogLevel::error, "dropped");
+        finisher.done(text_result("r"));
+    });
+    burst.join();
+    sink.release();
+    writer.join();
+    p->control.progress(4);  // greater than the last value sent (3), though not than the dropped ones
+    p->done(text_result("p"));
+
+    std::vector<std::string> written;
+    const std::lock_guard<std::mutex> lock(sink.mutex);
+    for (const auto& line : sink.lines) {
+        if (line.contains("id")) {
+            ASSERT_TRUE(line.contains("result")) << line.dump();
+            written.push_back("response " + line.at("id").get<std::string>());
+        } else {
+            ASSERT_EQ(line.at("method"), "notifications/progress") << line.dump();
+            written.push_back("progress " + std::to_string(static_cast<int>(line.at("params").at("progress").get<double>())));
+        }
+    }
+    EXPECT_EQ(written, (std::vector<std::string>{"response w", "progress 1", "progress 2", "progress 3", "response r",
+                                                 "progress 4", "response p"}));
+}
 
 TEST(Close, HandlesOutliveTheSession) {
     FakeHost host;

@@ -48,7 +48,9 @@ public:
     // Neither progress() nor log() throws what the session's sink throws; a failing sink closes the session.
     //
     // Sends a progress notification when the request asked for progress; a value that is not finite or not greater
-    // than the last one sent is dropped, and so is anything after the call completed or was cancelled.
+    // than the last one sent is dropped, and so is anything after the call completed or was cancelled, and any
+    // notification while the session's output queue is full (SessionOptions::max_queued_notifications). A dropped
+    // value does not count as sent.
     void progress(double progress, std::optional<double> total = std::nullopt,
                   std::optional<std::string> message = std::nullopt) const;
     // Sends a log message when protocol logging is on and the level is at or above the one in force for the call.

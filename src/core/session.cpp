@@ -9,6 +9,7 @@
 //   the session from inside the sink only enqueues.
 // - The mutex is never held across a call into the host (tools(), call(), the argument check) or across
 //   std::stop_source::request_stop(), whose stop callbacks run inline and may complete the call.
+// - Progress and log lines are dropped while the queue holds max_queued_notifications lines; responses never are.
 // - A queued output of a call names the call, and the drainer skips it when the call was cancelled meanwhile: after
 //   a cancellation is received nothing more is written for that request, even what was queued before it.
 // - close() marks the session closed, empties the queue, takes the calls in flight, releases the mutex, requests
@@ -269,6 +270,7 @@ std::variant<std::shared_ptr<SessionCore>, CreateError> SessionCore::create(Sess
     if (!sink) problem("the sink is empty");
     if (options.tools_page_size && *options.tools_page_size == 0) problem("tools_page_size is zero");
     if (options.max_message_bytes == 0) problem("max_message_bytes is zero");
+    if (options.max_queued_notifications == 0) problem("max_queued_notifications is zero");
 
     auto core = std::make_shared<SessionCore>(Private{}, std::move(options), host, std::move(sink));
     core->profiles_ = profiles;
@@ -918,6 +920,8 @@ void SessionCore::progress(const std::shared_ptr<CallState>& call, double value,
     std::unique_lock<std::mutex> lock(mutex_);
     if (closed_ || !call->active) return;
     if (call->last_progress && !(value > *call->last_progress)) return;
+    // A full queue drops the line; the value does not count as sent.
+    if (queue_.size() >= options_.max_queued_notifications) return;
     call->last_progress = value;
     queue_.push_back(Output{std::move(line), call});
     drain(lock, Writer::host);
@@ -941,6 +945,7 @@ void SessionCore::log(const std::shared_ptr<CallState>& call, LogLevel level, js
     std::optional<LogLevel> threshold = call->fixed_log_level;
     if (call->follows_connection_level && connection_) threshold = connection_->log_level;
     if (!threshold || level < *threshold) return;
+    if (queue_.size() >= options_.max_queued_notifications) return;
     queue_.push_back(Output{std::move(line), call});
     drain(lock, Writer::host);
 }
