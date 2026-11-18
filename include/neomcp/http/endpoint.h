@@ -27,9 +27,14 @@
 //   6. The client closing the response stream, or leaving before the answer, abandons the request: the revision's
 //      cancellation rule decides whether the call is stopped (a closed stream cancels it in some revisions, not in
 //      others), and nothing more is written for it.
+//   7. A subscription (subscriptions/listen, where the revision has it) is answered as an event stream at once, its
+//      acknowledgement the first event, and stays open (with keep-alive comments) until the client closes it, which
+//      ends it, or the server ends it; a client that takes only JSON is answered 406. Each such request is a session
+//      of its own, so it holds one worker of the listener for as long as it is open.
 //
-// A kept session: GET opens its connection stream (the messages that belong to no request go there, one event each;
-// at most one such stream at a time, a second GET is answered 409; without one they are dropped), DELETE ends it
+// A kept session: GET opens its connection stream (the messages that belong to no request go there, one event each,
+// such as the change notifications of the connection; at most one such stream at a time, a second GET is answered 409;
+// without one they are dropped), DELETE ends it
 // (204). It also ends after EndpointOptions::session_idle_timeout without a request in progress or an open stream, and
 // when the endpoint stops; later requests that name it are answered 404. Requests of one session may arrive on many
 // threads; the endpoint feeds them to the session one at a time.
@@ -92,9 +97,10 @@ public:
     // its port only once it serves).
     void set_policy(HostPolicy policy);
 
-    // Closes every session and every stream: requests waiting for an answer are answered 503, open streams are cut,
-    // and a request that arrives from now on is answered 503. Returns without waiting for anything a client does.
-    // Idempotent. Must not be called from inside a handler of the server.
+    // Closes every session and every stream: requests waiting for an answer are answered 503, an open subscription
+    // ends gracefully (its stream gets the end and then ends), the other open streams are cut, and a request that
+    // arrives from now on is answered 503. Returns without waiting for anything a client does. Idempotent. Must not be
+    // called from inside a handler of the server.
     void stop() noexcept;
 
     // The sessions kept now.

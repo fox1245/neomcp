@@ -67,6 +67,10 @@ public:
     // True once the consumer closed the stream.
     bool closed() const;
 
+    // Waits until a stream the producer has ended is read to its end, until it is closed, or until the deadline.
+    // Returns at once for a stream that was not ended. True when the stream is finished.
+    bool wait_finished(std::chrono::steady_clock::time_point deadline);
+
     // ---- Consumer side ----
 
     // Moves the accumulated bytes into `out` (replacing its content) and returns Read::data; if there are none, waits

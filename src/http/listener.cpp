@@ -249,6 +249,10 @@ void Listener::Impl::stop() noexcept {
         // while it is not yet waited on, so the pointers are valid here.
         for (Exchange* exchange : waiting) exchange->deliver(make_response(unavailable_status));
     }
+    // A stream its producer has ended (an answer, the graceful end of a subscription) is given until the write timeout
+    // to be written out; every other one is cut.
+    const auto deadline = std::chrono::steady_clock::now() + options.write_timeout;
+    for (const auto& stream : open) stream->wait_finished(deadline);
     for (const auto& stream : open) stream->close();
     server->stop();
     if (serve_thread.joinable()) serve_thread.join();

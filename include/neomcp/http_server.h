@@ -84,8 +84,9 @@ public:
     // or revisions that cannot be served on Streamable HTTP. Starts once; a second call fails.
     http::Outcome<std::uint16_t> start();
 
-    // Closes every session and stream, stops listening and returns when the listener's threads have left (within
-    // about the read and write timeouts). Idempotent. Must not be called from a handler of the server.
+    // Closes every session and stream (an open subscription ends gracefully, and its end is written out within the
+    // write timeout), stops listening and returns when the listener's threads have left (within about the read and
+    // write timeouts). Idempotent. Must not be called from a handler of the server.
     void stop() noexcept;
 
     // The bound port; 0 before start() and after stop().

@@ -1024,10 +1024,11 @@ void Endpoint::Impl::decide(Exchange& exchange, Output output) {
         // Something comes before the answer.
         if (exchange.admits_event_stream) {
             open_stream(exchange);
-        } else if (output.kind == OutputKind::notification) {
+        } else if (output.kind == OutputKind::notification && !output.long_lived) {
             return;  // the client takes only JSON: one answer, so the notification is dropped
         } else {
-            // A request to the client cannot reach a client that takes only JSON on this request.
+            // A request to the client, or a subscription (whose messages are all on its stream), cannot reach a client
+            // that takes only JSON on this request.
             exchange.phase = Phase::done;
             exchange.steps.push_back(Step{Step::Kind::abandon_unit, {}, nullptr, {}, false});
             Step step;
@@ -1172,11 +1173,13 @@ void Endpoint::Impl::stop() noexcept {
         } catch (...) {
         }
         if (stream) stream->close();
+        // A stream whose last output came is ended rather than cut: what it holds (the graceful end of a
+        // subscription, which close() wrote) is still read out by its listener. Every other stream is cut.
         for (const auto& exchange : open) {
             std::shared_ptr<BodyStream> cut;
             {
                 std::lock_guard lock(exchange->mutex);
-                cut = exchange->stream;
+                if (exchange->phase != Phase::done) cut = exchange->stream;
             }
             if (cut) cut->close();
         }

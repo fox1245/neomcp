@@ -69,7 +69,15 @@ BodyStream::Read BodyStream::read(std::string& out, std::chrono::milliseconds ti
         return Read::data;
     }
     finished_ = true;  // ended and drained
+    lock.unlock();
+    activity_.notify_all();  // wait_finished() waits for this
     return Read::end;
+}
+
+bool BodyStream::wait_finished(std::chrono::steady_clock::time_point deadline) {
+    std::unique_lock lock(mutex_);
+    activity_.wait_until(lock, deadline, [this] { return finished_ || closed_ || !ended_; });
+    return finished_;
 }
 
 void BodyStream::close() noexcept {

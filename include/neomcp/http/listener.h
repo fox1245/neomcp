@@ -111,9 +111,10 @@ public:
 
     // Stops serving and returns when every worker has left. Idempotent and safe to call from any thread except a
     // worker (a handler, or a stream's on_close callback). Requests whose Responder is still uncompleted are answered
-    // 503, every open stream is closed (so its producer is told through on_close, and the connection is cut without
-    // the terminating chunk), and the listening socket is closed. It returns within about the read and write
-    // timeouts, except while a handler itself blocks: a handler that does not return keeps its worker.
+    // 503; an open stream that its producer has ended is given until the write timeout to be written out; every other
+    // open stream is closed (so its producer is told through on_close, and the connection is cut without the
+    // terminating chunk), and the listening socket is closed. It returns within about the read and write timeouts,
+    // except while a handler itself blocks: a handler that does not return keeps its worker.
     void stop() noexcept;
 
     // True between a successful start() and stop().

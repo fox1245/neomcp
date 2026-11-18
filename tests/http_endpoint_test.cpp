@@ -1286,4 +1286,249 @@ TEST(HttpServerOptionsDefaults, ANamedObjectBuiltWithDesignatedInitializersKeeps
     EXPECT_EQ(options.disconnect_poll_interval, listener.disconnect_poll_interval);
 }
 
+// ---- The change feed ------------------------------------------------------------------------------------------------
+
+constexpr const char* subscription_key = "io.modelcontextprotocol/subscriptionId";
+
+// A server with what the conformance runner's subscription checks use: the tools that change the tool list and the
+// prompt list, a prompt, and a resource clients watch, which a third tool reports as updated.
+struct FeedHarness {
+    explicit FeedHarness(neomcp::HttpServerOptions options = quick_options())
+        : server(neomcp::ServerOptions{.name = "feed-test",
+                                       .version = "0.0.1",
+                                       .on_change_watchers = [this] { watchers_changed(); }}) {
+        hidden_tool = std::make_unique<neomcp::ToolHandle>(
+            server
+                .tool("test_hidden_tool", "Offered and withdrawn by the trigger", [] { return std::string("hidden"); })
+                .enable(false));
+        server.tool("test_trigger_tool_change", "Change the tool list", [this] {
+            hidden_tool->enable(!hidden_tool->enabled());
+            return std::string("tools changed");
+        });
+        server.prompt("test_simple_prompt", "A prompt", [] { return std::string("Hello"); });
+        hidden_prompt = std::make_unique<neomcp::PromptHandle>(
+            server
+                .prompt("test_hidden_prompt", "Offered and withdrawn by the trigger", [] { return std::string("Hi"); })
+                .enable(false));
+        server.tool("test_trigger_prompt_change", "Change the prompt list", [this] {
+            hidden_prompt->enable(!hidden_prompt->enabled());
+            return std::string("prompts changed");
+        });
+        server.resource("test://watched-resource", "A resource clients watch", [] { return std::string("content"); });
+        server.tool("test_touch_resource", "Report the watched resource as updated", [this] {
+            server.notify_resource_updated("test://watched-resource");
+            return std::string("touched");
+        });
+        http = std::make_unique<neomcp::HttpServer>(server, std::move(options));
+        auto started_at = http->start();
+        if (!started_at) throw std::runtime_error("start failed: " + started_at.error);
+        port = *started_at.value;
+    }
+
+    void watchers_changed() {
+        { std::lock_guard lock(mutex); }
+        changed.notify_all();
+    }
+    // Waits until the server holds `count` registrations of sessions; false when that did not happen in time.
+    bool wait_for_watchers(std::size_t count) {
+        std::unique_lock lock(mutex);
+        return changed.wait_for(lock, patience, [&] { return server.change_watchers() == count; });
+    }
+
+    Reply trigger(const std::string& tool, int id = 900) {
+        return modern_call(port, id, "tools/call", call_params(tool), tool);
+    }
+
+    std::mutex mutex;
+    std::condition_variable changed;
+    neomcp::Server server;
+    std::unique_ptr<neomcp::ToolHandle> hidden_tool;
+    std::unique_ptr<neomcp::PromptHandle> hidden_prompt;
+    std::unique_ptr<neomcp::HttpServer> http;
+    std::uint16_t port = 0;
+};
+
+// A subscriptions/listen request as the runner sends it, read as it arrives.
+std::unique_ptr<Call> open_listen(std::uint16_t port, const json& id, json filter, const char* accept = both_types) {
+    json params = with_meta(json{{"notifications", std::move(filter)}});
+    return std::make_unique<Call>(port, "POST", modern_headers("subscriptions/listen", std::nullopt, modern, accept),
+                                  rpc(id, "subscriptions/listen", std::move(params)));
+}
+
+std::function<bool(const std::string&)> at_least(std::size_t count) {
+    return [count](const std::string& body) { return events(body).size() >= count; };
+}
+
+std::string method_of(const json& message) { return message.value("method", std::string()); }
+
+TEST(HttpEndpointFeed, TheAcknowledgementComesFirstAndEveryNotificationCarriesTheId) {
+    FeedHarness harness;
+    const std::uint64_t id = 1763500000000;  // the runner's ids are times in milliseconds
+    auto listen = open_listen(harness.port, id, {{"toolsListChanged", true}});
+    ASSERT_TRUE(listen->wait_for_headers());
+    EXPECT_EQ(listen->now().status, 200);
+    EXPECT_EQ(listen->now().header("Content-Type"), "text/event-stream") << "an event stream at once";
+    ASSERT_TRUE(listen->wait_until(at_least(1)));
+    // Once the first frame came, the runner changes the tool list on another connection.
+    EXPECT_EQ(harness.trigger("test_trigger_tool_change").status, 200);
+    ASSERT_TRUE(listen->wait_until(at_least(2)));
+    const std::vector<json> frames = events(listen->now().body);
+    EXPECT_EQ(method_of(frames[0]), "notifications/subscriptions/acknowledged");
+    EXPECT_EQ(frames[0].at("params").at("notifications"), (json{{"toolsListChanged", true}}));
+    EXPECT_EQ(method_of(frames[1]), "notifications/tools/list_changed");
+    for (const json& frame : frames) {
+        ASSERT_EQ(method_of(frame).rfind("notifications/", 0), 0U) << frame.dump();
+        EXPECT_EQ(frame.at("params").at("_meta").at(subscription_key).get<std::uint64_t>(), id) << frame.dump();
+    }
+    EXPECT_FALSE(listen->finished()) << "the stream stays open";
+}
+
+TEST(HttpEndpointFeed, TheFilterIsHonouredAndBothListsAreTold) {
+    FeedHarness harness;
+    auto prompts = open_listen(harness.port, 10, {{"promptsListChanged", true}});
+    auto tools = open_listen(harness.port, 11, {{"toolsListChanged", true}});
+    ASSERT_TRUE(prompts->wait_until(at_least(1)));
+    ASSERT_TRUE(tools->wait_until(at_least(1)));
+    ASSERT_TRUE(harness.wait_for_watchers(2));
+    EXPECT_EQ(harness.trigger("test_trigger_tool_change").status, 200);
+    EXPECT_EQ(harness.trigger("test_trigger_prompt_change").status, 200);
+    ASSERT_TRUE(prompts->wait_until(at_least(2)));
+    ASSERT_TRUE(tools->wait_until(at_least(2)));
+    EXPECT_EQ(method_of(events(prompts->now().body)[1]), "notifications/prompts/list_changed")
+        << "the tool list changed first, and that was not sent to a stream filtered to prompts";
+    EXPECT_EQ(method_of(events(tools->now().body)[1]), "notifications/tools/list_changed");
+    // The change of the prompt list came after it, and was not sent to the tools stream either: the next frame there
+    // is the next change of the tool list.
+    EXPECT_EQ(harness.trigger("test_trigger_tool_change", 901).status, 200);
+    ASSERT_TRUE(tools->wait_until(at_least(3)));
+    EXPECT_EQ(method_of(events(tools->now().body)[2]), "notifications/tools/list_changed");
+}
+
+TEST(HttpEndpointFeed, ManyStreamsEachHearAChangeExactlyOnce) {
+    FeedHarness harness;
+    constexpr std::size_t streams = 8;
+    std::vector<std::unique_ptr<Call>> listens;
+    for (std::size_t i = 0; i < streams; ++i) {
+        listens.push_back(
+            open_listen(harness.port, 100 + i, {{"toolsListChanged", true}, {"promptsListChanged", true}}));
+    }
+    for (auto& listen : listens) ASSERT_TRUE(listen->wait_until(at_least(1)));
+    ASSERT_TRUE(harness.wait_for_watchers(streams)) << "each listen request is a session of its own";
+    EXPECT_EQ(harness.trigger("test_trigger_tool_change").status, 200);
+    EXPECT_EQ(harness.trigger("test_trigger_prompt_change").status, 200);  // what comes after it
+    for (std::size_t i = 0; i < streams; ++i) {
+        ASSERT_TRUE(listens[i]->wait_until([](const std::string& body) {
+            const auto frames = events(body);
+            return std::any_of(frames.begin(), frames.end(), [](const json& frame) {
+                return method_of(frame) == "notifications/prompts/list_changed";
+            });
+        }));
+        const std::vector<json> frames = events(listens[i]->now().body);
+        ASSERT_EQ(frames.size(), 3U) << listens[i]->now().body;
+        EXPECT_EQ(method_of(frames[1]), "notifications/tools/list_changed");
+        EXPECT_EQ(frames[2].at("params").at("_meta").at(subscription_key).get<std::size_t>(), 100 + i);
+    }
+}
+
+TEST(HttpEndpointFeed, AStreamTheClientClosesIsLetGo) {
+    FeedHarness harness;
+    auto listen = open_listen(harness.port, 1, {{"toolsListChanged", true}});
+    ASSERT_TRUE(listen->wait_until(at_least(1)));
+    ASSERT_TRUE(harness.wait_for_watchers(1));
+    listen->disconnect();
+    EXPECT_TRUE(harness.wait_for_watchers(0)) << "the subscription ended with its stream, and its session with it";
+    EXPECT_EQ(harness.trigger("test_trigger_tool_change").status, 200) << "a change with nobody listening";
+}
+
+TEST(HttpEndpointFeed, AClientThatTakesOnlyJsonCannotSubscribe) {
+    FeedHarness harness;
+    auto listen = open_listen(harness.port, 1, {{"toolsListChanged", true}}, json_type);
+    const Reply refused = listen->finish();
+    EXPECT_EQ(refused.status, 406) << refused.body;
+    EXPECT_TRUE(harness.wait_for_watchers(0));
+}
+
+TEST(HttpEndpointFeed, AnIdleSubscriptionStreamGetsKeepAliveComments) {
+    neomcp::HttpServerOptions options = quick_options();
+    options.keep_alive_interval = 20ms;
+    FeedHarness harness(options);
+    auto listen = open_listen(harness.port, 1, {{"toolsListChanged", true}});
+    ASSERT_TRUE(listen->wait_until(at_least(1)));
+    EXPECT_TRUE(listen->wait_until([](const std::string& body) { return body.find("\n: ") != std::string::npos; }));
+    EXPECT_FALSE(listen->finished());
+}
+
+TEST(HttpEndpointFeed, StopEndsEveryOpenSubscriptionGracefully) {
+    FeedHarness harness;
+    auto first = open_listen(harness.port, "a", {{"toolsListChanged", true}});
+    auto second = open_listen(harness.port, 2, {{"promptsListChanged", true}});
+    ASSERT_TRUE(first->wait_until(at_least(1)));
+    ASSERT_TRUE(second->wait_until(at_least(1)));
+    const auto start = std::chrono::steady_clock::now();
+    harness.http->stop();
+    EXPECT_LT(since(start), promptly);
+    for (Call* listen : {first.get(), second.get()}) {
+        const Reply ended = listen->finish();
+        EXPECT_TRUE(ended.ok) << "the stream ends normally";
+        const std::vector<json> frames = events(ended.body);
+        ASSERT_EQ(frames.size(), 3U) << ended.body;
+        const json id = frames[0].at("params").at("_meta").at(subscription_key);
+        EXPECT_EQ(method_of(frames[1]), "notifications/cancelled");
+        EXPECT_EQ(frames[1].at("params").at("requestId"), id);
+        EXPECT_EQ(frames[1].at("params").at("_meta").at(subscription_key), id);
+        EXPECT_EQ(frames[2].at("id"), id);
+        EXPECT_EQ(frames[2].at("result").at("resultType"), "complete");
+        EXPECT_EQ(frames[2].at("result").at("_meta").at(subscription_key), id);
+    }
+}
+
+TEST(HttpEndpointFeed, ALegacySessionHearsOfChangesOnItsConnectionStream) {
+    neomcp::HttpServerOptions options = quick_options();
+    FeedHarness harness(options);
+    const std::string session = open_session(harness.port);
+    Call stream(harness.port, "GET", legacy_headers(session, "text/event-stream"));
+    ASSERT_TRUE(stream.wait_for_headers());
+    ASSERT_EQ(stream.now().status, 200);
+    ASSERT_TRUE(harness.wait_for_watchers(1)) << "the session registered once its client was ready";
+
+    const Reply subscribed =
+        legacy_call(harness.port, session, 2, "resources/subscribe", json{{"uri", "test://watched-resource"}});
+    ASSERT_EQ(subscribed.status, 200);
+    EXPECT_EQ(subscribed.message().at("result"), json::object());
+    EXPECT_EQ(legacy_call(harness.port, session, 3, "tools/call", call_params("test_touch_resource")).status, 200);
+    ASSERT_TRUE(stream.wait_until(at_least(1)));
+    EXPECT_EQ(events(stream.now().body)[0],
+              (json{{"jsonrpc", "2.0"},
+                    {"method", "notifications/resources/updated"},
+                    {"params", {{"uri", "test://watched-resource"}}}}));
+
+    const Reply unsubscribed =
+        legacy_call(harness.port, session, 4, "resources/unsubscribe", json{{"uri", "test://watched-resource"}});
+    EXPECT_EQ(unsubscribed.message().at("result"), json::object());
+    EXPECT_EQ(legacy_call(harness.port, session, 5, "tools/call", call_params("test_touch_resource")).status, 200);
+    EXPECT_EQ(legacy_call(harness.port, session, 6, "tools/call", call_params("test_trigger_tool_change")).status, 200);
+    ASSERT_TRUE(stream.wait_until(at_least(2)));
+    EXPECT_EQ(events(stream.now().body)[1], (json{{"jsonrpc", "2.0"}, {"method", "notifications/tools/list_changed"}}))
+        << "the update after the unsubscription came first and was not sent";
+    // Nothing of a request goes to the connection stream, and nothing of the connection to a request.
+    for (const json& frame : events(stream.now().body)) EXPECT_FALSE(frame.contains("id")) << frame.dump();
+
+    EXPECT_EQ(send(harness.port, "DELETE", legacy_headers(session)).status, 204);
+    EXPECT_TRUE(stream.finish().ok);
+    EXPECT_TRUE(harness.wait_for_watchers(0));
+}
+
+TEST(HttpEndpointFeed, WithoutAConnectionStreamTheChangesOfALegacySessionAreDropped) {
+    FeedHarness harness;
+    const std::string session = open_session(harness.port);
+    EXPECT_EQ(legacy_call(harness.port, session, 2, "tools/call", call_params("test_trigger_tool_change")).status, 200);
+    Call stream(harness.port, "GET", legacy_headers(session, "text/event-stream"));
+    ASSERT_TRUE(stream.wait_for_headers());
+    EXPECT_EQ(legacy_call(harness.port, session, 3, "tools/call", call_params("test_trigger_prompt_change")).status,
+              200);
+    ASSERT_TRUE(stream.wait_until(at_least(1)));
+    EXPECT_EQ(method_of(events(stream.now().body)[0]), "notifications/prompts/list_changed")
+        << "the change before the stream opened was dropped, not kept for it";
+}
+
 }  // namespace

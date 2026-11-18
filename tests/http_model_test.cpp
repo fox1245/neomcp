@@ -358,6 +358,28 @@ TEST(HttpBodyStream, ARegistrationOnAClosedStreamRunsAtOnce) {
     EXPECT_EQ(calls, 1);
 }
 
+TEST(HttpBodyStream, WaitingForTheEndToBeReadReturnsWhenTheConsumerReadIt) {
+    BodyStream stream;
+    // A stream that was not ended is not waited for.
+    EXPECT_FALSE(stream.wait_finished(std::chrono::steady_clock::now() + patience));
+    stream.append("last words");
+    stream.end();
+    std::thread consumer([&] {
+        std::string out;
+        while (stream.read(out, patience) == BodyStream::Read::data) {
+        }
+    });
+    EXPECT_TRUE(stream.wait_finished(std::chrono::steady_clock::now() + patience));
+    consumer.join();
+    // A stream closed unread is not finished, and the wait ends with the close.
+    BodyStream cut;
+    cut.append("never read");
+    cut.end();
+    std::thread closer([&] { cut.close(); });
+    EXPECT_FALSE(cut.wait_finished(std::chrono::steady_clock::now() + patience));
+    closer.join();
+}
+
 TEST(HttpBodyStream, ClosingAFinishedStreamIsNotAClose) {
     BodyStream stream;
     int calls = 0;
