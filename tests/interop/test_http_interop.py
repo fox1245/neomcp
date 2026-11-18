@@ -23,6 +23,7 @@ FIXTURE = os.environ.get("NEOMCP_HTTP_FIXTURE", "")
 # Long enough for a loaded machine; reached only when something is broken.
 PATIENCE_SECONDS = 60
 
+# The tools these tests rely on. The server lists more: it is the one the conformance suite runs against.
 TOOL_NAMES = [
     "test_simple_text",
     "test_image_content",
@@ -106,7 +107,9 @@ class EraChecks:
     def test_lists_the_tools(self):
         async def body(client):
             listing = await client.list_tools()
-            self.assertEqual([tool.name for tool in listing.tools], TOOL_NAMES)
+            names = [tool.name for tool in listing.tools]
+            self.assertEqual(len(names), len(set(names)))
+            self.assertEqual([name for name in TOOL_NAMES if name not in names], [])
             for tool in listing.tools:
                 self.assertTrue(tool.description)
                 self.assertEqual(tool.input_schema["type"], "object")
