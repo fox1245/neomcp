@@ -300,11 +300,11 @@ private:
             asked.requests.emplace("visit", neomcp::ElicitationUrl{"Set your key", "https://example.com/key", std::nullopt});
         } else if (name == "asks_sampling_with_tools") {
             if (answered<neomcp::SamplingAnswer>(answers, "agent")) return text_result("used tools");
-            neomcp::SamplingRequest request = sampling("Use the tool");
+            neomcp::SamplingRequest with_tools = sampling("Use the tool");
             neomcp::ToolDefinition tool;
             tool.name = "lookup";
-            request.tools.push_back(std::move(tool));
-            asked.requests.emplace("agent", std::move(request));
+            with_tools.tools.push_back(std::move(tool));
+            asked.requests.emplace("agent", std::move(with_tools));
         } else if (name == "asks_nothing") {
             if (state == std::optional<std::string>("later")) return text_result("served after shedding");
             asked.state = "later";
