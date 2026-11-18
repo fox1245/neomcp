@@ -27,6 +27,7 @@
 #include <gtest/gtest.h>
 
 #include "core/base64.h"
+#include "neomcp/base64.h"
 #include "neomcp/jsonrpc.h"
 #include "neomcp/mechanism.h"
 #include "neomcp/model.h"
@@ -401,6 +402,30 @@ TEST(Base64, EveryByteValueRoundTrips) {
         EXPECT_EQ(neomcp::detail::decode_base64(encode_base64(part)), part) << length;
     }
     EXPECT_EQ(neomcp::detail::decode_base64(encode_base64(bytes)), bytes);
+}
+
+// The encoder a server uses is the plain one above, and the strict decoder reads back what it wrote.
+TEST(Base64, TheLibraryEncoderWritesTheTestVectorsOfRfc4648) {
+    const std::vector<std::pair<std::string, std::string>> vectors{
+        {"", ""}, {"Zg==", "f"}, {"Zm8=", "fo"}, {"Zm9v", "foo"}, {"Zm9vYg==", "foob"}, {"Zm9vYmE=", "fooba"},
+        {"Zm9vYmFy", "foobar"}};
+    for (const auto& [text, bytes] : vectors) {
+        SCOPED_TRACE(text);
+        EXPECT_EQ(neomcp::base64_encode(bytes), text);
+        const auto raw = std::as_bytes(std::span<const char>(bytes.data(), bytes.size()));
+        EXPECT_EQ(neomcp::base64_encode(raw), text);
+    }
+}
+
+TEST(Base64, TheLibraryEncoderAgreesWithThePlainOneAndTheDecoder) {
+    std::string bytes;
+    for (int value = 0; value < 256; ++value) bytes.push_back(static_cast<char>(value));
+    for (std::size_t length = 0; length <= bytes.size(); ++length) {
+        const std::string part = bytes.substr(0, length);
+        const std::string text = neomcp::base64_encode(part);
+        EXPECT_EQ(text, encode_base64(part)) << length;
+        EXPECT_EQ(neomcp::detail::decode_base64(text), part) << length;
+    }
 }
 
 TEST(Base64, RejectsEverythingButTheStrictForm) {

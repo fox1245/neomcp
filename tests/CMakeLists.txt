@@ -64,6 +64,11 @@ target_include_directories(neomcp_core_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}
 neomcp_configure_target(neomcp_core_test)
 gtest_discover_tests(neomcp_core_test DISCOVERY_TIMEOUT 120)
 
+add_executable(neomcp_uri_template_test uri_template_test.cpp)
+target_link_libraries(neomcp_uri_template_test PRIVATE neomcp::core GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_uri_template_test)
+gtest_discover_tests(neomcp_uri_template_test DISCOVERY_TIMEOUT 120)
+
 add_executable(neomcp_server_test server_test.cpp)
 target_link_libraries(neomcp_server_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
 neomcp_configure_target(neomcp_server_test)

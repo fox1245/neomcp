@@ -3,6 +3,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
+#include <string>
+
+#include "neomcp/base64.h"
 
 namespace neomcp::detail {
 namespace {
@@ -52,3 +56,39 @@ std::optional<std::string> decode_base64(std::string_view text) {
 }
 
 }  // namespace neomcp::detail
+
+namespace neomcp {
+
+std::string base64_encode(std::span<const std::byte> bytes) {
+    constexpr std::string_view digits = detail::alphabet;
+    constexpr std::size_t group_bytes = 3;
+    constexpr int bits_per_digit = 6;
+    constexpr unsigned digit_mask = 0x3Fu;
+    std::string out;
+    out.reserve((bytes.size() + group_bytes - 1) / group_bytes * 4);
+    std::size_t i = 0;
+    for (; i + group_bytes <= bytes.size(); i += group_bytes) {
+        const std::uint32_t group = (static_cast<std::uint32_t>(bytes[i]) << 16) |
+                                    (static_cast<std::uint32_t>(bytes[i + 1]) << 8) |
+                                    static_cast<std::uint32_t>(bytes[i + 2]);
+        for (int shift = 3 * bits_per_digit; shift >= 0; shift -= bits_per_digit) {
+            out.push_back(digits[(group >> shift) & digit_mask]);
+        }
+    }
+    const std::size_t left = bytes.size() - i;
+    if (left > 0) {
+        std::uint32_t group = static_cast<std::uint32_t>(bytes[i]) << 16;
+        if (left == 2) group |= static_cast<std::uint32_t>(bytes[i + 1]) << 8;
+        out.push_back(digits[(group >> 18) & digit_mask]);
+        out.push_back(digits[(group >> 12) & digit_mask]);
+        out.push_back(left == 2 ? digits[(group >> 6) & digit_mask] : '=');
+        out.push_back('=');
+    }
+    return out;
+}
+
+std::string base64_encode(std::string_view bytes) {
+    return base64_encode(std::as_bytes(std::span<const char>(bytes.data(), bytes.size())));
+}
+
+}  // namespace neomcp

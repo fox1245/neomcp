@@ -141,6 +141,7 @@ add_library(neomcp_core
     src/core/headers.cpp
     src/core/jsonrpc.cpp
     src/core/model.cpp
+    src/core/uri_template.cpp
     src/core/wire.cpp
     src/core/mechanisms.cpp
     src/core/session.cpp
