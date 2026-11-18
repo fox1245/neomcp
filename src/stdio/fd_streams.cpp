@@ -129,7 +129,7 @@ SigpipeGuard::SigpipeGuard(bool enabled) {
     if (!enabled) return;
     struct sigaction ignore = {};
     ignore.sa_handler = SIG_IGN;
-    ::sigemptyset(&ignore.sa_mask);
+    sigemptyset(&ignore.sa_mask);  // unqualified: some platforms define it as a macro
     auto saved = std::make_unique<Saved>();
     if (::sigaction(SIGPIPE, &ignore, &saved->action) == 0) saved_ = std::move(saved);
 }
