@@ -108,7 +108,9 @@ find_package(Threads REQUIRED)
 add_library(neomcp_core
     src/core/jsonrpc.cpp
     src/core/model.cpp
-    src/core/wire.cpp)
+    src/core/wire.cpp
+    src/core/mechanisms.cpp
+    src/core/session.cpp)
 add_library(neomcp::core ALIAS neomcp_core)
 target_include_directories(neomcp_core PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_link_libraries(neomcp_core PUBLIC neomcp::profile neojson::neojson Threads::Threads)
