@@ -85,25 +85,60 @@ struct CancelPoster {
     void operator()() const noexcept;
 };
 
-struct ToolEntry {
+struct CallRecord;
+
+// Something a call can run: a registered tool. A call runs it on a worker (plain) or on the coroutine thread, and the
+// run never throws: what the handler throws becomes an outcome.
+class Callable {
+public:
+    virtual ~Callable() = default;
+    virtual bool coroutine() const noexcept = 0;
+    // What the thing is called in the failures the server reports, such as "tool 'add'".
+    virtual const std::string& label() const noexcept = 0;
+
+    CallOutcome run_plain(const CallRecord& record, Context& context);
+    asio::awaitable<CallOutcome> run_async(const CallRecord& record, Context& context);
+
+protected:
+    virtual CallOutcome do_plain(const CallRecord& record, Context& context) = 0;
+    virtual asio::awaitable<CallOutcome> do_async(const CallRecord& record, Context& context) = 0;
+    // The outcome for an exception the handler threw (or for a result that cannot be used).
+    virtual CallOutcome failure(const std::exception_ptr& thrown) const = 0;
+};
+
+struct ToolEntry final : Callable {
+    ToolEntry(const ServerOptions& server_options, Body tool_body, std::string tool_label)
+        : options(server_options), body(std::move(tool_body)), name_label(std::move(tool_label)) {}
+
+    bool coroutine() const noexcept override { return std::holds_alternative<std::unique_ptr<CoroutineBody>>(body); }
+    const std::string& label() const noexcept override { return name_label; }
+
+    const ServerOptions& options;
     Body body;
     std::optional<json_schema::Validator> input;
     std::optional<json_schema::Validator> output;
+    std::string name_label;
+
+protected:
+    CallOutcome do_plain(const CallRecord& record, Context& context) override;
+    asio::awaitable<CallOutcome> do_async(const CallRecord& record, Context& context) override;
+    CallOutcome failure(const std::exception_ptr& thrown) const override;
+
+private:
+    CallOutcome settle(ToolResult result) const;
 };
 
 // One call, from admission until it is answered.
 struct CallRecord {
-    CallRecord(const ToolEntry& tool, const ToolDefinition& tool_definition, CallControl call_control,
-               Completion completion, json call_arguments, json call_meta)
-        : entry(&tool),
-          definition(&tool_definition),
+    CallRecord(Callable& callable_to_run, CallControl call_control, Completion completion, json call_arguments,
+               json call_meta)
+        : callable(&callable_to_run),
           control(std::move(call_control)),
           done(std::move(completion)),
           arguments(std::move(call_arguments)),
           meta(std::move(call_meta)) {}
 
-    const ToolEntry* entry;
-    const ToolDefinition* definition;
+    Callable* callable;
     CallControl control;
     Completion done;
     json arguments;
@@ -154,10 +189,13 @@ private:
         void operator()(const std::exception_ptr& failure) const {
             record->finished = true;
             if (failure) {
-                core->finish(record, HostFailure{"the coroutine of tool '" + record->definition->name + "' failed"});
+                core->finish(record, HostFailure{"the coroutine of " + record->callable->label() + " failed"});
             }
         }
     };
+
+    // Queues or spawns one call of a registered thing, or refuses it.
+    void admit(Callable& callable, json arguments, json meta, CallControl control, Completion done);
 
     json_schema::Validator compile(const std::string& tool, std::string_view which, const json& schema) const;
     void ensure_registering(const std::string& tool, std::string_view action) const;
@@ -167,8 +205,6 @@ private:
     void run_io();
     void run_plain(const std::shared_ptr<CallRecord>& record);
     asio::awaitable<void> drive(std::shared_ptr<CallRecord> record);
-    CallOutcome settle(const CallRecord& record, ToolResult result) const;
-    ToolResult failed(const char* what) const;
 
     // Immutable once serving began.
     ServerOptions options_;
@@ -234,7 +270,7 @@ void ServerCore::shutdown() {
     // No lock is held from here on: stop callbacks run inline and may report or complete.
     for (const auto& record : running) record->stop.request_stop();
     for (const auto& record : waiting) {
-        finish(record, HostFailure{"the server shut down before tool '" + record->definition->name + "' ran"});
+        finish(record, HostFailure{"the server shut down before " + record->callable->label() + " ran"});
     }
     for (auto& worker : workers_) {
         if (worker.joinable()) worker.join();
@@ -291,8 +327,7 @@ std::size_t ServerCore::add(ToolDefinition definition, Body body) {
     if (definition.meta && !definition.meta->is_object()) {
         throw std::invalid_argument("neomcp: tool '" + name + "': _meta must be an object");
     }
-    auto entry = std::make_unique<ToolEntry>();
-    entry->body = std::move(body);
+    auto entry = std::make_unique<ToolEntry>(options_, std::move(body), "tool '" + name + "'");
     entry->input = compile(name, "input", definition.input_schema);
     if (definition.output_schema) entry->output = compile(name, "output", *definition.output_schema);
     const std::size_t index = definitions_.size();
@@ -364,12 +399,15 @@ void ServerCore::call(const CallRequest& request, CallControl control, Completio
         done(HostFailure{"the server has no tool named '" + request.name + "'"});
         return;
     }
-    const ToolEntry& entry = *entries_[found->second];
-    auto record = std::make_shared<CallRecord>(entry, definitions_[found->second], std::move(control), std::move(done),
-                                               request.arguments, request.meta);
+    admit(*entries_[found->second], request.arguments, request.meta, std::move(control), std::move(done));
+}
+
+void ServerCore::admit(Callable& callable, json arguments, json meta, CallControl control, Completion done) {
+    auto record = std::make_shared<CallRecord>(callable, std::move(control), std::move(done), std::move(arguments),
+                                               std::move(meta));
     // Runs at once when the session already requested stop.
     record->follow.emplace(record->control.stop_token(), StopForward{&record->stop});
-    const bool coroutine = std::holds_alternative<std::unique_ptr<CoroutineBody>>(entry.body);
+    const bool coroutine = callable.coroutine();
     record->coroutine = coroutine;
     {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -398,7 +436,7 @@ void ServerCore::call(const CallRequest& request, CallControl control, Completio
                 in_flight_.erase(record->serial);
                 --coroutines_;
                 lock.unlock();
-                record->done(HostFailure{"tool '" + record->definition->name + "' could not be started"});
+                record->done(HostFailure{record->callable->label() + " could not be started"});
                 return;
             }
         }
@@ -433,27 +471,63 @@ void ServerCore::finish(const std::shared_ptr<CallRecord>& record, CallOutcome o
 // ---------------------------------------------------------------------------------------------------------------
 // Running a call
 
-ToolResult ServerCore::failed(const char* what) const {
-    std::string text = "The tool failed";
-    if (options_.expose_error_details) {
-        text += ": ";
-        text += what != nullptr ? what : "an exception that is not a std::exception";
+CallOutcome Callable::run_plain(const CallRecord& record, Context& context) {
+    try {
+        return do_plain(record, context);
+    } catch (...) {
+        return failure(std::current_exception());
     }
-    return error_result(std::move(text));
 }
 
-CallOutcome ServerCore::settle(const CallRecord& record, ToolResult result) const {
-    const ToolEntry& entry = *record.entry;
-    if (!entry.output || result.is_error) return result;
-    const std::string& name = record.definition->name;
-    if (!result.structured_content) {
-        return HostFailure{"tool '" + name + "' has an output schema and its result has no structured content"};
+asio::awaitable<CallOutcome> Callable::run_async(const CallRecord& record, Context& context) {
+    CallOutcome outcome = HostFailure{};
+    try {
+        outcome = co_await do_async(record, context);
+    } catch (...) {
+        outcome = failure(std::current_exception());
     }
-    if (auto issue = entry.output->validate(*result.structured_content)) {
-        return HostFailure{"the structured content of tool '" + name + "' does not match its output schema: " +
+    co_return outcome;
+}
+
+CallOutcome ToolEntry::failure(const std::exception_ptr& thrown) const {
+    const auto failed = [&](const char* what) {
+        std::string text = "The tool failed";
+        if (options.expose_error_details) {
+            text += ": ";
+            text += what != nullptr ? what : "an exception that is not a std::exception";
+        }
+        return error_result(std::move(text));
+    };
+    try {
+        std::rethrow_exception(thrown);
+    } catch (const ToolError& error) {
+        return error_result(error.what());
+    } catch (const std::exception& error) {
+        return failed(error.what());
+    } catch (...) {
+        return failed(nullptr);
+    }
+}
+
+CallOutcome ToolEntry::settle(ToolResult result) const {
+    if (!output || result.is_error) return result;
+    if (!result.structured_content) {
+        return HostFailure{name_label + " has an output schema and its result has no structured content"};
+    }
+    if (auto issue = output->validate(*result.structured_content)) {
+        return HostFailure{"the structured content of " + name_label + " does not match its output schema: " +
                            describe_issue("structuredContent", *issue)};
     }
     return result;
+}
+
+CallOutcome ToolEntry::do_plain(const CallRecord& record, Context& context) {
+    return settle(std::get<std::unique_ptr<PlainBody>>(body)->run(record.arguments, context));
+}
+
+asio::awaitable<CallOutcome> ToolEntry::do_async(const CallRecord& record, Context& context) {
+    ToolResult result = co_await std::get<std::unique_ptr<CoroutineBody>>(body)->run(record.arguments, context);
+    co_return settle(std::move(result));
 }
 
 void ServerCore::work() {
@@ -478,45 +552,26 @@ void ServerCore::work() {
 
 void ServerCore::run_plain(const std::shared_ptr<CallRecord>& record) {
     if (record->stop.stop_requested()) {
-        finish(record, HostFailure{"tool '" + record->definition->name + "' was stopped before it ran"});
+        finish(record, HostFailure{record->callable->label() + " was stopped before it ran"});
         return;
     }
-    PlainBody& body = *std::get<std::unique_ptr<PlainBody>>(record->entry->body);
     CallOutcome outcome = HostFailure{};
     {
         Context context(record->control, record->meta, record->stop.get_token());
-        try {
-            outcome = settle(*record, body.run(record->arguments, context));
-        } catch (const ToolError& error) {
-            outcome = error_result(error.what());
-        } catch (const std::exception& error) {
-            outcome = failed(error.what());
-        } catch (...) {
-            outcome = failed(nullptr);
-        }
+        outcome = record->callable->run_plain(*record, context);
     }
     finish(record, std::move(outcome));
 }
 
 asio::awaitable<void> ServerCore::drive(std::shared_ptr<CallRecord> record) {
-    CallOutcome outcome = HostFailure{"tool '" + record->definition->name + "' was stopped before it ran"};
+    CallOutcome outcome = HostFailure{record->callable->label() + " was stopped before it ran"};
     try {
         // Begin on a later turn of the io thread. Spawning dispatches, which runs inline on the io thread itself, and
         // nothing of the call may run inside call().
         co_await asio::post(io_, asio::use_awaitable);
         if (!record->stop.stop_requested()) {
-            CoroutineBody& body = *std::get<std::unique_ptr<CoroutineBody>>(record->entry->body);
             Context context(record->control, record->meta, record->stop.get_token());
-            try {
-                ToolResult result = co_await body.run(record->arguments, context);
-                outcome = settle(*record, std::move(result));
-            } catch (const ToolError& error) {
-                outcome = error_result(error.what());
-            } catch (const std::exception& error) {
-                outcome = failed(error.what());
-            } catch (...) {
-                outcome = failed(nullptr);
-            }
+            outcome = co_await record->callable->run_async(*record, context);
         }
     } catch (...) {
         // The first resumption throws when the call was cancelled before the tool started; the outcome says so.
