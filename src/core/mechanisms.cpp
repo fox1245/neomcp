@@ -13,6 +13,7 @@ std::string_view to_string(MechanismSlot slot) noexcept {
         case MechanismSlot::state: return "state";
         case MechanismSlot::batch: return "batch";
         case MechanismSlot::cancel: return "cancel";
+        case MechanismSlot::server_input: return "server_input";
     }
     return {};
 }
@@ -234,6 +235,127 @@ public:
     bool stops_on_stream_close() const override { return true; }
 };
 
+// ---- server_input
+
+// `input_required_result`: the call's result asks (a result of the type InputRequiredResult, with the requests and a
+// state), and the client retries the call with the answers and the state beside the call's own params. A request may
+// ask exactly where its params type has the answers member: the revision's schema puts it on the requests that may.
+class InputRequiredResult final : public InputMechanism {
+public:
+    static constexpr std::string_view result_type = "InputRequiredResult";
+    static constexpr std::string_view responses_member = "inputResponses";
+    static constexpr std::string_view state_member = "requestState";
+    static constexpr std::string_view requests_member = "inputRequests";
+    static constexpr std::string_view result_type_member = "resultType";
+    static constexpr std::string_view input_required = "input_required";
+
+    std::optional<std::string> check(const profile::Profile& profile) const override {
+        const profile::Type* type = profile.type(result_type);
+        if (type == nullptr) return "the profile has no type " + std::string(result_type);
+        for (const auto name : {requests_member, state_member, result_type_member}) {
+            if (!type->has_property(name)) {
+                return "the profile's " + std::string(result_type) + " has no member " + std::string(name);
+            }
+        }
+        if (profile.input_requests().empty()) return "the profile lists no input requests";
+        return std::nullopt;
+    }
+
+    InputDelivery delivery() const override { return InputDelivery::result; }
+
+    bool asks_on(const profile::Profile& profile, std::string_view method) const override {
+        const profile::Message* request = profile.request(method);
+        if (request == nullptr || !request->from_client || !request->params) return false;
+        const profile::Type* params = profile.type(*request->params);
+        return params != nullptr && params->has_property(responses_member) && params->has_property(state_member);
+    }
+
+    bool carries(const profile::Profile& profile, std::string_view method) const override {
+        return profile.input_request(method) != nullptr;
+    }
+
+    std::optional<std::string> params_type(const profile::Profile& profile, std::string_view method) const override {
+        const profile::InputRequest* request = profile.input_request(method);
+        return request == nullptr ? std::nullopt : request->params;
+    }
+
+    std::span<const std::string> params_required(const profile::Profile& profile,
+                                                 std::string_view method) const override {
+        const profile::InputRequest* request = profile.input_request(method);
+        if (request == nullptr) return {};
+        return request->params_required;
+    }
+
+    std::variant<InputRetry, RequestError> retry(const Message& request, const profile::Profile& profile) const override {
+        InputRetry retry;
+        if (!asks_on(profile, request.method)) return retry;
+        if (const json* responses = member(request.params, responses_member)) {
+            if (!responses->is_object()) {
+                return invalid_params("Invalid params: params." + std::string(responses_member) + " must be an object");
+            }
+            retry.responses = *responses;
+        }
+        if (const json* state = member(request.params, state_member)) retry.state = *state;
+        return retry;
+    }
+
+    json asking_result(json requests, std::string state) const override {
+        json body = json::object();
+        body[std::string(result_type_member)] = std::string(input_required);
+        if (requests.is_object() && !requests.empty()) body[std::string(requests_member)] = std::move(requests);
+        body[std::string(state_member)] = std::move(state);
+        return body;
+    }
+
+    std::string_view asking_result_type() const override { return result_type; }
+
+    json asking_request(const RequestId&, std::string, json) const override { return json(); }
+};
+
+// `server_request`: the session sends each request to the client as a JSON-RPC request of its own, on the stream of
+// the call that asks, and waits for the client's responses.
+class ServerRequest final : public InputMechanism {
+public:
+    std::optional<std::string> check(const profile::Profile&) const override { return std::nullopt; }
+    InputDelivery delivery() const override { return InputDelivery::requests; }
+
+    // The revisions that send requests put no limit on the requests a server may send them during.
+    bool asks_on(const profile::Profile&, std::string_view) const override { return true; }
+
+    bool carries(const profile::Profile& profile, std::string_view method) const override {
+        const profile::Message* request = profile.request(method);
+        return request != nullptr && request->from_server;
+    }
+
+    std::optional<std::string> params_type(const profile::Profile& profile, std::string_view method) const override {
+        const profile::Message* request = profile.request(method);
+        return request == nullptr ? std::nullopt : request->params;
+    }
+
+    std::span<const std::string> params_required(const profile::Profile& profile,
+                                                 std::string_view method) const override {
+        const profile::Message* request = profile.request(method);
+        if (request == nullptr) return {};
+        return request->params_required;
+    }
+
+    std::variant<InputRetry, RequestError> retry(const Message&, const profile::Profile&) const override {
+        return InputRetry{};
+    }
+
+    json asking_result(json, std::string) const override { return json(); }
+    std::string_view asking_result_type() const override { return {}; }
+
+    json asking_request(const RequestId& id, std::string method, json params) const override {
+        json message = json::object();
+        message["jsonrpc"] = "2.0";
+        message["id"] = id.to_json();
+        message["method"] = std::move(method);
+        if (!params.is_null()) message["params"] = std::move(params);
+        return message;
+    }
+};
+
 template <typename Interface, typename Implementation>
 MechanismRegistry::Factory<Interface> factory() {
     return [] { return std::unique_ptr<Interface>(std::make_unique<Implementation>()); };
@@ -249,6 +371,8 @@ MechanismRegistry make_builtin() {
     registry.add_batch("none", factory<BatchMechanism, NoBatch>());
     registry.add_cancel("cancelled_notification", factory<CancelMechanism, CancelledNotification>());
     registry.add_cancel("close_response_stream", factory<CancelMechanism, CloseResponseStream>());
+    registry.add_input("input_required_result", factory<InputMechanism, InputRequiredResult>());
+    registry.add_input("server_request", factory<InputMechanism, ServerRequest>());
     return registry;
 }
 
@@ -281,6 +405,9 @@ void MechanismRegistry::add_batch(std::string name, Factory<BatchMechanism> fact
 void MechanismRegistry::add_cancel(std::string name, Factory<CancelMechanism> factory) {
     put(MechanismSlot::cancel, std::move(name), std::move(factory));
 }
+void MechanismRegistry::add_input(std::string name, Factory<InputMechanism> factory) {
+    put(MechanismSlot::server_input, std::move(name), std::move(factory));
+}
 
 bool MechanismRegistry::remove(MechanismSlot slot, std::string_view name) {
     return factories_.erase(Key(slot, std::string(name))) > 0;
@@ -309,6 +436,9 @@ std::unique_ptr<BatchMechanism> MechanismRegistry::make_batch(std::string_view n
 }
 std::unique_ptr<CancelMechanism> MechanismRegistry::make_cancel(std::string_view name) const {
     return make<CancelMechanism>(MechanismSlot::cancel, name);
+}
+std::unique_ptr<InputMechanism> MechanismRegistry::make_input(std::string_view name) const {
+    return make<InputMechanism>(MechanismSlot::server_input, name);
 }
 
 const MechanismRegistry& builtin_mechanisms() {

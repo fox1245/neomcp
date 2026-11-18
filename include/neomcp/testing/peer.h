@@ -2,8 +2,8 @@
 //
 // Every wait is on a condition variable with a caller-given timeout; nothing polls or sleeps. What the session
 // writes is sorted as it arrives: responses with an id go to the request that waits for that id, notifications to
-// next_notification(), and everything else (batch answers, errors with id null) to next_other(). transcript() keeps
-// every line in the order it was written.
+// next_notification(), requests to the client to next_request(), and everything else (batch answers, errors with id
+// null) to next_other(). transcript() keeps every line in the order it was written.
 #pragma once
 
 #include <chrono>
@@ -61,6 +61,8 @@ public:
     void send(std::string_view line);
 
     std::optional<json> next_notification(Timeout timeout);
+    // The next request the session sent to the client (it has a method and an id).
+    std::optional<json> next_request(Timeout timeout);
     std::optional<json> next_other(Timeout timeout);
     // Every message the session wrote so far, in order.
     std::vector<json> transcript() const;
@@ -97,6 +99,7 @@ private:
     std::condition_variable arrived_;
     std::map<std::string, std::deque<json>> responses_;  // by the id's serialised form
     std::deque<json> notifications_;
+    std::deque<json> requests_;
     std::deque<json> others_;
     std::vector<json> transcript_;
 

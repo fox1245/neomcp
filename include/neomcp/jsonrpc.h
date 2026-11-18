@@ -67,6 +67,9 @@ struct Message {
     std::string method;           // requests and notifications
     json params;                  // null when the message has none; else an object or an array
     std::string problem;          // invalid messages only
+    // Responses only: the `result` member, or the `error` member when `failed` is set.
+    json outcome;
+    bool failed = false;
 };
 
 // Classifies a parsed JSON value. Takes the value so that params can be moved out of it.

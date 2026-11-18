@@ -2,9 +2,9 @@
 //
 // A profile names one mechanism per slot (profile.h); a session asks the mechanism of the slot, never the revision
 // string or the era, how to behave. The registry maps (slot, name) to a factory; the built-in registry has an
-// implementation for every name the library declares for the slots a session needs (open, state, batch and the
-// cancellation mechanism of a transport). The slots server_input and change_feed are declared by the profile
-// library only; nothing here needs them yet.
+// implementation for every name the library declares for the slots a session needs (open, state, server_input, batch
+// and the cancellation mechanism of a transport). The slot change_feed is declared by the profile library only;
+// nothing here needs it yet.
 #pragma once
 
 #include <functional>
@@ -116,8 +116,50 @@ public:
     virtual bool stops_on_stream_close() const = 0;
 };
 
+// How the requests of a call that asks for input (InputRequired) reach the client.
+enum class InputDelivery {
+    result,   // the call's result asks; the client retries the call with the answers, and the call ends here
+    requests  // each request goes to the client as a request of its own; the call waits for the responses
+};
+
+// What a request carries about the round before it, under a mechanism whose retried call answers.
+struct InputRetry {
+    std::optional<json> responses;  // the answers member, an object
+    std::optional<json> state;      // the state member as given: a well-formed one is a string
+};
+
+// Slot `server_input`: how a call asks its client for input while it is served.
+class InputMechanism {
+public:
+    virtual ~InputMechanism() = default;
+
+    // Why the mechanism cannot serve the profile; empty when it can.
+    virtual std::optional<std::string> check(const profile::Profile& profile) const = 0;
+    virtual InputDelivery delivery() const = 0;
+
+    // Whether a call of the client request `method` may ask for input under the profile.
+    virtual bool asks_on(const profile::Profile& profile, std::string_view method) const = 0;
+    // Whether the profile lets a server ask its client with a request of `method` (an input request's method), and
+    // the name of the params type of such a request where the profile names one.
+    virtual bool carries(const profile::Profile& profile, std::string_view method) const = 0;
+    virtual std::optional<std::string> params_type(const profile::Profile& profile, std::string_view method) const = 0;
+    // The members the params of a request of `method` require under the profile, where no params type names them.
+    virtual std::span<const std::string> params_required(const profile::Profile& profile,
+                                                         std::string_view method) const = 0;
+
+    // delivery result: what a request of `method` carries about the round before it, or an error when that is
+    // malformed. delivery requests: always empty (the client cannot answer this way).
+    virtual std::variant<InputRetry, RequestError> retry(const Message& request, const profile::Profile& profile) const = 0;
+    // delivery result: the body of the result that asks, from the requests as written ({key: {method, params}}) and
+    // the sealed state; the type of that result for the profile's filters.
+    virtual json asking_result(json requests, std::string state) const = 0;
+    virtual std::string_view asking_result_type() const = 0;
+    // delivery requests: the message that asks the client one request under the session's own id.
+    virtual json asking_request(const RequestId& id, std::string method, json params) const = 0;
+};
+
 // The slots of the registry.
-enum class MechanismSlot { open, state, batch, cancel };
+enum class MechanismSlot { open, state, batch, cancel, server_input };
 std::string_view to_string(MechanismSlot slot) noexcept;
 
 class MechanismRegistry {
@@ -130,6 +172,7 @@ public:
     void add_state(std::string name, Factory<StateMechanism> factory);
     void add_batch(std::string name, Factory<BatchMechanism> factory);
     void add_cancel(std::string name, Factory<CancelMechanism> factory);
+    void add_input(std::string name, Factory<InputMechanism> factory);
     // Removes a name; returns whether it was there.
     bool remove(MechanismSlot slot, std::string_view name);
 
@@ -142,11 +185,12 @@ public:
     std::unique_ptr<StateMechanism> make_state(std::string_view name) const;
     std::unique_ptr<BatchMechanism> make_batch(std::string_view name) const;
     std::unique_ptr<CancelMechanism> make_cancel(std::string_view name) const;
+    std::unique_ptr<InputMechanism> make_input(std::string_view name) const;
 
 private:
     using Key = std::pair<MechanismSlot, std::string>;
     using AnyFactory = std::variant<Factory<OpenMechanism>, Factory<StateMechanism>, Factory<BatchMechanism>,
-                                    Factory<CancelMechanism>>;
+                                    Factory<CancelMechanism>, Factory<InputMechanism>>;
 
     template <typename Interface>
     void put(MechanismSlot slot, std::string name, Factory<Interface> factory);
@@ -156,8 +200,8 @@ private:
     std::map<Key, AnyFactory> factories_;
 };
 
-// The mechanisms of the library: every name profile::declared_mechanisms declares for open, state and batch, and
-// every name profile::declared_cancel declares for a transport.
+// The mechanisms of the library: every name profile::declared_mechanisms declares for open, state, server_input and
+// batch, and every name profile::declared_cancel declares for a transport.
 const MechanismRegistry& builtin_mechanisms();
 
 }  // namespace neomcp

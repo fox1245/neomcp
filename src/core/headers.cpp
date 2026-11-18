@@ -31,7 +31,7 @@ std::optional<std::string> decoded(std::string_view value, const profile::Encode
     return std::string(value);
 }
 
-std::string quoted(std::string_view text) { return "'" + std::string(text) + "'"; }
+std::string in_quotes(std::string_view text) { return "'" + std::string(text) + "'"; }
 
 }  // namespace
 
@@ -109,8 +109,8 @@ std::optional<std::string> check_request_headers(const Message& request, std::sp
             }
         }
         if (given != expected) {
-            return prefix + header.name + " header value " + quoted(found.value) + " does not match body value " +
-                   quoted(expected);
+            return prefix + header.name + " header value " + in_quotes(found.value) + " does not match body value " +
+                   in_quotes(expected);
         }
     }
     return std::nullopt;

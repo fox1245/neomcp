@@ -4,6 +4,10 @@
 // the tool sees cancellation and reports progress and log messages, and a Completion, which it calls exactly once
 // with the outcome, inline or later from any thread. Both are copyable handles that stay safe to use after the
 // session closed or was destroyed: anything they report then is dropped.
+//
+// A call may also end with InputRequired (neomcp/input.h): the host needs something only the client can give. The
+// session asks the client and calls the host again with the answers, in a new call() with a new Completion (and the
+// same CallControl); the host decides from the answers and its state what is still missing.
 #pragma once
 
 #include <memory>
@@ -14,6 +18,7 @@
 #include <utility>
 #include <variant>
 
+#include "neomcp/input.h"
 #include "neomcp/json.h"
 #include "neomcp/model.h"
 #include "neomcp/profile.h"
@@ -24,12 +29,17 @@ namespace detail {
 class SessionCore;
 struct CallState;
 struct CompletionState;
+struct WaitState;
 }  // namespace detail
 
 struct CallRequest {
     std::string name;
     json arguments = json::object();  // an object; empty when the request had none
     json meta = nullptr;              // the request's params._meta; null when absent
+    // When the host asked for input before (InputRequired): the answers of the last round by key, and the state the
+    // host gave with its requests. Empty on the first round.
+    InputResponses input_responses;
+    std::optional<std::string> request_state;
 };
 
 // Why a host did not run a call.
@@ -44,7 +54,9 @@ struct HostFailure {
     std::string message;
 };
 
-using CallOutcome = std::variant<ToolResult, Refusal, HostFailure>;
+// A tool's outcome, or what a call of any kind may end with: a refusal, a failure, or a request for input. Input may
+// be asked for by tools, prompts and resource reads; a completion that asks is answered with an internal error.
+using CallOutcome = std::variant<ToolResult, Refusal, HostFailure, InputRequired>;
 
 // The URI of a resources/read names nothing the host offers. It is answered with the error the revision prescribes
 // for a resource that does not exist.
@@ -85,10 +97,34 @@ public:
     const json& client_info() const noexcept;
     const json& client_capabilities() const noexcept;
 
+    // Whether the call may ask the client for `request`: the revision can carry it and the client declared the
+    // capability it needs (for an elicitation, the mode; for sampling, tools and context where the request uses
+    // them). A call that asks for a request the client cannot take fails as the revision prescribes, so a host that
+    // can do without asks something else instead.
+    bool client_supports(const InputRequest& request) const;
+
 private:
     friend class detail::SessionCore;
     explicit CallControl(std::shared_ptr<detail::CallState> state) : state_(std::move(state)) {}
     std::shared_ptr<detail::CallState> state_;
+};
+
+// A call that waits for its client's answers to the requests it sent (under the mechanism that sends them as requests
+// to the client). The session owns no clock: whoever wants a time-out keeps one and calls expire() when it lapses. A
+// copyable handle that stays safe to use after the wait ended and after the session closed.
+class InputWait {
+public:
+    // Stop is requested when the wait ends, however it ends: every answer arrived, the call was cancelled, its unit
+    // was abandoned, the session closed, or expire() was called.
+    std::stop_token ended() const noexcept;
+    // Ends the wait as timed out: the call fails as a call fails whose client did not answer (see Session), and
+    // nothing more is sent for it. Ignored when the wait has ended already.
+    void expire() const;
+
+private:
+    friend class detail::SessionCore;
+    explicit InputWait(std::shared_ptr<detail::WaitState> state) : state_(std::move(state)) {}
+    std::shared_ptr<detail::WaitState> state_;
 };
 
 // Completes one call. Copies share one completion: the first call counts and later ones are ignored. When the
@@ -96,8 +132,8 @@ private:
 // throws what the session's sink throws: a failing sink closes the session, and the tool's thread goes on.
 class Completion {
 public:
-    // A tool's outcome, or the refusal or the failure of a call of any kind. A tool result that completes a call
-    // of another kind is a defect of the host and is answered with an internal error.
+    // A tool's outcome, or the refusal, the failure or the request for input of a call of any kind. A tool result
+    // that completes a call of another kind is a defect of the host and is answered with an internal error.
     void operator()(CallOutcome outcome) const;
     // The outcome of a call of another kind than a tool. An outcome that does not belong to the call's kind (a read
     // result for a prompt) is a defect of the host and is answered with an internal error.
@@ -128,9 +164,15 @@ public:
     virtual std::span<const ToolDefinition> tools() const = 0;
 
     // Runs the tool `request.name`, one of tools(). Must not block for the duration of the tool: a session calls
-    // it on the thread that reads its input. An exception that escapes is treated as the call never completing:
-    // `done` then answers with an internal error once its last copy is gone.
+    // it on the thread that reads its input (and, for a call that asked for input, on the thread that delivered the
+    // last answer). An exception that escapes is treated as the call never completing: `done` then answers with an
+    // internal error once its last copy is gone.
     virtual void call(const CallRequest& request, CallControl control, Completion done) = 0;
+
+    // Told that a call waits for its client's answers (see InputWait): after the session has handed the round's
+    // requests to its sink, on the thread that completed the round, with no lock of the session held. Must not
+    // block. The default keeps no time-out: the call waits until it is answered or cancelled, or the session closes.
+    virtual void awaiting_input(InputWait wait) { static_cast<void>(wait); }
 };
 
 }  // namespace neomcp

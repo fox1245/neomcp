@@ -54,6 +54,8 @@
 #include <utility>
 
 #include "core/headers.h"
+#include "core/input.h"
+#include "core/request_state.h"
 #include "neomcp/feature_host.h"
 #include "neomcp/jsonrpc.h"
 #include "neomcp/wire.h"
@@ -73,6 +75,18 @@ std::string_view to_string(RefusalReason reason) noexcept {
         case RefusalReason::unsupported_version_header: return "unsupported_version_header";
         case RefusalReason::method_not_found: return "method_not_found";
         case RefusalReason::missing_connection: return "missing_connection";
+        case RefusalReason::missing_client_capability: return "missing_client_capability";
+    }
+    return {};
+}
+
+std::string_view to_string(RequestStateProblem problem) noexcept {
+    switch (problem) {
+        case RequestStateProblem::malformed: return "malformed";
+        case RequestStateProblem::signature: return "signature";
+        case RequestStateProblem::version: return "version";
+        case RequestStateProblem::expired: return "expired";
+        case RequestStateProblem::binding: return "binding";
     }
     return {};
 }
@@ -91,12 +105,32 @@ constexpr std::string_view header_mismatch_error = "header_mismatch";
 constexpr std::string_view resource_not_found_error = "resource_not_found";
 constexpr std::string_view prompt_reference_type = "ref/prompt";
 constexpr std::string_view resource_reference_type = "ref/resource";
+constexpr std::string_view missing_capability_error = "missing_required_client_capability";
+constexpr std::string_view required_capabilities_member = "requiredCapabilities";
+// The answer to every refused request state, whatever the cause: the text other implementations use, so that a
+// client sees the same refusal from any server.
+constexpr std::string_view invalid_state_message = "Invalid or expired requestState";
+constexpr std::string_view invalid_state_reason = "invalid_request_state";
 
 const json* member(const json& object, std::string_view name) {
     const auto* members = object.get_ptr<const json::object_t*>();
     if (members == nullptr) return nullptr;
     const auto found = members->find(std::string(name));
     return found == members->end() ? nullptr : &found->second;
+}
+
+// Adds the members of `source` to `target`, both objects, merging the objects they both have.
+void merge_objects(json& target, const json& source) {
+    const auto* members = source.get_ptr<const json::object_t*>();
+    if (members == nullptr) return;
+    for (const auto& [name, value] : *members) {
+        json& slot = target[name];
+        if (slot.is_object() && value.is_object()) {
+            merge_objects(slot, value);
+        } else {
+            slot = value;
+        }
+    }
 }
 
 // A cursor this server issued: the decimal index of a tool, written without leading zeros.
@@ -141,6 +175,7 @@ struct Served {
     const StateMechanism* state = nullptr;
     const BatchMechanism* batch = nullptr;
     const CancelMechanism* cancel = nullptr;  // the one the profile names for the session's transport
+    const InputMechanism* input = nullptr;
     InvalidArguments invalid_arguments = InvalidArguments::invalid_params_error;
     // What the profile's entry for the transport says about headers; views into the profile.
     std::span<const profile::RequestHeader> request_headers;
@@ -198,6 +233,22 @@ struct Place {
 // What a call in flight is for; it decides which outcomes may complete it.
 enum class CallKind { tool, resource_read, prompt_get, completion };
 
+// What a call asks its host, kept to ask it again when answers arrive.
+using HostRequest = std::variant<std::monostate, CallRequest, ReadRequest, PromptRequest>;
+
+// What a call is about, as sealed request state is bound to it: the method, the tool or prompt name or the resource
+// URI, and the arguments.
+struct CallSubject {
+    std::string method;
+    std::string name;
+    json arguments = json::object();
+    HostRequest request;  // the first round's request to the host
+    bool retry = false;   // the request carried answers or a state of an earlier round
+    std::uint64_t round = 0;  // how many times the call asked before, by its sealed state
+};
+
+struct WaitState;
+
 struct CallState {
     std::weak_ptr<SessionCore> core;
     CallKind kind = CallKind::tool;
@@ -212,13 +263,31 @@ struct CallState {
     Unit unit;  // the unit the request came in; null when none
     Batch batch;
     std::size_t batch_index = 0;
+    CallSubject subject;
 
     // Guarded by the core's mutex.
     bool active = true;      // false once answered, cancelled or closed
     bool cancelled = false;  // the client cancelled it
     std::optional<double> last_progress;
+    std::size_t rounds = 0;            // rounds of requests sent to the client
+    std::shared_ptr<WaitState> wait;   // the round that waits for its answers; null when none
 
     explicit CallState(RequestId request_id) : id(std::move(request_id)) {}
+};
+
+// One round of requests a call sent to the client, until every answer arrived or the wait ended otherwise.
+struct WaitState {
+    std::weak_ptr<SessionCore> core;
+    std::weak_ptr<CallState> call;
+    std::stop_source ended;
+    std::optional<std::string> state;  // the host's, given back with the answers
+
+    // Guarded by the core's mutex.
+    bool open = true;
+    std::map<std::string, std::string> asked;  // key -> method of the request
+    std::vector<RequestId> ids;                // the ids the round's requests were sent with
+    std::size_t outstanding = 0;
+    InputResponses answers;
 };
 
 struct CompletionState {
@@ -264,6 +333,9 @@ public:
     void complete(const std::shared_ptr<CallState>& call, CallOutcome outcome);
     void complete(const std::shared_ptr<CallState>& call, FeatureOutcome outcome);
     void complete_dropped(const std::shared_ptr<CallState>& call);
+    // Ends a wait as timed out (InputWait::expire).
+    void expire(const std::shared_ptr<WaitState>& wait);
+    bool client_supports(const CallState& call, const InputRequest& request) const;
     void progress(const std::shared_ptr<CallState>& call, double value, std::optional<double> total,
                   std::optional<std::string> message);
     void log(const std::shared_ptr<CallState>& call, LogLevel level, json data, std::optional<std::string> logger);
@@ -294,6 +366,7 @@ private:
     bool receive_array(json value, const Unit& unit, const Claims& claims);
     Handled handle(json value, const Place& place);
     void on_notification(const Message& notification);
+    void on_response(const Message& response);
     std::optional<Answer> on_request(Message request, const Place& place);
     std::optional<Answer> serve_named(Message request, const OpenMechanism& opener, const std::string& revision,
                                       const Place& place);
@@ -348,11 +421,31 @@ private:
     // Registers a call of `kind` that the host will complete; null when nothing is to be started (the session closed,
     // or the unit was abandoned).
     std::shared_ptr<CallState> begin_call(CallKind kind, const RequestId& id, const Served& served, Origin& origin,
-                                          const Place& place, json progress_token);
+                                          const Place& place, json progress_token, CallSubject subject);
+    // Hands a call's request to its host (no lock held).
+    void start(const std::shared_ptr<CallState>& call, const HostRequest& request);
+
+    // ---- input requests
+    // What a request carries about an earlier round of its call, read under the call's input mechanism: the answers
+    // and the host's state go into `subject.request`. The answer when the state is refused or an answer is
+    // malformed; empty otherwise.
+    std::optional<Answer> take_retry(const Message& request, const Served& served, CallSubject& subject) const;
+    Answer state_refusal(const RequestId& id, RequestStateProblem problem, const std::string& method) const;
+    // The call asks for input: its result asks, or its requests go to the client and it waits.
+    void ask(const std::shared_ptr<CallState>& call, InputRequired asked);
+    // The host is called again with the answers of a round.
+    void continue_call(const std::shared_ptr<CallState>& call, InputResponses answers, std::optional<std::string> state);
+    // Ends the call with the error its kind has for a failure to get input: a tool execution error for a tool, an
+    // internal error otherwise.
+    void fail_call(const std::shared_ptr<CallState>& call, const std::string& text, json data = nullptr);
+    // Ends a wait; with mutex_ held. Stop on its token is the caller's to request, without the lock.
+    void close_wait(const std::shared_ptr<WaitState>& wait);
+    std::chrono::system_clock::time_point now() const;
     // The progress token of a request's `_meta`, null when it has none; the answer when it is malformed.
     std::variant<json, Answer> progress_token_of(const Message& request, const Served& served) const;
     void cancel(const RequestId& id, const CancelMechanism& mechanism, const std::string& method);
-    void finish_call(const std::shared_ptr<CallState>& call, json response);
+    void finish_call(const std::shared_ptr<CallState>& call, json response,
+                     RefusalReason refusal = RefusalReason::none);
     void emit_batch(const Batch& batch, Writer writer);
 
     // ---- output
@@ -380,6 +473,8 @@ private:
     std::map<std::string, std::unique_ptr<StateMechanism>, std::less<>> states_;
     std::map<std::string, std::unique_ptr<BatchMechanism>, std::less<>> batches_;
     std::map<std::string, std::unique_ptr<CancelMechanism>, std::less<>> cancels_;
+    std::map<std::string, std::unique_ptr<InputMechanism>, std::less<>> inputs_;
+    std::optional<StateSealer> sealer_;  // present when a served revision's results carry sealed state
 
     // Guarded by mutex_.
     mutable std::mutex mutex_;
@@ -397,6 +492,13 @@ private:
     std::optional<Connection> connection_;
     std::thread::id reading_thread_;   // the thread inside receive(), while it is there
     std::exception_ptr reader_failure_;  // a sink failure the reading thread met through a tool's handle
+    // The requests sent to the client whose responses are awaited, by the ids the session gave them.
+    struct Outgoing {
+        std::shared_ptr<WaitState> wait;
+        std::string key;
+    };
+    std::map<RequestId, Outgoing> outgoing_;
+    std::uint64_t next_outgoing_ = 0;
 };
 
 CompletionState::~CompletionState() {
@@ -445,6 +547,14 @@ std::variant<std::shared_ptr<SessionCore>, CreateError> SessionCore::create(Sess
     if (options.tools_page_size && *options.tools_page_size == 0) problem("tools_page_size is zero");
     if (options.max_message_bytes == 0) problem("max_message_bytes is zero");
     if (options.max_queued_notifications == 0) problem("max_queued_notifications is zero");
+    if (options.max_input_rounds == 0) problem("max_input_rounds is zero");
+    if (options.request_state_ttl <= std::chrono::seconds::zero()) problem("request_state_ttl is not positive");
+    for (const auto& key : options.request_state_keys) {
+        if (key.size() < min_state_key_size) {
+            problem("a request state key has " + std::to_string(key.size()) + " bytes; it needs at least " +
+                    std::to_string(min_state_key_size));
+        }
+    }
 
     const profile::Transport transport = options.transport;
     auto core = std::make_shared<SessionCore>(Private{}, std::move(options), host, std::move(sink));
@@ -488,6 +598,15 @@ std::variant<std::shared_ptr<SessionCore>, CreateError> SessionCore::create(Sess
         served.cancel = find_or_make(core->cancels_, *cancel,
                                      [&](std::string_view name) { return registry.make_cancel(name); });
         if (served.cancel == nullptr) missing(revision, MechanismSlot::cancel, *cancel);
+        const std::string_view input_name = profile->mechanism(profile::Slot::server_input);
+        served.input = find_or_make(core->inputs_, input_name,
+                                    [&](std::string_view name) { return registry.make_input(name); });
+        if (served.input == nullptr) {
+            missing(revision, MechanismSlot::server_input, input_name);
+        } else if (auto why = served.input->check(*profile)) {
+            problem("revision " + revision + ": the server_input mechanism '" + std::string(input_name) +
+                    "' cannot serve it: " + *why);
+        }
         if (transport == profile::Transport::streamable_http) {
             const profile::StreamableHttpTransport& http = *profile->streamable_http();
             served.request_headers = http.request_headers;
@@ -530,6 +649,21 @@ std::variant<std::shared_ptr<SessionCore>, CreateError> SessionCore::create(Sess
     }
     if (core->served_.empty()) {
         problem("no enabled profile defines the " + std::string(profile::to_string(transport)) + " transport");
+    }
+    // Sealed request state, where a served revision's results carry it.
+    const bool seals = std::any_of(core->served_.begin(), core->served_.end(), [](const Served& served) {
+        return served.input != nullptr && served.input->delivery() == InputDelivery::result;
+    });
+    if (seals && error.message.empty()) {
+        std::vector<std::string> keys = core->options_.request_state_keys;
+        if (keys.empty()) {
+            if (const auto& made = default_state_key()) {
+                keys.push_back(*made);
+            } else {
+                problem("no request state key: none was given and the operating system's random source failed");
+            }
+        }
+        if (!keys.empty()) core->sealer_.emplace(std::move(keys));
     }
 
     if (!error.message.empty()) return error;
@@ -664,7 +798,10 @@ Handled SessionCore::handle(json value, const Place& place) {
             return Handled{Answer{make_error(message.id, error_code::invalid_request, "Invalid Request: " + message.problem),
                                   RefusalReason::invalid_request, nullptr},
                            false};
-        case MessageKind::response: return Handled{};  // this server sends no requests
+        case MessageKind::response:
+            // The answer to a request the session sent; it awaits no answer of its own.
+            on_response(message);
+            return Handled{};
         case MessageKind::notification:
             // A notification alone is refused for what its headers claim; in a batch the batch was.
             if (!place.batch) {
@@ -1021,9 +1158,11 @@ std::variant<json, Answer> SessionCore::progress_token_of(const Message& request
 }
 
 std::shared_ptr<CallState> SessionCore::begin_call(CallKind kind, const RequestId& id, const Served& served,
-                                                   Origin& origin, const Place& place, json progress_token) {
+                                                   Origin& origin, const Place& place, json progress_token,
+                                                   CallSubject subject) {
     const profile::Profile& profile = *served.profile;
     auto call = std::make_shared<CallState>(id);
+    call->subject = std::move(subject);
     call->core = weak_from_this();
     call->kind = kind;
     call->profile = served.profile;
@@ -1112,19 +1251,39 @@ std::optional<Answer> SessionCore::on_tools_call(Message& request, const Served&
         }
     }
 
-    auto call = begin_call(CallKind::tool, id, served, origin, place, std::move(progress_token));
-    if (!call) return std::nullopt;
-
+    CallSubject subject;
+    subject.method = request.method;
+    subject.name = *tool_name;
+    subject.arguments = arguments;
     CallRequest call_request;
     call_request.name = *tool_name;
     call_request.arguments = std::move(arguments);
     if (meta != nullptr) call_request.meta = *meta;
+    subject.request = std::move(call_request);
+    if (auto refusal = take_retry(request, served, subject)) return refusal;
+
+    auto call = begin_call(CallKind::tool, id, served, origin, place, std::move(progress_token), std::move(subject));
+    if (!call) return std::nullopt;
+    start(call, call->subject.request);
+    return std::nullopt;
+}
+
+void SessionCore::start(const std::shared_ptr<CallState>& call, const HostRequest& request) {
     try {
-        host_.call(call_request, CallControl(call), Completion(std::make_shared<CompletionState>(call)));
+        if (const auto* tool = std::get_if<CallRequest>(&request)) {
+            host_.call(*tool, CallControl(call), Completion(std::make_shared<CompletionState>(call)));
+        } else if (const auto* read = std::get_if<ReadRequest>(&request)) {
+            if (ResourceHost* resources = host_.resource_host()) {
+                resources->read(*read, CallControl(call), Completion(std::make_shared<CompletionState>(call)));
+            }
+        } else if (const auto* get = std::get_if<PromptRequest>(&request)) {
+            if (PromptHost* prompts = host_.prompt_host()) {
+                prompts->get(*get, CallControl(call), Completion(std::make_shared<CompletionState>(call)));
+            }
+        }
     } catch (...) {
         // The completion answers with an internal error once its last copy is gone.
     }
-    return std::nullopt;
 }
 
 std::optional<Answer> SessionCore::on_resources_list(Message& request, const Served& served, Origin&, const Place&) {
@@ -1185,14 +1344,21 @@ std::optional<Answer> SessionCore::on_resources_read(Message& request, const Ser
     auto token = progress_token_of(request, served);
     if (auto* refusal = std::get_if<Answer>(&token)) return std::move(*refusal);
 
-    auto call = begin_call(CallKind::resource_read, id, served, origin, place, std::move(std::get<json>(token)));
-    if (!call) return std::nullopt;
-
     ReadRequest read;
     read.uri = *text;
     if (const json* meta = member(request.params, "_meta")) read.meta = *meta;
+    CallSubject subject;
+    subject.method = request.method;
+    subject.name = *text;
+    subject.request = std::move(read);
+    if (auto refusal = take_retry(request, served, subject)) return refusal;
+
+    auto call = begin_call(CallKind::resource_read, id, served, origin, place, std::move(std::get<json>(token)),
+                           std::move(subject));
+    if (!call) return std::nullopt;
     try {
-        host->read(read, CallControl(call), Completion(std::make_shared<CompletionState>(call)));
+        host->read(std::get<ReadRequest>(call->subject.request), CallControl(call),
+                   Completion(std::make_shared<CompletionState>(call)));
     } catch (...) {
         // The completion answers with an internal error once its last copy is gone.
     }
@@ -1256,7 +1422,11 @@ std::optional<Answer> SessionCore::on_completion(Message& request, const Served&
     auto token = progress_token_of(request, served);
     if (auto* refusal = std::get_if<Answer>(&token)) return std::move(*refusal);
 
-    auto call = begin_call(CallKind::completion, id, served, origin, place, std::move(std::get<json>(token)));
+    CallSubject subject;
+    subject.method = request.method;
+    subject.name = completion.reference;
+    auto call = begin_call(CallKind::completion, id, served, origin, place, std::move(std::get<json>(token)),
+                           std::move(subject));
     if (!call) return std::nullopt;
     if (const json* meta = member(request.params, "_meta")) completion.meta = *meta;
     try {
@@ -1328,11 +1498,20 @@ std::optional<Answer> SessionCore::on_prompts_get(Message& request, const Served
     auto token = progress_token_of(request, served);
     if (auto* refusal = std::get_if<Answer>(&token)) return std::move(*refusal);
 
-    auto call = begin_call(CallKind::prompt_get, id, served, origin, place, std::move(std::get<json>(token)));
-    if (!call) return std::nullopt;
     if (const json* meta = member(request.params, "_meta")) get.meta = *meta;
+    CallSubject subject;
+    subject.method = request.method;
+    subject.name = get.name;
+    for (const auto& [argument, value] : get.arguments) subject.arguments[argument] = value;
+    subject.request = std::move(get);
+    if (auto refusal = take_retry(request, served, subject)) return refusal;
+
+    auto call = begin_call(CallKind::prompt_get, id, served, origin, place, std::move(std::get<json>(token)),
+                           std::move(subject));
+    if (!call) return std::nullopt;
     try {
-        host->get(get, CallControl(call), Completion(std::make_shared<CompletionState>(call)));
+        host->get(std::get<PromptRequest>(call->subject.request), CallControl(call),
+                  Completion(std::make_shared<CompletionState>(call)));
     } catch (...) {
         // The completion answers with an internal error once its last copy is gone.
     }
@@ -1484,7 +1663,8 @@ void SessionCore::finish_result(json& body, std::string_view type, const profile
 void SessionCore::finish_result(json& body, std::string_view type, const profile::Profile& profile,
                                 const CacheHints& cache) const {
     if (const profile::Type* result = profile.type(type)) {
-        if (result->has_property("resultType")) body["resultType"] = "complete";
+        // A result that asks for input says so itself.
+        if (result->has_property("resultType") && !body.contains("resultType")) body["resultType"] = "complete";
         if (result->has_property("ttlMs")) body["ttlMs"] = cache.ttl_ms;
         if (result->has_property("cacheScope")) body["cacheScope"] = std::string(to_string(cache.scope));
     }
@@ -1507,6 +1687,10 @@ json SessionCore::call_result(const ToolResult& result, const profile::Profile& 
 
 void SessionCore::complete(const std::shared_ptr<CallState>& call, CallOutcome outcome) {
     json response;
+    if (auto* asked = std::get_if<InputRequired>(&outcome)) {
+        ask(call, std::move(*asked));
+        return;
+    }
     if (const auto* result = std::get_if<ToolResult>(&outcome)) {
         if (call->kind != CallKind::tool) {
             // A tool result cannot answer another kind of call.
@@ -1541,7 +1725,9 @@ void SessionCore::complete(const std::shared_ptr<CallState>& call, FeatureOutcom
             response = wrong_kind();
         } else {
             json body = to_wire(*result, profile);
-            finish_result(body, "ReadResourceResult", profile, result->cache.value_or(CacheHints{}));
+            // The result of a retried read depends on inputs that are not part of a cache key: stale at once.
+            const CacheHints hints = call->subject.retry ? CacheHints{} : result->cache.value_or(CacheHints{});
+            finish_result(body, "ReadResourceResult", profile, hints);
             response = make_result(call->id, std::move(body));
         }
     } else if (const auto* prompt = std::get_if<PromptResult>(&outcome)) {
@@ -1584,13 +1770,15 @@ void SessionCore::complete_dropped(const std::shared_ptr<CallState>& call) {
                                                               : "Internal error: the call ended without a result"));
 }
 
-void SessionCore::finish_call(const std::shared_ptr<CallState>& call, json response) {
+void SessionCore::finish_call(const std::shared_ptr<CallState>& call, json response, RefusalReason refusal) {
     std::string line;
     if (!call->batch) line = serialize(response);
     bool batch_finished = false;
     std::unique_lock<std::mutex> lock(mutex_);
     if (closed_ || !call->active) return;
     call->active = false;
+    std::shared_ptr<WaitState> wait = call->wait;
+    if (wait) close_wait(wait);
     if (const auto found = in_flight_.find(call->id); found != in_flight_.end() && found->second == call) {
         in_flight_.erase(found);
     }
@@ -1600,17 +1788,331 @@ void SessionCore::finish_call(const std::shared_ptr<CallState>& call, json respo
     } else {
         // The response is the last output of the call's unit.
         push(lock,
-             Queued{make_output(std::move(line), OutputKind::response, call->unit != nullptr, RefusalReason::none,
-                                call->profile),
+             Queued{make_output(std::move(line), OutputKind::response, call->unit != nullptr, refusal, call->profile),
                     call, call->unit},
              Writer::host);
     }
     lock.unlock();
+    if (wait) wait->ended.request_stop();
     if (batch_finished) emit_batch(call->batch, Writer::host);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Input requests
+
+std::chrono::system_clock::time_point SessionCore::now() const {
+    return options_.clock ? options_.clock() : std::chrono::system_clock::now();
+}
+
+Answer SessionCore::state_refusal(const RequestId& id, RequestStateProblem problem, const std::string& method) const {
+    if (options_.on_request_state_rejected) {
+        try {
+            options_.on_request_state_rejected(RequestStateRejection{problem, method});
+        } catch (...) {
+            // A diagnostic that fails changes nothing about the answer.
+        }
+    }
+    json data = json::object();
+    data["reason"] = std::string(invalid_state_reason);
+    return Answer{make_error(id, error_code::invalid_params, std::string(invalid_state_message), std::move(data)),
+                  RefusalReason::none, nullptr};
+}
+
+std::optional<Answer> SessionCore::take_retry(const Message& request, const Served& served, CallSubject& subject) const {
+    const RequestId& id = *request.id;
+    auto read = served.input->retry(request, *served.profile);
+    if (const auto* error = std::get_if<RequestError>(&read)) {
+        return served_answer(make_error(id, error->code, error->message, error->data), served);
+    }
+    InputRetry& retry = std::get<InputRetry>(read);
+    subject.retry = retry.responses.has_value() || retry.state.has_value();
+    if (!retry.state) {
+        // Answers that no sealed state says were asked for are no answers: the host asks for what it still needs.
+        return std::nullopt;
+    }
+    const auto refuse = [&](RequestStateProblem problem) {
+        Answer answer = state_refusal(id, problem, request.method);
+        answer.profile = served.profile;
+        return answer;
+    };
+    const auto* text = retry.state->get_ptr<const std::string*>();
+    if (text == nullptr || !sealer_) return refuse(RequestStateProblem::malformed);
+    auto opened = sealer_->open(*text);
+    if (const auto* problem = std::get_if<RequestStateProblem>(&opened)) return refuse(*problem);
+    StateClaims& claims = std::get<StateClaims>(opened);
+    const std::string digest = arguments_digest(subject.arguments);
+    const StateBinding binding{subject.method, subject.name, digest, options_.server_info.name, std::string_view()};
+    if (const auto problem = check_claims(claims, binding, now())) return refuse(*problem);
+
+    // Each answer asked for must have the shape of its kind; answers to keys that were not asked are ignored.
+    InputResponses answers;
+    if (retry.responses) {
+        for (const auto& [key, method] : claims.asked) {
+            const json* given = member(*retry.responses, key);
+            if (given == nullptr) continue;
+            auto answer = read_answer(method, *given);
+            if (const auto* why = std::get_if<std::string>(&answer)) {
+                return served_answer(make_error(id, error_code::invalid_params,
+                                                "Invalid params: the answer " + key + " in params.inputResponses is "
+                                                "malformed: " + *why),
+                                     served);
+            }
+            answers.emplace(key, std::get<InputResponse>(std::move(answer)));
+        }
+    }
+    subject.round = claims.round;
+    std::visit(
+        [&](auto& host_request) {
+            using T = std::decay_t<decltype(host_request)>;
+            if constexpr (!std::is_same_v<T, std::monostate>) {
+                host_request.input_responses = std::move(answers);
+                host_request.request_state = std::move(claims.state);
+            }
+        },
+        subject.request);
+    return std::nullopt;
+}
+
+bool SessionCore::client_supports(const CallState& call, const InputRequest& request) const {
+    const Served& served = *call.served;
+    return served.input != nullptr &&
+           input_supported(request, call.client.capabilities, *call.profile, *served.input);
+}
+
+void SessionCore::fail_call(const std::shared_ptr<CallState>& call, const std::string& text, json data) {
+    if (call->kind == CallKind::tool) {
+        ToolResult result;
+        TextContent block;
+        block.text = text;
+        result.content.emplace_back(std::move(block));
+        result.is_error = true;
+        finish_call(call, make_result(call->id, call_result(result, *call->profile)));
+        return;
+    }
+    finish_call(call, make_error(call->id, error_code::internal_error, "Internal error: " + text, std::move(data)));
+}
+
+void SessionCore::close_wait(const std::shared_ptr<WaitState>& wait) {
+    wait->open = false;
+    for (const auto& id : wait->ids) outgoing_.erase(id);
+    wait->ids.clear();
+    if (auto call = wait->call.lock(); call && call->wait == wait) call->wait.reset();
+}
+
+void SessionCore::ask(const std::shared_ptr<CallState>& call, InputRequired asked) {
+    const Served& served = *call->served;
+    const InputMechanism& mechanism = *served.input;
+    const profile::Profile& profile = *call->profile;
+    if (call->kind == CallKind::completion || !mechanism.asks_on(profile, call->subject.method)) {
+        finish_call(call, make_error(call->id, error_code::internal_error,
+                                     "Internal error: the host asked for input on a request that cannot ask"));
+        return;
+    }
+    // What the client lacks, checked before anything is put in a result or sent.
+    json missing = json::object();
+    for (const auto& [key, request] : asked.requests) {
+        if (mechanism.carries(profile, method_of(request)) &&
+            capabilities_declare(request, call->client.capabilities)) {
+            continue;
+        }
+        merge_objects(missing, required_capabilities(request));
+    }
+    if (!missing.empty()) {
+        json data = json::object();
+        data[std::string(required_capabilities_member)] = std::move(missing);
+        if (const auto code = profile.error_code(missing_capability_error)) {
+            finish_call(call, make_error(call->id, *code, "Missing required client capability", std::move(data)),
+                        RefusalReason::missing_client_capability);
+        } else {
+            fail_call(call, "the client did not declare a capability this call needs: " +
+                                serialize(data.at(std::string(required_capabilities_member))),
+                      std::move(data));
+        }
+        return;
+    }
+    // The requests as the revision writes them.
+    std::vector<std::pair<std::string, std::pair<std::string, json>>> written;  // key, method, params
+    written.reserve(asked.requests.size());
+    for (const auto& [key, request] : asked.requests) {
+        auto params = write_params(request, profile, mechanism);
+        if (const auto* why = std::get_if<std::string>(&params)) {
+            finish_call(call, make_error(call->id, error_code::internal_error,
+                                         options_.expose_error_details
+                                             ? "Internal error: the input request " + key + " cannot be sent: " + *why
+                                             : std::string("Internal error: the call failed")));
+            return;
+        }
+        written.emplace_back(key, std::make_pair(std::string(method_of(request)), std::get<json>(std::move(params))));
+    }
+
+    if (mechanism.delivery() == InputDelivery::result) {
+        json requests = json::object();
+        StateClaims claims;
+        for (auto& [key, entry] : written) {
+            json request = json::object();
+            request["method"] = entry.first;
+            if (!entry.second.is_null()) request["params"] = std::move(entry.second);
+            requests[key] = std::move(request);
+            claims.asked.emplace(key, entry.first);
+        }
+        const std::int64_t issued =
+            std::chrono::duration_cast<std::chrono::seconds>(now().time_since_epoch()).count();
+        claims.expires = issued + static_cast<std::int64_t>(options_.request_state_ttl.count());
+        claims.method = call->subject.method;
+        claims.subject = call->subject.name;
+        claims.arguments = arguments_digest(call->subject.arguments);
+        claims.server = options_.server_info.name;
+        claims.round = call->subject.round + 1;
+        claims.state = std::move(asked.state);
+        json body = mechanism.asking_result(std::move(requests), sealer_->seal(claims));
+        finish_result(body, mechanism.asking_result_type(), profile);
+        finish_call(call, make_result(call->id, std::move(body)));
+        return;
+    }
+
+    // The requests go to the client, all of the round together, and the call waits for the answers.
+    auto wait = std::make_shared<WaitState>();
+    wait->core = weak_from_this();
+    wait->call = call;
+    wait->state = std::move(asked.state);
+    bool again = false;     // no requests: the host is called again at once
+    bool exhausted = false;  // the call asked once too often
+    bool unreachable = false;  // the unit is gone: nothing can reach the client
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (closed_ || !call->active) return;
+        if (call->rounds >= options_.max_input_rounds) {
+            exhausted = true;
+        } else if (call->unit && (call->unit->abandoned || call->unit->finished)) {
+            unreachable = true;
+        } else {
+            ++call->rounds;
+            if (written.empty()) {
+                again = true;
+            } else {
+                for (auto& [key, entry] : written) {
+                    const RequestId request_id(next_outgoing_++);
+                    outgoing_.emplace(request_id, Outgoing{wait, key});
+                    wait->ids.push_back(request_id);
+                    wait->asked.emplace(key, entry.first);
+                    ++wait->outstanding;
+                    std::string line =
+                        serialize(mechanism.asking_request(request_id, entry.first, std::move(entry.second)));
+                    enqueue(Queued{make_output(std::move(line), OutputKind::request, false, RefusalReason::none,
+                                               call->profile),
+                                   call, call->unit});
+                }
+                call->wait = wait;
+                drain(lock, Writer::host);
+            }
+        }
+    }
+    if (exhausted) {
+        fail_call(call, "the call asked for input more than " + std::to_string(options_.max_input_rounds) + " times");
+        return;
+    }
+    if (unreachable) {
+        fail_call(call, "the call asked for input after its stream was gone");
+        return;
+    }
+    if (again) {
+        continue_call(call, {}, std::move(wait->state));
+        return;
+    }
+    host_.awaiting_input(InputWait(wait));
+}
+
+void SessionCore::continue_call(const std::shared_ptr<CallState>& call, InputResponses answers,
+                                std::optional<std::string> state) {
+    HostRequest request = call->subject.request;
+    std::visit(
+        [&](auto& host_request) {
+            using T = std::decay_t<decltype(host_request)>;
+            if constexpr (!std::is_same_v<T, std::monostate>) {
+                host_request.input_responses = std::move(answers);
+                host_request.request_state = std::move(state);
+            }
+        },
+        request);
+    start(call, request);
+}
+
+void SessionCore::on_response(const Message& response) {
+    if (!response.id) return;
+    std::shared_ptr<WaitState> wait;
+    std::string key;
+    std::string method;
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = outgoing_.find(*response.id);
+        if (found == outgoing_.end()) return;  // not a request this session waits for: ignored
+        wait = found->second.wait;
+        key = found->second.key;
+        if (!wait->open) return;
+        method = wait->asked.at(key);
+    }
+    // Read without the lock; whatever happened meanwhile is decided below.
+    std::optional<std::string> failure;
+    std::optional<InputResponse> answer;
+    if (response.failed) {
+        failure = "the client answered the input request " + key + " with an error";
+    } else {
+        auto read = read_answer(method, response.outcome);
+        if (const auto* why = std::get_if<std::string>(&read)) {
+            failure = "the client's answer to the input request " + key + " is malformed: " + *why;
+        } else {
+            answer = std::get<InputResponse>(std::move(read));
+        }
+    }
+    std::shared_ptr<CallState> call;
+    bool done = false;
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = outgoing_.find(*response.id);
+        if (found == outgoing_.end() || found->second.wait != wait || !wait->open) return;
+        outgoing_.erase(found);
+        call = wait->call.lock();
+        if (!call || !call->active) {
+            close_wait(wait);
+            done = true;
+            call.reset();
+        } else if (failure) {
+            close_wait(wait);
+            done = true;
+        } else {
+            wait->answers.insert_or_assign(key, std::move(*answer));
+            if (--wait->outstanding == 0) {
+                close_wait(wait);
+                done = true;
+            }
+        }
+    }
+    if (!done) return;
+    wait->ended.request_stop();
+    if (!call) return;
+    if (failure) {
+        fail_call(call, *failure);
+        return;
+    }
+    continue_call(call, std::move(wait->answers), std::move(wait->state));
+}
+
+void SessionCore::expire(const std::shared_ptr<WaitState>& wait) {
+    std::shared_ptr<CallState> call;
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        if (!wait->open) return;
+        call = wait->call.lock();
+        close_wait(wait);
+        if (call && !call->active) call.reset();
+    }
+    wait->ended.request_stop();
+    if (call) fail_call(call, "the client did not answer the call's input requests in time");
 }
 
 void SessionCore::cancel(const RequestId& id, const CancelMechanism& mechanism, const std::string& method) {
     std::shared_ptr<CallState> call;
+    std::shared_ptr<WaitState> wait;  // the call's wait for answers, which ends with it
     bool batch_finished = false;
     bool ended = false;  // an end marker of the call's unit was queued
     bool now_idle = false;
@@ -1627,6 +2129,8 @@ void SessionCore::cancel(const RequestId& id, const CancelMechanism& mechanism, 
         in_flight_.erase(found);
         call->active = false;
         call->cancelled = true;
+        wait = call->wait;
+        if (wait) close_wait(wait);
         if (call->batch) {
             batch_finished = --call->batch->outstanding == 0 && !call->batch->reading;
         } else if (call->unit) {
@@ -1636,6 +2140,7 @@ void SessionCore::cancel(const RequestId& id, const CancelMechanism& mechanism, 
         }
         now_idle = !ended && !closed_ && idle_locked();
     }
+    if (wait) wait->ended.request_stop();
     call->stop.request_stop();
     if (ended) {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -1854,6 +2359,7 @@ void SessionCore::signal_idle() noexcept {
 
 void SessionCore::abandon(UnitId number) {
     std::vector<std::shared_ptr<CallState>> stopped;
+    std::vector<std::shared_ptr<WaitState>> waits;  // waits for answers that end with the unit
     std::vector<Batch> assembled;
     bool now_idle = false;
     {
@@ -1864,15 +2370,22 @@ void SessionCore::abandon(UnitId number) {
         units_.erase(found);
         unit->abandoned = true;
         // A call whose cancellation mechanism takes a closed stream for a cancellation stops; the others run on.
+        // A call that waits for answers ends too: its requests went out on the stream that is gone, and nothing more
+        // is sent for it.
         for (auto it = in_flight_.begin(); it != in_flight_.end();) {
             const std::shared_ptr<CallState> call = it->second;
-            if (call->unit != unit || !call->served->cancel->stops_on_stream_close()) {
+            const bool waiting = call->wait != nullptr;
+            if (call->unit != unit || (!waiting && !call->served->cancel->stops_on_stream_close())) {
                 ++it;
                 continue;
             }
             it = in_flight_.erase(it);
             call->active = false;
             call->cancelled = true;
+            if (waiting) {
+                waits.push_back(call->wait);
+                close_wait(call->wait);
+            }
             if (call->batch && --call->batch->outstanding == 0 && !call->batch->reading) assembled.push_back(call->batch);
             stopped.push_back(call);
         }
@@ -1884,6 +2397,7 @@ void SessionCore::abandon(UnitId number) {
         }
         now_idle = assembled.empty() && !closed_ && idle_locked();
     }
+    for (const auto& wait : waits) wait->ended.request_stop();
     for (const auto& call : stopped) call->stop.request_stop();
     for (const auto& batch : assembled) emit_batch(batch, Writer::host);
     if (now_idle) signal_idle();
@@ -1891,6 +2405,7 @@ void SessionCore::abandon(UnitId number) {
 
 void SessionCore::close() {
     std::vector<std::shared_ptr<CallState>> calls;
+    std::vector<std::shared_ptr<WaitState>> waits;
     std::unique_lock<std::mutex> lock(mutex_);
     const bool inside_sink = drainer_ == std::this_thread::get_id();
     if (!closed_) {
@@ -1899,8 +2414,13 @@ void SessionCore::close() {
         for (auto& entry : in_flight_) {
             entry.second->active = false;
             calls.push_back(entry.second);
+            if (entry.second->wait) {
+                waits.push_back(entry.second->wait);
+                close_wait(entry.second->wait);
+            }
         }
         in_flight_.clear();
+        outgoing_.clear();
         // The queue no longer holds the last outputs of the units still open, so each gets an end marker; none when
         // the sink cannot be called again, from inside it or after it failed.
         if (!inside_sink && !broken_) {
@@ -1915,6 +2435,7 @@ void SessionCore::close() {
         units_.clear();
     }
     lock.unlock();
+    for (const auto& wait : waits) wait->ended.request_stop();
     for (const auto& call : calls) call->stop.request_stop();
     lock.lock();
     if (inside_sink) return;
@@ -1989,6 +2510,18 @@ void CallControl::log(LogLevel level, json data, std::optional<std::string> logg
 }
 
 const profile::Profile& CallControl::profile() const noexcept { return *state_->profile; }
+
+bool CallControl::client_supports(const InputRequest& request) const {
+    // The mechanism the call is served under belongs to the core; without the core the call can ask nothing.
+    if (auto core = state_->core.lock()) return core->client_supports(*state_, request);
+    return false;
+}
+
+std::stop_token InputWait::ended() const noexcept { return state_->ended.get_token(); }
+
+void InputWait::expire() const {
+    if (auto core = state_->core.lock()) core->expire(state_);
+}
 const json& CallControl::client_info() const noexcept { return state_->client.info; }
 const json& CallControl::client_capabilities() const noexcept { return state_->client.capabilities; }
 

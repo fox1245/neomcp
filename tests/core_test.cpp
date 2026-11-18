@@ -489,6 +489,7 @@ TEST(Creation, BuiltinRegistryImplementsEveryDeclaredName) {
     const std::vector<std::pair<profile::Slot, neomcp::MechanismSlot>> slots{
         {profile::Slot::open, neomcp::MechanismSlot::open},
         {profile::Slot::state, neomcp::MechanismSlot::state},
+        {profile::Slot::server_input, neomcp::MechanismSlot::server_input},
         {profile::Slot::batch, neomcp::MechanismSlot::batch}};
     for (const auto& [declared, slot] : slots) {
         for (const auto name : profile::declared_mechanisms(declared)) {
@@ -2221,7 +2222,7 @@ TEST(Units, RefusalNamesAreStatusReasons) {
          {RefusalReason::parse_error, RefusalReason::invalid_request, RefusalReason::too_long, RefusalReason::too_deep,
           RefusalReason::header_mismatch, RefusalReason::unsupported_version, RefusalReason::invalid_request_meta,
           RefusalReason::unsupported_version_header, RefusalReason::method_not_found,
-          RefusalReason::missing_connection}) {
+          RefusalReason::missing_connection, RefusalReason::missing_client_capability}) {
         EXPECT_NE(std::find(declared.begin(), declared.end(), neomcp::to_string(reason)), declared.end())
             << neomcp::to_string(reason);
     }

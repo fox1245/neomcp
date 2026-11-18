@@ -66,12 +66,16 @@ Message classify(json value) {
         return message;
     }
 
-    const bool has_result = object->find("result") != object->end();
-    const bool has_error = object->find("error") != object->end();
+    const auto result = object->find("result");
+    const auto error = object->find("error");
+    const bool has_result = result != object->end();
+    const bool has_error = error != object->end();
     if (has_id && has_result != has_error) {
         Message message;
         message.kind = MessageKind::response;
         message.id = std::move(id);
+        message.failed = has_error;
+        message.outcome = std::move(has_error ? error->second : result->second);
         return message;
     }
     return invalid("the message is neither a request, a notification nor a response", id);

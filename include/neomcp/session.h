@@ -10,8 +10,26 @@
 // A transport that answers each request on its own channel (as HTTP answers each POST) feeds the session input
 // units: what one request of the transport carries, numbered by the transport, with the request's header fields.
 // Every output then says which unit it belongs to, and every unit ends exactly once (see Output).
+//
+// Input requests. A call whose host answers with InputRequired (neomcp/input.h) asks its client in the way the
+// profile's `server_input` mechanism names:
+// - input_required_result: the call's result asks, with the requests and a sealed state (the host's state, the
+//   requests' keys and what the state is bound to: the method, the tool or prompt name or the resource URI, the
+//   arguments, the server and an expiry; signed with HMAC-SHA-256, not encrypted). A retried call carries the answers
+//   and the state; the state is verified before the host is entered, and every refusal is answered the same way
+//   (Invalid params, "Invalid or expired requestState"). Answers to keys the state does not name are ignored, and a
+//   retry without a state carries no answers; an answer whose shape does not fit its request is Invalid params.
+// - server_request: each request goes to the client as a request of the session's own, an output of kind `request`
+//   of the call's unit; the client's responses arrive as input, and when the round's last one is there the host is
+//   called again with the answers. A response that is an error or has the wrong shape ends the call, as do more than
+//   max_input_rounds rounds and InputWait::expire: a tool with a tool execution error, any other call with an
+//   internal error. Cancellation, abandon() of the call's unit and close() end the wait, and nothing more is sent.
+// Before anything is put in a result or sent, every request is checked against the capabilities the client declared
+// (in the handshake, or in the request): a request it cannot take ends the call with the revision's error for a
+// missing client capability (Output::refusal says so), or where the revision has none as a failure of the call's kind.
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -54,8 +72,9 @@ enum class OutputKind {
     end            // no message: the unit ends without an answer
 };
 
-// Why an input was refused before any method ran. The name of each reason but `none` (to_string) is also a reason a
-// revision's Streamable HTTP status map can give a status for (profile::declared_status_reasons).
+// Why an input was refused: before any method ran, or (missing_client_capability) because serving it needs something
+// the client did not declare. The name of each reason but `none` (to_string) is also a reason a revision's Streamable
+// HTTP status map can give a status for (profile::declared_status_reasons).
 enum class RefusalReason {
     none,
     parse_error,                 // not JSON
@@ -67,7 +86,8 @@ enum class RefusalReason {
     invalid_request_meta,        // the body's `_meta` lacks or misstates what the revision requires of it
     unsupported_version_header,  // the version header names a revision the session does not serve
     method_not_found,            // the revision has no such client request, or the session does not serve it
-    missing_connection           // the request neither names its revision nor arrives on an opened connection
+    missing_connection,          // the request neither names its revision nor arrives on an opened connection
+    missing_client_capability    // the call asked for input the client did not declare a capability for
 };
 
 std::string_view to_string(RefusalReason reason) noexcept;
@@ -84,7 +104,7 @@ struct Output {
     std::optional<UnitId> unit;  // the unit it belongs to; empty when it belongs to the connection
     bool last = false;           // the last output of its unit
     OutputKind kind = OutputKind::response;
-    // Set when the input was refused before any method ran; the line is then the error answer.
+    // Set when the input was refused (see RefusalReason); the line is then the error answer.
     RefusalReason refusal = RefusalReason::none;
     // The profile that governs it: the one the input was served under or, for a refusal, the one whose `errors`
     // gave its code; null when none is known.
@@ -114,6 +134,28 @@ using IdleCallback = std::function<void()>;
 
 // Checks tool arguments against the tool's input schema: a message when they fail it, empty when they pass.
 using ArgumentCheck = std::function<std::optional<std::string>(const ToolDefinition& tool, const json& arguments)>;
+
+// Why a sealed request state was refused. The client is never told which: every refusal is answered the same way.
+enum class RequestStateProblem {
+    malformed,  // not a sealed state of this format
+    signature,  // its code does not verify with any key: changed, or sealed with another key
+    version,    // sealed in a format version this library does not read
+    expired,    // older than SessionOptions::request_state_ttl
+    binding     // issued for another request: another method, tool, prompt, resource, arguments or server
+};
+
+std::string_view to_string(RequestStateProblem problem) noexcept;
+
+struct RequestStateRejection {
+    RequestStateProblem problem = RequestStateProblem::malformed;
+    std::string method;  // the method of the request that carried it
+};
+
+// Told why a request state was refused, for the server's own log.
+using RequestStateDiagnostic = std::function<void(const RequestStateRejection& rejection)>;
+
+// The time the expiry of request state is measured in. A wall clock, so that processes sharing a key agree.
+using StateClock = std::function<std::chrono::system_clock::time_point()>;
 
 struct SessionOptions {
     // The revisions served; empty: every built-in profile. Two profiles of the same revision are an error.
@@ -163,6 +205,25 @@ struct SessionOptions {
 
     // Where mechanisms come from; null: builtin_mechanisms(). Must outlive the session's creation.
     const MechanismRegistry* mechanisms = nullptr;
+
+    // ---- Input requests (InputRequired, neomcp/input.h)
+
+    // Under the mechanism that sends a call's requests to the client and waits (server_request): the most rounds of
+    // requests one call may send. The call fails when its host asks once more. Zero is an error. Default 10.
+    std::size_t max_input_rounds = 10;
+    // Under the mechanism whose result asks and whose retried call answers (input_required_result): the keys that seal
+    // the state a call's result carries, each at least 32 bytes. The first seals; every one verifies, so a key can be
+    // replaced by putting the new one first and dropping the old one once its states have expired. Empty: one key of
+    // 32 bytes from the operating system's random source, made once per process. Several processes that serve the
+    // same clients (behind a load balancer, or one after another) must be given the same key here, or a retry that
+    // reaches another process is refused.
+    std::vector<std::string> request_state_keys;
+    // How long a sealed state is accepted after it was issued. Zero is an error. Default 600 s.
+    std::chrono::seconds request_state_ttl{600};
+    // The clock of that expiry; empty: std::chrono::system_clock::now.
+    StateClock clock;
+    // Told why a state was refused; empty: nobody is told. The client gets only "Invalid or expired requestState".
+    RequestStateDiagnostic on_request_state_rejected;
 };
 
 // A mechanism a profile names that the registry has no implementation for.
@@ -215,14 +276,15 @@ public:
 
     // The transport lost the stream that carried the unit's outputs. The cancellation mechanism of the profile each
     // of the unit's calls is served under decides what happens to the call: it is stopped when the mechanism says a
-    // closed stream cancels it, else it runs on. Either way nothing more of the unit is written, its end included.
+    // closed stream cancels it, else it runs on. A call that waits for its client's answers to requests it sent ends
+    // either way (its requests went out on that stream). Nothing more of the unit is written, its end included.
     // When abandon() returns no output of the unit is being written and none will be: it waits for a sink call
     // writing one on another thread (but not on its own thread, when called from inside the sink). An unknown or
     // ended unit is ignored.
     void abandon(UnitId unit);
 
-    // Requests stop on every call in flight and drops everything not yet written; each unit still open ends with an
-    // output of kind `end`, written before close() returns. When it returns, nothing is being written and nothing
+    // Requests stop on every call in flight, ends every wait for a client's answers, and drops everything not yet
+    // written; each unit still open ends with an output of kind `end`, written before close() returns. When it returns, nothing is being written and nothing
     // will be: it waits for a sink call in progress on another thread (but not for one on its own thread, when
     // close() is called from inside the sink: then the open units get no end).
     void close();

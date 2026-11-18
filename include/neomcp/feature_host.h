@@ -29,6 +29,9 @@ struct ListSettings {
 struct ReadRequest {
     std::string uri;
     json meta = nullptr;  // the request's params._meta; null when absent
+    // The answers and the state of an earlier round, as for CallRequest.
+    InputResponses input_responses;
+    std::optional<std::string> request_state;
 };
 
 class ResourceHost {
@@ -43,7 +46,7 @@ public:
     virtual ListSettings resource_list_settings() const { return {}; }
 
     // Reads the resource `request.uri`: completes with a ReadResult, with NotFound when the host offers nothing at
-    // that URI, with a Refusal or a HostFailure. Must not block for the duration of the read.
+    // that URI, with InputRequired, a Refusal or a HostFailure. Must not block for the duration of the read.
     virtual void read(const ReadRequest& request, CallControl control, Completion done) = 0;
 };
 
@@ -52,6 +55,9 @@ struct PromptRequest {
     // The arguments the request carried, all strings. A session has checked that every required one is there.
     std::map<std::string, std::string> arguments;
     json meta = nullptr;  // the request's params._meta; null when absent
+    // The answers and the state of an earlier round, as for CallRequest.
+    InputResponses input_responses;
+    std::optional<std::string> request_state;
 };
 
 class PromptHost {
@@ -64,7 +70,8 @@ public:
     virtual ListSettings prompt_list_settings() const { return {}; }
 
     // Gets the prompt `request.name`, one of prompts(): completes with a PromptResult, with InvalidRequest when its
-    // arguments cannot be used, with a Refusal or a HostFailure. Must not block for the duration of the call.
+    // arguments cannot be used, with InputRequired, a Refusal or a HostFailure. Must not block for the duration of the
+    // call.
     virtual void get(const PromptRequest& request, CallControl control, Completion done) = 0;
 };
 

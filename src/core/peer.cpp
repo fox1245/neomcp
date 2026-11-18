@@ -35,7 +35,11 @@ void Peer::deliver(std::string line) {
     transcript_.push_back(value);
     const auto* object = value.get_ptr<const json::object_t*>();
     if (object != nullptr && object->find("method") != object->end()) {
-        notifications_.push_back(std::move(value));
+        if (object->find("id") != object->end()) {
+            requests_.push_back(std::move(value));
+        } else {
+            notifications_.push_back(std::move(value));
+        }
     } else if (object != nullptr && object->find("id") != object->end() && !object->find("id")->second.is_null()) {
         responses_[id_key(object->find("id")->second)].push_back(std::move(value));
     } else {
@@ -81,6 +85,14 @@ std::optional<json> Peer::next_notification(Timeout timeout) {
     if (!arrived_.wait_for(lock, timeout, [&] { return !notifications_.empty(); })) return std::nullopt;
     json value = std::move(notifications_.front());
     notifications_.pop_front();
+    return value;
+}
+
+std::optional<json> Peer::next_request(Timeout timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!arrived_.wait_for(lock, timeout, [&] { return !requests_.empty(); })) return std::nullopt;
+    json value = std::move(requests_.front());
+    requests_.pop_front();
     return value;
 }
 

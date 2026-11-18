@@ -160,6 +160,8 @@ add_library(neomcp_core
     src/core/uri_template.cpp
     src/core/wire.cpp
     src/core/mechanisms.cpp
+    src/core/input.cpp
+    src/core/request_state.cpp
     src/core/session.cpp
     src/core/peer.cpp)
 add_library(neomcp::core ALIAS neomcp_core)
