@@ -500,8 +500,8 @@ TEST_P(PerRevision, AHandlerThatThrowsResourceNotFoundIsAnsweredTheSameWay) {
         throw neomcp::ResourceNotFound("no file " + params.path);
     });
     server.resource_template<ft::FileParams>("co:///{path}", "n",
-                                              [](const ft::FileParams&) -> asio::awaitable<std::string> {
-                                                  throw neomcp::ResourceNotFound();
+                                              [](const ft::FileParams& params) -> asio::awaitable<std::string> {
+                                                  if (!params.path.empty()) throw neomcp::ResourceNotFound();
                                                   co_return std::string();
                                               });
     Client client(server, revision);
