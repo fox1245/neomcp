@@ -891,32 +891,39 @@ TEST(SubscriptionFeed, AnAbandonedSubscriptionEndsWithoutAWord) {
     EXPECT_EQ(host.watchers(), 0u);
 }
 
-// The acknowledgement is the first message of a subscription even while a change is reported on another thread as
-// the subscription opens: before each listen request the two threads meet, then race.
+// The acknowledgement is the first message of a subscription even while changes are reported on another thread as the
+// subscription opens: in each round the reporter reports without pause until the listen request was read, and the
+// subscription is abandoned before the next round, so that one is open at a time.
 TEST(SubscriptionFeed, TheAcknowledgementIsFirstWhileChangesRace) {
-    constexpr neomcp::UnitId count = 200;
+    constexpr neomcp::UnitId rounds = 300;
     FeedHost host;
-    neomcp::SessionOptions options = options_for(modern_revision);
-    options.max_subscriptions = count;
-    Tagged session(host, std::move(options));
+    Tagged session(host);
     Meeting meeting;
+    std::atomic<bool> read{false};
     std::thread reporter([&] {
-        for (neomcp::UnitId unit = 1; unit <= count; ++unit) {
+        for (neomcp::UnitId unit = 1; unit <= rounds; ++unit) {
             meeting.arrive();
-            host.report(neomcp::ChangeKind::tools_list);
+            while (!read.load()) host.report(neomcp::ChangeKind::tools_list);
+            meeting.arrive();
         }
     });
-    for (neomcp::UnitId unit = 1; unit <= count; ++unit) {
+    int wrong = 0;
+    for (neomcp::UnitId unit = 1; unit <= rounds; ++unit) {
+        read = false;
         meeting.arrive();
         session.send(unit, unit, "subscriptions/listen", listen_params({{"toolsListChanged", true}}));
+        read = true;
+        meeting.arrive();
+        host.report(neomcp::ChangeKind::tools_list);  // so that something follows the acknowledgement in every round
+        const auto first = session.next_message(unit);
+        if (!first || first->value("method", std::string()) != "notifications/subscriptions/acknowledged") {
+            ++wrong;
+            ADD_FAILURE() << "unit " << unit << ": " << (first ? first->dump() : std::string("nothing"));
+        }
+        session.session().abandon(unit);
     }
     reporter.join();
-    for (neomcp::UnitId unit = 1; unit <= count; ++unit) {
-        const auto first = session.next_message(unit);
-        ASSERT_TRUE(first) << "unit " << unit;
-        EXPECT_EQ(first->value("method", std::string()), "notifications/subscriptions/acknowledged")
-            << "unit " << unit << ": " << first->dump();
-    }
+    EXPECT_EQ(wrong, 0);
 }
 
 // A change racing the close of a session with open subscriptions: nothing after close() returned, no registration.
@@ -953,6 +960,27 @@ TEST(SubscriptionFeed, AChangeRacingCloseIsNeverWrittenAfterIt) {
         reporter.join();
         EXPECT_EQ(late.load(), 0) << "round " << round;
     }
+}
+
+// One session that serves both eras: a legacy connection whose client is not ready yet hears nothing, even while a
+// subscription of the same session hears of every change.
+TEST(SubscriptionFeed, AConnectionWhoseClientIsNotReadyHearsNothingWhileASubscriptionDoes) {
+    FeedHost host;
+    neomcp::SessionOptions options;
+    options.profiles = {builtin(legacy_revision), builtin(modern_revision)};
+    options.server_info.name = "feed-test";
+    options.server_info.version = "1.0.0";
+    Peer peer(host, std::move(options));
+    ASSERT_TRUE(peer.request(Peer::initialize_request(*builtin(legacy_revision), 1), patience));
+    peer.notify(Peer::make_request(*builtin(modern_revision), "sub", "subscriptions/listen",
+                                   listen_params({{"toolsListChanged", true}})));
+    EXPECT_EQ(peer.next_notification(patience), acknowledged("sub", {{"toolsListChanged", true}}));
+    host.report(neomcp::ChangeKind::tools_list);
+    EXPECT_EQ(peer.next_notification(patience), tagged("notifications/tools/list_changed", "sub"));
+    peer.notify(notification("notifications/initialized"));
+    host.report(neomcp::ChangeKind::prompts_list);
+    EXPECT_EQ(peer.next_notification(patience), notification("notifications/prompts/list_changed"))
+        << "the change of the tool list reached the connection before its client was ready";
 }
 
 }  // namespace
