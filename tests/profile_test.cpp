@@ -247,6 +247,54 @@ TEST(Wire, InputRequestsExistOnlyInTheModernRevision) {
     }
 }
 
+TEST(Wire, UnionParamsAndComposedTypes) {
+    const ProfilePtr modern = require_builtin(modern_revision);
+    const ProfilePtr legacy = require_builtin(last_legacy_revision);
+    ASSERT_NE(modern, nullptr);
+    ASSERT_NE(legacy, nullptr);
+
+    const InputRequest* elicit = modern->input_request("elicitation/create");
+    ASSERT_NE(elicit, nullptr);
+    ASSERT_TRUE(elicit->params);
+    EXPECT_EQ(*elicit->params, "ElicitRequestParams");
+    EXPECT_EQ(elicit->params_required, std::vector<std::string>{"message"});
+    EXPECT_EQ(modern->type("ElicitRequestParams"), nullptr);
+    const Union* params = modern->union_type("ElicitRequestParams");
+    ASSERT_NE(params, nullptr);
+    EXPECT_EQ(params->name, "ElicitRequestParams");
+    ASSERT_EQ(params->alternatives.size(), 2u);
+    for (const auto& alternative : params->alternatives) {
+        const Type* type = modern->type(alternative);
+        ASSERT_NE(type, nullptr) << alternative;
+        EXPECT_TRUE(type->is_required("message"));
+    }
+    EXPECT_EQ(modern->union_type("CallToolResult"), nullptr);
+    EXPECT_EQ(modern->union_type("NoSuchUnion"), nullptr);
+
+    const Message* status = legacy->notification("notifications/tasks/status");
+    ASSERT_NE(status, nullptr);
+    ASSERT_TRUE(status->params);
+    EXPECT_EQ(*status->params, "TaskStatusNotificationParams");
+    const Type* type = legacy->type("TaskStatusNotificationParams");
+    ASSERT_NE(type, nullptr);
+    EXPECT_EQ(legacy->union_type("TaskStatusNotificationParams"), nullptr);
+    EXPECT_EQ(status->params_required, type->required);
+    EXPECT_TRUE(type->is_required("taskId"));
+    EXPECT_TRUE(type->is_required("status"));
+
+    for (const auto revision : builtin_revisions()) {
+        const ProfilePtr profile = require_builtin(revision);
+        ASSERT_NE(profile, nullptr);
+        for (const auto& entry : profile->unions()) {
+            EXPECT_EQ(profile->union_type(entry.name), &entry);
+            EXPECT_EQ(profile->type(entry.name), nullptr) << entry.name;
+            EXPECT_FALSE(entry.alternatives.empty());
+        }
+        EXPECT_TRUE(std::is_sorted(profile->unions().begin(), profile->unions().end(),
+                                   [](const Union& a, const Union& b) { return a.name < b.name; }));
+    }
+}
+
 TEST(Wire, TablesAreSortedAndLookupsAgreeWithThem) {
     for (const auto revision : builtin_revisions()) {
         SCOPED_TRACE(std::string(revision));
@@ -412,10 +460,78 @@ TEST(Rejects, ParamsRequiredThatDiffersFromTheTypesRequired) {
     EXPECT_EQ(rejected(document).pointer, "/wire/requests/tools~1call/params_required");
 }
 
-TEST(Rejects, ParamsTypeWithoutEntryButWithRequiredMembers) {
+TEST(Rejects, UnionMessageWhoseParamsRequiredHasAnExtraMember) {
     json document = builtin_document(modern_revision);
     document["wire"]["input_requests"]["elicitation/create"]["params_required"].push_back("bogus");
     EXPECT_EQ(rejected(document).pointer, "/wire/input_requests/elicitation~1create/params_required");
+}
+
+TEST(Rejects, UnionMessageWhoseParamsRequiredLacksAMember) {
+    json document = builtin_document(modern_revision);
+    document["wire"]["input_requests"]["elicitation/create"]["params_required"] = json::array();
+    EXPECT_EQ(rejected(document).pointer, "/wire/input_requests/elicitation~1create/params_required");
+}
+
+TEST(Rejects, ParamsThatNamesNothing) {
+    json document = builtin_document(modern_revision);
+    document["wire"]["requests"]["tools/call"]["params"] = "NoSuchParams";
+    EXPECT_EQ(rejected(document).pointer, "/wire/requests/tools~1call/params");
+}
+
+TEST(Rejects, UnionsRemoved) {
+    json document = builtin_document(modern_revision);
+    document["wire"].erase("unions");
+    EXPECT_EQ(rejected(document).pointer, "/wire/unions");
+}
+
+TEST(Rejects, UnionAlternativeThatNamesNothing) {
+    json document = builtin_document(modern_revision);
+    document["wire"]["unions"]["ElicitRequestParams"].push_back("NoSuchType");
+    EXPECT_EQ(rejected(document).pointer,
+              "/wire/unions/ElicitRequestParams/" +
+                  std::to_string(document["wire"]["unions"]["ElicitRequestParams"].size() - 1));
+}
+
+TEST(Rejects, NameInBothTypesAndUnions) {
+    json document = builtin_document(modern_revision);
+    document["wire"]["unions"]["CallToolResult"] = json::array({"ElicitRequestFormParams"});
+    EXPECT_EQ(rejected(document).pointer, "/wire/unions/CallToolResult");
+}
+
+TEST(Rejects, UnionThatContainsItself) {
+    json document = builtin_document(modern_revision);
+    document["wire"]["unions"]["ElicitRequestParams"].push_back("ElicitRequestParams");
+    EXPECT_EQ(rejected(document).pointer,
+              "/wire/unions/ElicitRequestParams/" +
+                  std::to_string(document["wire"]["unions"]["ElicitRequestParams"].size() - 1));
+}
+
+TEST(Rejects, UnionThatContainsItselfThroughAnotherUnion) {
+    json document = builtin_document(modern_revision);
+    document["wire"]["unions"]["Loop1"] = json::array({"Loop2"});
+    document["wire"]["unions"]["Loop2"] = json::array({"Loop1"});
+    const Error error = rejected(document);
+    EXPECT_TRUE(error.pointer == "/wire/unions/Loop1/0" || error.pointer == "/wire/unions/Loop2/0") << error.pointer;
+}
+
+TEST(Rejects, UnionAlternativeThatRepeats) {
+    json document = builtin_document(modern_revision);
+    document["wire"]["unions"]["ElicitRequestParams"].push_back("ElicitRequestFormParams");
+    EXPECT_EQ(rejected(document).pointer,
+              "/wire/unions/ElicitRequestParams/" +
+                  std::to_string(document["wire"]["unions"]["ElicitRequestParams"].size() - 1));
+}
+
+TEST(Rejects, McpNameMemberMissingFromOneAlternativeOfAUnion) {
+    json document = builtin_document(modern_revision);
+    const std::size_t index = header_index(document, "Mcp-Name");
+    // elicitation/create is not a request in this revision; point a request at the union instead.
+    document["wire"]["requests"]["tools/call"]["params"] = "ElicitRequestParams";
+    document["wire"]["requests"]["tools/call"]["params_required"] = json::array({"message"});
+    // "url" is a property of only one of the two alternatives of the union.
+    request_headers(document)[index]["on"]["tools/call"] = "url";
+    const Error error = rejected(document);
+    EXPECT_EQ(error.pointer, header_pointer(index) + "/on/tools~1call");
 }
 
 TEST(Rejects, RequiredMemberThatIsNotAProperty) {

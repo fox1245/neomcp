@@ -151,6 +151,12 @@ struct Type {
     bool is_required(std::string_view property) const;
 };
 
+// A type that is a union of other types: each alternative names an entry of the types or of the unions.
+struct Union {
+    std::string name;
+    std::vector<std::string> alternatives;  // distinct, in document order
+};
+
 class Profile {
 public:
     const std::string& revision() const noexcept { return revision_; }
@@ -178,6 +184,7 @@ public:
     std::span<const Message> notifications() const noexcept { return notifications_; }
     std::span<const InputRequest> input_requests() const noexcept { return input_requests_; }
     std::span<const Type> types() const noexcept { return types_; }
+    std::span<const Union> unions() const noexcept { return unions_; }  // sorted by name
     std::span<const std::string> unlisted_message_types() const noexcept { return unlisted_message_types_; }
 
     // Lookups; null when the table has no such entry. The pointers stay valid as long as the profile does.
@@ -185,6 +192,7 @@ public:
     const Message* notification(std::string_view method) const;
     const InputRequest* input_request(std::string_view method) const;
     const Type* type(std::string_view name) const;
+    const Union* union_type(std::string_view name) const;
 
 private:
     friend class ProfileLoader;
@@ -205,6 +213,7 @@ private:
     std::vector<InputRequest> input_requests_;
     std::vector<std::string> unlisted_message_types_;
     std::vector<Type> types_;
+    std::vector<Union> unions_;
 };
 
 using ProfilePtr = std::shared_ptr<const Profile>;

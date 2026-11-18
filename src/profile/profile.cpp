@@ -4,6 +4,9 @@
 #include <array>
 #include <climits>
 #include <cstdint>
+#include <functional>
+#include <iterator>
+#include <map>
 #include <memory>
 #include <set>
 #include <utility>
@@ -84,6 +87,13 @@ const Type* Profile::type(std::string_view name) const {
     const auto it = std::lower_bound(types_.begin(), types_.end(), name,
                                      [](const Type& entry, std::string_view key) { return entry.name < key; });
     if (it == types_.end() || it->name != name) return nullptr;
+    return &*it;
+}
+
+const Union* Profile::union_type(std::string_view name) const {
+    const auto it = std::lower_bound(unions_.begin(), unions_.end(), name,
+                                     [](const Union& entry, std::string_view key) { return entry.name < key; });
+    if (it == unions_.end() || it->name != name) return nullptr;
     return &*it;
 }
 
@@ -389,13 +399,15 @@ private:
                                    {"notifications", true},
                                    {"input_requests", true},
                                    {"unlisted_message_types", true},
-                                   {"types", true}});
+                                   {"types", true},
+                                   {"unions", true}});
 
         const Object schema(object.at("schema"), {{"dialect", true}, {"sha256", true}});
         profile_.wire_schema_.dialect = nonempty_string_of(schema.at("dialect"));
         profile_.wire_schema_.sha256 = nonempty_string_of(schema.at("sha256"));
 
         types(object.at("types"));
+        unions(object.at("unions"));
         messages(object.at("requests"), profile_.requests_);
         messages(object.at("notifications"), profile_.notifications_);
         input_requests(object.at("input_requests"));
@@ -486,23 +498,109 @@ private:
                   [](const InputRequest& a, const InputRequest& b) { return a.method < b.method; });
     }
 
-    // A message that names a params type has the required members that type has. wire.types lists only the
-    // definitions the schema spells out as objects with properties, so a params type that is a union has no entry
-    // there; its entry in the message table then lists no required member.
+    // A name is an object type or a union of other names, never both; every alternative of a union is a name of
+    // the types or of the unions, and no union contains itself, directly or through other unions.
+    void unions(const Node& node) {
+        std::vector<Union> table;
+        for_each_entry(node, [&](const std::string& name, const Node& value) {
+            if (profile_.type(name) != nullptr) {
+                fail(value.pointer(), "a name that is not also an entry of wire.types",
+                     "'" + name + "' is in wire.types and in wire.unions");
+            }
+            const auto& array = array_of(value);
+            if (array.empty()) fail(value.pointer(), "a non-empty array of alternatives", "found an empty array");
+            Union entry;
+            entry.name = name;
+            entry.alternatives = strings_of(value, true);
+            for (std::size_t i = 0; i < entry.alternatives.size(); ++i) {
+                if (entry.alternatives[i].empty()) {
+                    fail(value.element(array[i], i).pointer(), "a non-empty string", "found an empty string");
+                }
+            }
+            table.push_back(std::move(entry));
+        });
+
+        std::map<std::string, std::size_t> position;
+        for (std::size_t i = 0; i < table.size(); ++i) position[table[i].name] = i;
+        for (const auto& entry : table) {
+            for (std::size_t i = 0; i < entry.alternatives.size(); ++i) {
+                const std::string& alternative = entry.alternatives[i];
+                if (profile_.type(alternative) == nullptr && position.find(alternative) == position.end()) {
+                    fail(node.member_pointer(entry.name) + "/" + std::to_string(i),
+                         "a name of wire.types or wire.unions", "'" + alternative + "' names neither");
+                }
+            }
+        }
+
+        std::vector<int> state(table.size(), 0);  // 0 not visited, 1 on the current path, 2 done
+        const std::function<void(std::size_t)> visit = [&](std::size_t index) {
+            state[index] = 1;
+            const Union& entry = table[index];
+            for (std::size_t i = 0; i < entry.alternatives.size(); ++i) {
+                const auto next = position.find(entry.alternatives[i]);
+                if (next == position.end()) continue;
+                if (state[next->second] == 1) {
+                    fail(node.member_pointer(entry.name) + "/" + std::to_string(i),
+                         "an alternative that does not lead back to '" + entry.name + "'",
+                         "'" + entry.alternatives[i] + "' contains '" + entry.name + "'");
+                }
+                if (state[next->second] == 0) visit(next->second);
+            }
+            state[index] = 2;
+        };
+        for (std::size_t i = 0; i < table.size(); ++i) {
+            if (state[i] == 0) visit(i);
+        }
+
+        std::sort(table.begin(), table.end(), [](const Union& a, const Union& b) { return a.name < b.name; });
+        profile_.unions_ = std::move(table);
+    }
+
+    // The members every object type behind a name requires: the type's own, or for a union what all of its
+    // alternatives require. The unions are known to be acyclic.
+    std::vector<std::string> required_of(const std::string& name) const {
+        if (const Type* type = profile_.type(name)) return type->required;
+        std::vector<std::string> common;
+        bool first = true;
+        for (const auto& alternative : profile_.union_type(name)->alternatives) {
+            std::vector<std::string> required = required_of(alternative);
+            if (first) {
+                common = std::move(required);
+                first = false;
+            } else {
+                std::vector<std::string> both;
+                std::set_intersection(common.begin(), common.end(), required.begin(), required.end(),
+                                      std::back_inserter(both));
+                common = std::move(both);
+            }
+        }
+        return common;
+    }
+
+    // The object types behind a name: the type itself, or for a union the types of all of its alternatives.
+    void object_types(const std::string& name, std::vector<const Type*>& out) const {
+        if (const Type* type = profile_.type(name)) {
+            out.push_back(type);
+            return;
+        }
+        for (const auto& alternative : profile_.union_type(name)->alternatives) object_types(alternative, out);
+    }
+
+    // A message that names a params type has the members that type requires; for a union, the members every
+    // alternative requires.
     template <typename Table>
     void check_params(std::string_view table_name, const Table& table) {
         for (const auto& message : table) {
             if (!message.params) continue;
-            const std::string pointer = "/wire/" + std::string(table_name) + "/" + escape_token(message.method) +
-                                        "/params_required";
-            const Type* type = profile_.type(*message.params);
-            if (type != nullptr) {
-                if (message.params_required != type->required) {
-                    fail(pointer, "the required members of " + *message.params + ": " + list(type->required),
-                         "found " + list(message.params_required));
-                }
-            } else if (!message.params_required.empty()) {
-                fail(pointer, "an empty array, since " + *message.params + " has no entry in wire.types",
+            const std::string entry_pointer = "/wire/" + std::string(table_name) + "/" + escape_token(message.method);
+            if (profile_.type(*message.params) == nullptr && profile_.union_type(*message.params) == nullptr) {
+                fail(entry_pointer + "/params", "a name of wire.types or wire.unions",
+                     "'" + *message.params + "' names neither");
+            }
+            const std::vector<std::string> required = required_of(*message.params);
+            if (message.params_required != required) {
+                fail(entry_pointer + "/params_required",
+                     "the members every alternative of " + *message.params + " requires: " + list(required),
                      "found " + list(message.params_required));
             }
         }
@@ -661,13 +759,17 @@ private:
             if (!request->params) {
                 fail(pointer, "a request that has a params type", "'" + entry.method + "' has no params type");
             }
-            const Type* type = profile_.type(*request->params);
-            if (type == nullptr) {
-                fail(pointer, "a params type that is listed in wire.types",
-                     "'" + *request->params + "' of '" + entry.method + "' is not listed");
+            if (profile_.type(*request->params) == nullptr && profile_.union_type(*request->params) == nullptr) {
+                fail(pointer, "a params type that is listed in wire.types or wire.unions",
+                     "'" + *request->params + "' of '" + entry.method + "' is listed in neither");
             }
-            if (!type->has_property(entry.member)) {
-                fail(pointer, "a property of " + type->name, "'" + entry.member + "' is not a property of " + type->name);
+            std::vector<const Type*> candidates;
+            object_types(*request->params, candidates);
+            for (const Type* type : candidates) {
+                if (!type->has_property(entry.member)) {
+                    fail(pointer, "a property of " + type->name + ", which '" + entry.method + "' may carry",
+                         "'" + entry.member + "' is not a property of " + type->name);
+                }
             }
         }
     }
