@@ -302,9 +302,11 @@ private:
     std::map<std::string, std::size_t, std::less<>> prompt_by_name_;
 
     // The completers of an argument, by the argument's name; parallel to the prompts and to the templates.
+    // In a deque: a vector that grows copies its elements when their move constructor may throw, as a map's may in
+    // one standard library, and a map of unique pointers cannot be copied.
     using Completers = std::map<std::string, std::unique_ptr<FeatureEntry<CompletionResult>>, std::less<>>;
-    std::vector<Completers> prompt_completers_;
-    std::vector<Completers> template_completers_;
+    std::deque<Completers> prompt_completers_;
+    std::deque<Completers> template_completers_;
     std::size_t completer_count_ = 0;
     mutable std::atomic<bool> serving_{false};
 
