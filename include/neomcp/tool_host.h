@@ -1,4 +1,4 @@
-// The interface through which a session reaches tools.
+// The interface through which a session reaches tools, and through them the other things a server offers.
 //
 // A session lists tools and calls them through a ToolHost. A call receives a CallControl, the handle through which
 // the tool sees cancellation and reports progress and log messages, and a Completion, which it calls exactly once
@@ -46,6 +46,22 @@ struct HostFailure {
 
 using CallOutcome = std::variant<ToolResult, Refusal, HostFailure>;
 
+// The URI of a resources/read names nothing the host offers. It is answered with the error the revision prescribes
+// for a resource that does not exist.
+struct NotFound {
+    std::string uri;
+};
+
+// The host found the request itself invalid (a prompt that does not exist, an argument it cannot use). It is
+// answered with Invalid params and `message`.
+struct InvalidRequest {
+    std::string message;
+};
+
+// What a call of a kind other than a tool produced. Refusal and HostFailure stay in CallOutcome and mean the same
+// for every kind of call.
+using FeatureOutcome = std::variant<ReadResult, NotFound, InvalidRequest>;
+
 // The handle of one call in flight.
 class CallControl {
 public:
@@ -80,7 +96,12 @@ private:
 // throws what the session's sink throws: a failing sink closes the session, and the tool's thread goes on.
 class Completion {
 public:
+    // A tool's outcome, or the refusal or the failure of a call of any kind. A tool result that completes a call
+    // of another kind is a defect of the host and is answered with an internal error.
     void operator()(CallOutcome outcome) const;
+    // The outcome of a call of another kind than a tool. An outcome that does not belong to the call's kind (a read
+    // result for a prompt) is a defect of the host and is answered with an internal error.
+    void operator()(FeatureOutcome outcome) const;
 
 private:
     friend class detail::SessionCore;
@@ -88,9 +109,16 @@ private:
     std::shared_ptr<detail::CompletionState> state_;
 };
 
+class ResourceHost;
+
 class ToolHost {
 public:
     virtual ~ToolHost() = default;
+
+    // The other things the host offers, each null when it offers none of its kind; a session declares the matching
+    // capability exactly when the pointer is not null, and answers the methods of a kind the host lacks as "method
+    // not found". The pointers stay valid as long as the host does. A host that offers only tools overrides none.
+    virtual ResourceHost* resource_host() noexcept { return nullptr; }
 
     // The tools, in a stable order. The span stays valid and its contents unchanged while a session uses the host.
     virtual std::span<const ToolDefinition> tools() const = 0;

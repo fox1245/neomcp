@@ -72,20 +72,22 @@ json block_base(ContentKind kind, const json& extra) {
     return object;
 }
 
+json annotations_value(const ContentAnnotations& annotations, const profile::Profile& profile) {
+    json value = json::object();
+    if (!annotations.audience.empty()) {
+        json audience = json::array();
+        for (const Role role : annotations.audience) audience.push_back(std::string(to_string(role)));
+        value["audience"] = std::move(audience);
+    }
+    if (annotations.priority) value["priority"] = *annotations.priority;
+    put(value, "lastModified", annotations.last_modified);
+    keep_members(value, "Annotations", profile);
+    return value;
+}
+
 void block_common(json& object, const std::optional<ContentAnnotations>& annotations, const std::optional<json>& meta,
                   const profile::Profile& profile) {
-    if (annotations) {
-        json value = json::object();
-        if (!annotations->audience.empty()) {
-            json audience = json::array();
-            for (const Role role : annotations->audience) audience.push_back(std::string(to_string(role)));
-            value["audience"] = std::move(audience);
-        }
-        if (annotations->priority) value["priority"] = *annotations->priority;
-        put(value, "lastModified", annotations->last_modified);
-        keep_members(value, "Annotations", profile);
-        object["annotations"] = std::move(value);
-    }
+    if (annotations) object["annotations"] = annotations_value(*annotations, profile);
     put(object, "_meta", meta);
 }
 
@@ -218,6 +220,51 @@ json to_wire(const ContentBlock& block, const profile::Profile& profile) {
     }
     json object = std::visit([&](const auto& value) { return block_value(value, profile); }, block);
     keep_members(object, type_name(kind), profile);
+    return object;
+}
+
+json to_wire(const ResourceDefinition& resource, const profile::Profile& profile) {
+    json object = json::object();
+    object["uri"] = resource.uri;
+    object["name"] = resource.name;
+    put(object, "title", resource.title);
+    put(object, "description", resource.description);
+    put(object, "mimeType", resource.mime_type);
+    if (resource.size) object["size"] = *resource.size;
+    if (resource.annotations) object["annotations"] = annotations_value(*resource.annotations, profile);
+    if (!resource.icons.empty()) object["icons"] = icons(resource.icons, profile);
+    put(object, "_meta", resource.meta);
+    keep_members(object, "Resource", profile);
+    return object;
+}
+
+json to_wire(const ResourceTemplateDefinition& resource_template, const profile::Profile& profile) {
+    json object = json::object();
+    object["uriTemplate"] = resource_template.uri_template;
+    object["name"] = resource_template.name;
+    put(object, "title", resource_template.title);
+    put(object, "description", resource_template.description);
+    put(object, "mimeType", resource_template.mime_type);
+    if (resource_template.annotations) {
+        object["annotations"] = annotations_value(*resource_template.annotations, profile);
+    }
+    if (!resource_template.icons.empty()) object["icons"] = icons(resource_template.icons, profile);
+    put(object, "_meta", resource_template.meta);
+    keep_members(object, "ResourceTemplate", profile);
+    return object;
+}
+
+json to_wire(const ResourceContents& contents, const profile::Profile& profile) {
+    return std::visit([&](const auto& value) { return resource_contents(value, profile); }, contents);
+}
+
+json to_wire(const ReadResult& result, const profile::Profile& profile) {
+    json object = json::object();
+    json contents = json::array();
+    for (const auto& item : result.contents) contents.push_back(to_wire(item, profile));
+    object["contents"] = std::move(contents);
+    put(object, "_meta", result.meta);
+    keep_members(object, "ReadResourceResult", profile);
     return object;
 }
 

@@ -34,6 +34,26 @@
 // failed decoding of arguments that passed the schema included, is answered with a tool execution error with a
 // fixed message (ServerOptions::expose_error_details adds the exception's text).
 //
+// Resources and templates. A resource has a fixed URI, a template describes a family of them:
+//
+//   server.resource("config://app", "App configuration", [] { return load_text(); }).mime_type("text/plain");
+//   server.resource_template<FileParams>("file:///{path}", "A file", [](const FileParams& p) { return read(p.path); });
+//
+// A resource handler takes nothing or a `Context&`, as a tool handler does, and is a plain function or a coroutine.
+// What it returns becomes the contents of the read (see neomcp/server/feature_handler.h): a std::string is text, a
+// neomcp::Bytes is a blob, a described struct or neomcp::json is JSON text with the MIME type application/json (unless
+// the resource has its own), and neomcp::ResourceContents, a vector of them or a neomcp::ReadResult are as built.
+// Throwing neomcp::ResourceNotFound answers the read as a resource that does not exist. The server declares the
+// `resources` capability exactly when a resource or a template is registered.
+//
+// A template's variables are the members of its parameters struct, a described struct of strings, integers and bools
+// (std::optional for a variable the URI may lack, which only a `{?query}` variable can). Registration refuses a
+// template that cannot be parsed or matched (neomcp/uri_template.h states what is matched and how), a variable with
+// no member and a member with no variable, each by name. A read is served by the resource registered at exactly that
+// URI if there is one, else by the first registered template that matches the URI and whose variables decode as the
+// parameters (a text that is not a number for an integer member is no match). A URI nothing serves is answered as the
+// revision prescribes for a resource that does not exist.
+//
 // Threads. Plain-function handlers run on a pool of worker threads the server owns, bounded by
 // ServerOptions::max_concurrent_calls and max_pending_calls. Coroutine handlers run on one thread the server owns,
 // which drives an asio::io_context, and are bounded by max_coroutine_calls; a coroutine handler must not block, or
@@ -51,11 +71,13 @@
 #include <vector>
 
 #include "neomcp/describe.h"
+#include "neomcp/feature_host.h"
 #include "neomcp/json.h"
 #include "neomcp/json_schema.h"
 #include "neomcp/model.h"
 #include "neomcp/profile.h"
 #include "neomcp/server/context.h"
+#include "neomcp/server/feature_handler.h"
 #include "neomcp/server/handler.h"
 #include "neomcp/session.h"
 #include "neomcp/tool_host.h"
@@ -103,6 +125,15 @@ struct ServerOptions {
     CacheHints tools_cache{};
     // Tools per tools/list page; empty: one page with every tool. Zero is an error.
     std::optional<std::size_t> tools_page_size{};
+    // Caching hints on resources/list and resources/templates/list, where the revision has them. Default: stale at
+    // once, private.
+    CacheHints resources_cache{};
+    // Caching hints on resources/read results, where the revision has them, for a resource that sets none of its own
+    // (ResourceHandle::cache). Default: stale at once, private.
+    CacheHints resource_read_cache{};
+    // Resources per resources/list page, and templates per resources/templates/list page; empty: one page with
+    // everything. Zero is an error.
+    std::optional<std::size_t> resources_page_size{};
     // Input bounds of a session (see SessionOptions): 8 MiB per line, 128 levels of nesting, and 1024 lines waiting
     // to be written before progress and log notifications are dropped.
     std::size_t max_message_bytes = SessionOptions{}.max_message_bytes;
@@ -135,6 +166,54 @@ public:
 private:
     friend class Server;
     ToolHandle(detail::ServerCore* core, std::size_t index) : core_(core), index_(index) {}
+    detail::ServerCore* core_;
+    std::size_t index_;
+};
+
+// A registered resource, for setting its optional members. Every setter returns the handle, so that calls chain, and
+// throws std::logic_error once the server serves. A handle is valid as long as its server.
+class ResourceHandle {
+public:
+    ResourceHandle title(std::string text) const;
+    ResourceHandle description(std::string text) const;
+    // The MIME type of the resource, in the list and on its contents.
+    ResourceHandle mime_type(std::string type) const;
+    // The size of the content in bytes, before any encoding.
+    ResourceHandle size(std::uint64_t bytes) const;
+    ResourceHandle annotations(ContentAnnotations value) const;
+    ResourceHandle icons(std::vector<Icon> list) const;
+    // `_meta` of the resource; an object, else std::invalid_argument.
+    ResourceHandle meta(json value) const;
+    // The caching hints of this resource's reads, where the revision has them, instead of
+    // ServerOptions::resource_read_cache.
+    ResourceHandle cache(CacheHints hints) const;
+
+    const std::string& uri() const;
+
+private:
+    friend class Server;
+    ResourceHandle(detail::ServerCore* core, std::size_t index) : core_(core), index_(index) {}
+    detail::ServerCore* core_;
+    std::size_t index_;
+};
+
+// A registered resource template; the setters are those of ResourceHandle, without `size`.
+class ResourceTemplateHandle {
+public:
+    ResourceTemplateHandle title(std::string text) const;
+    ResourceTemplateHandle description(std::string text) const;
+    // The MIME type of the contents, only when every resource of the template has it.
+    ResourceTemplateHandle mime_type(std::string type) const;
+    ResourceTemplateHandle annotations(ContentAnnotations value) const;
+    ResourceTemplateHandle icons(std::vector<Icon> list) const;
+    ResourceTemplateHandle meta(json value) const;
+    ResourceTemplateHandle cache(CacheHints hints) const;
+
+    const std::string& uri_template() const;
+
+private:
+    friend class Server;
+    ResourceTemplateHandle(detail::ServerCore* core, std::size_t index) : core_(core), index_(index) {}
     detail::ServerCore* core_;
     std::size_t index_;
 };
@@ -178,8 +257,28 @@ public:
 
     const ServerOptions& options() const noexcept;
 
+    // A resource at a fixed URI, with a human-readable name. Throws std::invalid_argument for an empty URI or name and
+    // a URI registered already, and std::logic_error once the server serves.
+    template <class Handler>
+    ResourceHandle resource(std::string uri, std::string name, Handler&& handler);
+
+    // A family of resources whose URIs `uri_template` (RFC 6570) describes; Params is a described struct whose
+    // members are the template's variables. Throws std::invalid_argument for an empty template or name, a template
+    // registered already, one that cannot be parsed or matched, and a variable and a member that do not pair up;
+    // std::logic_error once the server serves. Each message names the template.
+    template <class Params, class Handler>
+    ResourceTemplateHandle resource_template(std::string uri_template, std::string name, Handler&& handler);
+
+    // ToolHost: the resources, which the first use ends registration for. Null when none is registered.
+    ResourceHost* resource_host() noexcept override;
+
 private:
     ToolHandle add(ToolDefinition definition, detail::Body body);
+    ResourceHandle add_resource(ResourceDefinition definition, detail::FeatureBody<ReadResult> body);
+    ResourceTemplateHandle add_resource_template(ResourceTemplateDefinition definition,
+                                                 detail::FeatureBody<ReadResult> body,
+                                                 std::vector<detail::TemplateMember> members,
+                                                 detail::TemplateCheck check);
 
     std::shared_ptr<detail::ServerCore> core_;
 };
@@ -231,6 +330,54 @@ ToolHandle Server::tool(ToolDefinition definition, Handler&& handler) {
     } else {
         return add(std::move(definition),
                    detail::make_body<detail::Input::untyped, json, F>(std::forward<Handler>(handler)));
+    }
+}
+
+template <class Handler>
+ResourceHandle Server::resource(std::string uri, std::string name, Handler&& handler) {
+    using F = std::decay_t<Handler>;
+    if constexpr (!detail::check_feature_handler<detail::ResourceKind, F>()) {
+        return ResourceHandle(nullptr, 0);
+    } else {
+        ResourceDefinition definition;
+        definition.uri = std::move(uri);
+        definition.name = std::move(name);
+        return add_resource(std::move(definition), detail::make_feature_body<detail::ResourceKind, detail::NoArguments, F>(
+                                                       std::forward<Handler>(handler)));
+    }
+}
+
+template <class Params, class Handler>
+ResourceTemplateHandle Server::resource_template(std::string uri_template, std::string name, Handler&& handler) {
+    using F = std::decay_t<Handler>;
+    if constexpr (!described<Params>) {
+        static_assert(detail::dependent_false<Params>,
+                      "neomcp: server.resource_template<Params>(...) needs Params to be a described struct "
+                      "(NEOMCP_DESCRIBE or a neomcp::Described specialisation)");
+        return ResourceTemplateHandle(nullptr, 0);
+    } else if constexpr (!detail::all_template_members_decodable<Params>()) {
+        static_assert(detail::dependent_false<Params>,
+                      "neomcp: the members of the Params of server.resource_template<Params>(...) are std::string, "
+                      "bool or integers, or std::optional of one of them");
+        return ResourceTemplateHandle(nullptr, 0);
+    } else if constexpr (!detail::check_feature_handler<detail::TemplateKind<Params>, F>()) {
+        return ResourceTemplateHandle(nullptr, 0);
+    } else {
+        ResourceTemplateDefinition definition;
+        definition.uri_template = std::move(uri_template);
+        definition.name = std::move(name);
+        detail::TemplateCheck check = [](const json& variables) {
+            try {
+                static_cast<void>(neomcp::from_json<Params>(variables));
+                return true;
+            } catch (const DecodeError&) {
+                return false;
+            }
+        };
+        return add_resource_template(
+            std::move(definition),
+            detail::make_feature_body<detail::TemplateKind<Params>, Params, F>(std::forward<Handler>(handler)),
+            detail::template_members_of<Params>(), std::move(check));
     }
 }
 

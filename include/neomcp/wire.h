@@ -32,6 +32,15 @@ json to_wire(const Icon& icon, const profile::Profile& profile);
 // `TextResourceContents` or `BlobResourceContents`. A block of a kind the revision does not define is written as
 // a text block that names the kind.
 json to_wire(const ContentBlock& block, const profile::Profile& profile);
+// Type `Resource`; its annotations as `Annotations` and its icons as `Icon`.
+json to_wire(const ResourceDefinition& resource, const profile::Profile& profile);
+// Type `ResourceTemplate`.
+json to_wire(const ResourceTemplateDefinition& resource_template, const profile::Profile& profile);
+// Type `TextResourceContents` or `BlobResourceContents`.
+json to_wire(const ResourceContents& contents, const profile::Profile& profile);
+// Type `ReadResourceResult`. Members the protocol engine adds (`resultType`, the caching hints) are not written
+// here.
+json to_wire(const ReadResult& result, const profile::Profile& profile);
 // Type `CallToolResult`, its content blocks as above. Members the protocol engine adds (such as `resultType`) are
 // not part of the model and are not written here.
 json to_wire(const ToolResult& result, const profile::Profile& profile);

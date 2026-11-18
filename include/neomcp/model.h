@@ -2,6 +2,7 @@
 // one revision is the job of wire.h, which keeps only the members that revision's types have.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -155,5 +156,53 @@ std::optional<LogLevel> parse_log_level(std::string_view text) noexcept;
 // Who may keep a cached result (`cacheScope`).
 enum class CacheScope { private_scope, public_scope };
 std::string_view to_string(CacheScope scope) noexcept;
+
+// Caching hints a revision that has them requires on list, read and discovery results (`ttlMs`, `cacheScope`).
+struct CacheHints {
+    std::uint64_t ttl_ms = 0;                      // 0: stale at once
+    CacheScope scope = CacheScope::private_scope;  // reuse only within the same authorization context
+};
+
+// ---------------------------------------------------------------------------------------------------------------
+// Resources
+
+// A resource the server can read, for resources/list. `annotations` are the resource's own (who it is for, how
+// important, when it changed).
+struct ResourceDefinition {
+    std::string uri;
+    std::string name;
+    std::optional<std::string> title;
+    std::optional<std::string> description;
+    std::optional<std::string> mime_type;
+    std::optional<std::uint64_t> size;  // bytes of the content, before any encoding
+    std::optional<ContentAnnotations> annotations;
+    std::vector<Icon> icons;
+    std::optional<json> meta;  // an object, written as `_meta`
+};
+
+// A family of resources whose URIs a URI template (RFC 6570) describes, for resources/templates/list.
+struct ResourceTemplateDefinition {
+    std::string uri_template;
+    std::string name;
+    std::optional<std::string> title;
+    std::optional<std::string> description;
+    std::optional<std::string> mime_type;  // only when every resource of the template has it
+    std::optional<ContentAnnotations> annotations;
+    std::vector<Icon> icons;
+    std::optional<json> meta;
+};
+
+// The bytes of a resource that is not text; written as Base64 on the wire.
+using Bytes = std::vector<std::byte>;
+
+using ResourceContents = std::variant<TextResourceContents, BlobResourceContents>;
+
+// The outcome of resources/read.
+struct ReadResult {
+    std::vector<ResourceContents> contents;
+    std::optional<json> meta;  // an object, written as `_meta`
+    // Where the revision has caching hints, the ones for this resource; empty: the server's default for reads.
+    std::optional<CacheHints> cache;
+};
 
 }  // namespace neomcp

@@ -24,6 +24,16 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+// Thrown by a resource handler when what its URI names does not exist (for example a template matched, and nothing is
+// stored under the name it carries). The read is answered as the revision prescribes for a resource that does not
+// exist. Any other exception is answered with an internal error whose text stays on the server
+// (ServerOptions::expose_error_details adds it).
+class ResourceNotFound : public std::runtime_error {
+public:
+    ResourceNotFound() : std::runtime_error("resource not found") {}
+    using std::runtime_error::runtime_error;
+};
+
 // The handle of one call, given to the handler that runs it.
 //
 // It is valid until the handler returns or, for a coroutine handler, until its coroutine finishes; do not keep it

@@ -54,6 +54,7 @@
 #include <utility>
 
 #include "core/headers.h"
+#include "neomcp/feature_host.h"
 #include "neomcp/jsonrpc.h"
 #include "neomcp/wire.h"
 
@@ -87,6 +88,7 @@ constexpr std::string_view log_method = "notifications/message";
 constexpr std::string_view set_level_method = "logging/setLevel";
 constexpr std::string_view unsupported_version_error = "unsupported_protocol_version";
 constexpr std::string_view header_mismatch_error = "header_mismatch";
+constexpr std::string_view resource_not_found_error = "resource_not_found";
 
 const json* member(const json& object, std::string_view name) {
     const auto* members = object.get_ptr<const json::object_t*>();
@@ -191,8 +193,12 @@ struct Place {
     const Claims* claims = nullptr;  // what the unit's headers claim; never null
 };
 
+// What a call in flight is for; it decides which outcomes may complete it.
+enum class CallKind { tool, resource_read };
+
 struct CallState {
     std::weak_ptr<SessionCore> core;
+    CallKind kind = CallKind::tool;
     RequestId id;
     profile::ProfilePtr profile;
     const Served* served = nullptr;  // owned by the core; read only while the core is alive
@@ -254,6 +260,7 @@ public:
     profile::ProfilePtr connection_profile() const;
 
     void complete(const std::shared_ptr<CallState>& call, CallOutcome outcome);
+    void complete(const std::shared_ptr<CallState>& call, FeatureOutcome outcome);
     void complete_dropped(const std::shared_ptr<CallState>& call);
     void progress(const std::shared_ptr<CallState>& call, double value, std::optional<double> total,
                   std::optional<std::string> message);
@@ -295,6 +302,9 @@ private:
     std::optional<Answer> on_tools_list(Message& request, const Served& served, Origin&, const Place&);
     std::optional<Answer> on_tools_call(Message& request, const Served& served, Origin& origin, const Place& place);
     std::optional<Answer> on_discover(Message& request, const Served& served, Origin&, const Place&);
+    std::optional<Answer> on_resources_list(Message& request, const Served& served, Origin&, const Place&);
+    std::optional<Answer> on_resource_templates_list(Message& request, const Served& served, Origin&, const Place&);
+    std::optional<Answer> on_resources_read(Message& request, const Served& served, Origin& origin, const Place& place);
     std::optional<Answer> on_set_level(Message& request, const Served& served, Origin& origin, const Place&);
     static const std::map<std::string, Handler, std::less<>>& handlers();
 
@@ -317,7 +327,25 @@ private:
     json supported_versions(const OpenMechanism* opener = nullptr) const;
     json capabilities(const profile::Profile& profile) const;
     void finish_result(json& body, std::string_view type, const profile::Profile& profile) const;
+    void finish_result(json& body, std::string_view type, const profile::Profile& profile, const CacheHints& cache) const;
     json call_result(const ToolResult& result, const profile::Profile& profile) const;
+    // The members of a page of a list of `total` items that a request asks for, or the answer to a bad cursor.
+    struct Page {
+        std::size_t start = 0;
+        std::size_t count = 0;
+    };
+    std::variant<Page, Answer> page_of(const Message& request, const Served& served, std::size_t total,
+                                       const std::optional<std::size_t>& page_size) const;
+    // A list result with its page of items already written as `member`.
+    Answer list_answer(const Message& request, const Served& served, std::string_view member, json items,
+                       std::size_t end, std::size_t total, std::string_view type, const CacheHints& cache) const;
+    static Answer method_not_found(const Message& request, const Served& served);
+    // Registers a call of `kind` that the host will complete; null when nothing is to be started (the session closed,
+    // or the unit was abandoned).
+    std::shared_ptr<CallState> begin_call(CallKind kind, const RequestId& id, const Served& served, Origin& origin,
+                                          const Place& place, json progress_token);
+    // The progress token of a request's `_meta`, null when it has none; the answer when it is malformed.
+    std::variant<json, Answer> progress_token_of(const Message& request, const Served& served) const;
     void cancel(const RequestId& id, const CancelMechanism& mechanism, const std::string& method);
     void finish_call(const std::shared_ptr<CallState>& call, json response);
     void emit_batch(const Batch& batch, Writer writer);
@@ -890,6 +918,9 @@ const std::map<std::string, SessionCore::Handler, std::less<>>& SessionCore::han
         {"tools/list", &SessionCore::on_tools_list},
         {"tools/call", &SessionCore::on_tools_call},
         {"server/discover", &SessionCore::on_discover},
+        {"resources/list", &SessionCore::on_resources_list},
+        {"resources/templates/list", &SessionCore::on_resource_templates_list},
+        {"resources/read", &SessionCore::on_resources_read},
         {std::string(set_level_method), &SessionCore::on_set_level},
     };
     return table;
@@ -910,6 +941,42 @@ std::optional<Answer> SessionCore::on_ping(Message& request, const Served& serve
     return served_answer(make_result(*request.id, std::move(body)), served);
 }
 
+std::variant<SessionCore::Page, Answer> SessionCore::page_of(const Message& request, const Served& served,
+                                                              std::size_t total,
+                                                              const std::optional<std::size_t>& page_size) const {
+    const RequestId& id = *request.id;
+    std::size_t start = 0;
+    if (const json* cursor = member(request.params, "cursor")) {
+        if (!page_size) {
+            return served_answer(
+                make_error(id, error_code::invalid_params,
+                           "Invalid params: this server returns the list in one page, so no cursor is valid"),
+                served);
+        }
+        const auto* text = cursor->get_ptr<const std::string*>();
+        const auto index = text == nullptr ? std::nullopt : parse_cursor(*text, total);
+        if (!index) return served_answer(make_error(id, error_code::invalid_params, "Invalid params: invalid cursor"), served);
+        start = *index;
+    }
+    const std::size_t count = page_size ? std::min(total - start, *page_size) : total - start;
+    return Page{start, count};
+}
+
+Answer SessionCore::list_answer(const Message& request, const Served& served, std::string_view member_name, json items,
+                                std::size_t end, std::size_t total, std::string_view type,
+                                const CacheHints& cache) const {
+    json body = json::object();
+    body[std::string(member_name)] = std::move(items);
+    if (end < total) body["nextCursor"] = std::to_string(end);
+    finish_result(body, type, *served.profile, cache);
+    return served_answer(make_result(*request.id, std::move(body)), served);
+}
+
+Answer SessionCore::method_not_found(const Message& request, const Served& served) {
+    return served_answer(make_error(*request.id, error_code::method_not_found, "Method not found: " + request.method),
+                         served, RefusalReason::method_not_found);
+}
+
 std::optional<Answer> SessionCore::on_tools_list(Message& request, const Served& served, Origin&, const Place&) {
     const RequestId& id = *request.id;
     const profile::Profile& profile = *served.profile;
@@ -920,28 +987,59 @@ std::optional<Answer> SessionCore::on_tools_list(Message& request, const Served&
         return served_answer(make_error(id, error_code::internal_error, "Internal error: the tools could not be listed"),
                              served);
     }
-    std::size_t start = 0;
-    if (const json* cursor = member(request.params, "cursor")) {
-        if (!options_.tools_page_size) {
-            return served_answer(
-                make_error(id, error_code::invalid_params,
-                           "Invalid params: this server returns tools/list in one page, so no cursor is valid"),
-                served);
-        }
-        const auto* text = cursor->get_ptr<const std::string*>();
-        const auto index = text == nullptr ? std::nullopt : parse_cursor(*text, tools.size());
-        if (!index) return served_answer(make_error(id, error_code::invalid_params, "Invalid params: invalid cursor"), served);
-        start = *index;
-    }
-    const std::size_t count =
-        options_.tools_page_size ? std::min(tools.size() - start, *options_.tools_page_size) : tools.size() - start;
+    auto page = page_of(request, served, tools.size(), options_.tools_page_size);
+    if (auto* refusal = std::get_if<Answer>(&page)) return std::move(*refusal);
+    const auto [start, count] = std::get<Page>(page);
     json list = json::array();
     for (std::size_t i = start; i < start + count; ++i) list.push_back(to_wire(tools[i], profile));
-    json body = json::object();
-    body["tools"] = std::move(list);
-    if (start + count < tools.size()) body["nextCursor"] = std::to_string(start + count);
-    finish_result(body, "ListToolsResult", profile);
-    return served_answer(make_result(id, std::move(body)), served);
+    return list_answer(request, served, "tools", std::move(list), start + count, tools.size(), "ListToolsResult",
+                       options_.tools_cache);
+}
+
+std::variant<json, Answer> SessionCore::progress_token_of(const Message& request, const Served& served) const {
+    using Result = std::variant<json, Answer>;
+    const json* meta = member(request.params, "_meta");
+    if (const json* token = meta == nullptr ? nullptr : member(*meta, "progressToken")) {
+        if (!token->is_string() && !token->is_number_integer()) {
+            return Result(std::in_place_index<1>,
+                          served_answer(make_error(*request.id, error_code::invalid_params,
+                                                   "Invalid params: params._meta.progressToken must be a string or an "
+                                                   "integer"),
+                                        served));
+        }
+        return Result(std::in_place_index<0>, *token);
+    }
+    return Result(std::in_place_index<0>, json(nullptr));
+}
+
+std::shared_ptr<CallState> SessionCore::begin_call(CallKind kind, const RequestId& id, const Served& served,
+                                                   Origin& origin, const Place& place, json progress_token) {
+    const profile::Profile& profile = *served.profile;
+    auto call = std::make_shared<CallState>(id);
+    call->core = weak_from_this();
+    call->kind = kind;
+    call->profile = served.profile;
+    call->served = &served;
+    call->client = std::move(origin.client);
+    call->progress_token = std::move(progress_token);
+    call->fixed_log_level = origin.log_level;
+    if (origin.connection) {
+        const profile::Message* set_level = profile.request(set_level_method);
+        call->follows_connection_level = set_level != nullptr && set_level->from_client;
+    }
+    call->unit = place.unit;
+    call->batch = place.batch;
+    call->batch_index = place.index;
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        if (closed_) return nullptr;
+        // A unit abandoned while it was read: when a closed stream cancels the call, it is not started.
+        if (place.unit && place.unit->abandoned && served.cancel->stops_on_stream_close()) return nullptr;
+        if (place.unit && !place.batch) place.unit->profile = served.profile;
+        in_flight_.emplace(id, call);
+        if (place.batch) ++place.batch->outstanding;
+    }
+    return call;
 }
 
 std::optional<Answer> SessionCore::on_tools_call(Message& request, const Served& served, Origin& origin,
@@ -963,15 +1061,9 @@ std::optional<Answer> SessionCore::on_tools_call(Message& request, const Served&
         arguments = *given;
     }
     const json* meta = member(request.params, "_meta");
-    json progress_token = nullptr;
-    if (const json* token = meta == nullptr ? nullptr : member(*meta, "progressToken")) {
-        if (!token->is_string() && !token->is_number_integer()) {
-            return served_answer(make_error(id, error_code::invalid_params,
-                                            "Invalid params: params._meta.progressToken must be a string or an integer"),
-                                 served);
-        }
-        progress_token = *token;
-    }
+    auto token = progress_token_of(request, served);
+    if (auto* refusal = std::get_if<Answer>(&token)) return std::move(*refusal);
+    json progress_token = std::move(std::get<json>(token));
 
     std::span<const ToolDefinition> tools;
     try {
@@ -1012,29 +1104,8 @@ std::optional<Answer> SessionCore::on_tools_call(Message& request, const Served&
         }
     }
 
-    auto call = std::make_shared<CallState>(id);
-    call->core = weak_from_this();
-    call->profile = served.profile;
-    call->served = &served;
-    call->client = std::move(origin.client);
-    call->progress_token = std::move(progress_token);
-    call->fixed_log_level = origin.log_level;
-    if (origin.connection) {
-        const profile::Message* set_level = profile.request(set_level_method);
-        call->follows_connection_level = set_level != nullptr && set_level->from_client;
-    }
-    call->unit = place.unit;
-    call->batch = place.batch;
-    call->batch_index = place.index;
-    {
-        const std::lock_guard<std::mutex> lock(mutex_);
-        if (closed_) return std::nullopt;
-        // A unit abandoned while it was read: when a closed stream cancels the call, it is not started.
-        if (place.unit && place.unit->abandoned && served.cancel->stops_on_stream_close()) return std::nullopt;
-        if (place.unit && !place.batch) place.unit->profile = served.profile;
-        in_flight_.emplace(id, call);
-        if (place.batch) ++place.batch->outstanding;
-    }
+    auto call = begin_call(CallKind::tool, id, served, origin, place, std::move(progress_token));
+    if (!call) return std::nullopt;
 
     CallRequest call_request;
     call_request.name = *tool_name;
@@ -1042,6 +1113,78 @@ std::optional<Answer> SessionCore::on_tools_call(Message& request, const Served&
     if (meta != nullptr) call_request.meta = *meta;
     try {
         host_.call(call_request, CallControl(call), Completion(std::make_shared<CompletionState>(call)));
+    } catch (...) {
+        // The completion answers with an internal error once its last copy is gone.
+    }
+    return std::nullopt;
+}
+
+std::optional<Answer> SessionCore::on_resources_list(Message& request, const Served& served, Origin&, const Place&) {
+    ResourceHost* host = host_.resource_host();
+    if (host == nullptr) return method_not_found(request, served);
+    std::span<const ResourceDefinition> resources;
+    ListSettings settings;
+    try {
+        resources = host->resources();
+        settings = host->list_settings();
+    } catch (...) {
+        return served_answer(
+            make_error(*request.id, error_code::internal_error, "Internal error: the resources could not be listed"), served);
+    }
+    auto page = page_of(request, served, resources.size(), settings.page_size);
+    if (auto* refusal = std::get_if<Answer>(&page)) return std::move(*refusal);
+    const auto [start, count] = std::get<Page>(page);
+    json list = json::array();
+    for (std::size_t i = start; i < start + count; ++i) list.push_back(to_wire(resources[i], *served.profile));
+    return list_answer(request, served, "resources", std::move(list), start + count, resources.size(),
+                       "ListResourcesResult", settings.cache);
+}
+
+std::optional<Answer> SessionCore::on_resource_templates_list(Message& request, const Served& served, Origin&,
+                                                              const Place&) {
+    ResourceHost* host = host_.resource_host();
+    if (host == nullptr) return method_not_found(request, served);
+    std::span<const ResourceTemplateDefinition> templates;
+    ListSettings settings;
+    try {
+        templates = host->resource_templates();
+        settings = host->list_settings();
+    } catch (...) {
+        return served_answer(make_error(*request.id, error_code::internal_error,
+                                        "Internal error: the resource templates could not be listed"),
+                             served);
+    }
+    auto page = page_of(request, served, templates.size(), settings.page_size);
+    if (auto* refusal = std::get_if<Answer>(&page)) return std::move(*refusal);
+    const auto [start, count] = std::get<Page>(page);
+    json list = json::array();
+    for (std::size_t i = start; i < start + count; ++i) list.push_back(to_wire(templates[i], *served.profile));
+    return list_answer(request, served, "resourceTemplates", std::move(list), start + count, templates.size(),
+                       "ListResourceTemplatesResult", settings.cache);
+}
+
+std::optional<Answer> SessionCore::on_resources_read(Message& request, const Served& served, Origin& origin,
+                                                     const Place& place) {
+    ResourceHost* host = host_.resource_host();
+    if (host == nullptr) return method_not_found(request, served);
+    const RequestId& id = *request.id;
+    const json* uri = member(request.params, "uri");
+    const auto* text = uri == nullptr ? nullptr : uri->get_ptr<const std::string*>();
+    if (text == nullptr) {
+        return served_answer(make_error(id, error_code::invalid_params, "Invalid params: params.uri must be a string"),
+                             served);
+    }
+    auto token = progress_token_of(request, served);
+    if (auto* refusal = std::get_if<Answer>(&token)) return std::move(*refusal);
+
+    auto call = begin_call(CallKind::resource_read, id, served, origin, place, std::move(std::get<json>(token)));
+    if (!call) return std::nullopt;
+
+    ReadRequest read;
+    read.uri = *text;
+    if (const json* meta = member(request.params, "_meta")) read.meta = *meta;
+    try {
+        host->read(read, CallControl(call), Completion(std::make_shared<CompletionState>(call)));
     } catch (...) {
         // The completion answers with an internal error once its last copy is gone.
     }
@@ -1177,6 +1320,7 @@ json SessionCore::capabilities(const profile::Profile& profile) const {
     tools["listChanged"] = false;
     capabilities["tools"] = std::move(tools);
     if (options_.protocol_logging) capabilities["logging"] = json::object();
+    if (host_.resource_host() != nullptr) capabilities["resources"] = json::object();
     keep_members(capabilities, "ServerCapabilities", profile);
     return capabilities;
 }
@@ -1184,10 +1328,15 @@ json SessionCore::capabilities(const profile::Profile& profile) const {
 // Adds the members a revision's result type requires that the engine provides, and the server's identity in
 // `_meta`, each only when the type (or the result meta type) of the revision has it.
 void SessionCore::finish_result(json& body, std::string_view type, const profile::Profile& profile) const {
+    finish_result(body, type, profile, options_.tools_cache);
+}
+
+void SessionCore::finish_result(json& body, std::string_view type, const profile::Profile& profile,
+                                const CacheHints& cache) const {
     if (const profile::Type* result = profile.type(type)) {
         if (result->has_property("resultType")) body["resultType"] = "complete";
-        if (result->has_property("ttlMs")) body["ttlMs"] = options_.tools_cache.ttl_ms;
-        if (result->has_property("cacheScope")) body["cacheScope"] = std::string(to_string(options_.tools_cache.scope));
+        if (result->has_property("ttlMs")) body["ttlMs"] = cache.ttl_ms;
+        if (result->has_property("cacheScope")) body["cacheScope"] = std::string(to_string(cache.scope));
     }
     if (options_.include_server_info) {
         const profile::Type* meta = profile.type(result_meta_type);
@@ -1209,13 +1358,20 @@ json SessionCore::call_result(const ToolResult& result, const profile::Profile& 
 void SessionCore::complete(const std::shared_ptr<CallState>& call, CallOutcome outcome) {
     json response;
     if (const auto* result = std::get_if<ToolResult>(&outcome)) {
+        if (call->kind != CallKind::tool) {
+            // A tool result cannot answer another kind of call.
+            finish_call(call, make_error(call->id, error_code::internal_error,
+                                         "Internal error: the host answered with a result of another kind"));
+            return;
+        }
         response = make_result(call->id, call_result(*result, *call->profile));
     } else if (std::holds_alternative<Refusal>(outcome)) {
         json data = json::object();
         data["reason"] = "busy";
         response = make_error(call->id, error_code::internal_error, "Internal error: the server is busy", std::move(data));
     } else {
-        std::string message = "Internal error: the tool call failed";
+        std::string message = call->kind == CallKind::tool ? "Internal error: the tool call failed"
+                                                           : "Internal error: the call failed";
         const auto& failure = std::get<HostFailure>(outcome);
         if (options_.expose_error_details && !failure.message.empty()) message += ": " + failure.message;
         response = make_error(call->id, error_code::internal_error, std::move(message));
@@ -1223,9 +1379,43 @@ void SessionCore::complete(const std::shared_ptr<CallState>& call, CallOutcome o
     finish_call(call, std::move(response));
 }
 
+void SessionCore::complete(const std::shared_ptr<CallState>& call, FeatureOutcome outcome) {
+    const profile::Profile& profile = *call->profile;
+    json response;
+    const auto wrong_kind = [&] {
+        return make_error(call->id, error_code::internal_error,
+                          "Internal error: the host answered with a result of another kind");
+    };
+    if (const auto* result = std::get_if<ReadResult>(&outcome)) {
+        if (call->kind != CallKind::resource_read) {
+            response = wrong_kind();
+        } else {
+            json body = to_wire(*result, profile);
+            finish_result(body, "ReadResourceResult", profile, result->cache.value_or(CacheHints{}));
+            response = make_result(call->id, std::move(body));
+        }
+    } else if (const auto* missing = std::get_if<NotFound>(&outcome)) {
+        if (call->kind != CallKind::resource_read) {
+            response = wrong_kind();
+        } else {
+            // The code is the one this revision defines for it, else Invalid params: never a code of another
+            // revision, which this one may forbid.
+            const int code = profile.error_code(resource_not_found_error).value_or(error_code::invalid_params);
+            json data = json::object();
+            data["uri"] = missing->uri;
+            response = make_error(call->id, code, "Resource not found: " + missing->uri, std::move(data));
+        }
+    } else {
+        response = make_error(call->id, error_code::invalid_params,
+                              "Invalid params: " + std::get<InvalidRequest>(outcome).message);
+    }
+    finish_call(call, std::move(response));
+}
+
 void SessionCore::complete_dropped(const std::shared_ptr<CallState>& call) {
     finish_call(call, make_error(call->id, error_code::internal_error,
-                                 "Internal error: the tool call ended without a result"));
+                                 call->kind == CallKind::tool ? "Internal error: the tool call ended without a result"
+                                                              : "Internal error: the call ended without a result"));
 }
 
 void SessionCore::finish_call(const std::shared_ptr<CallState>& call, json response) {
@@ -1637,6 +1827,11 @@ const json& CallControl::client_info() const noexcept { return state_->client.in
 const json& CallControl::client_capabilities() const noexcept { return state_->client.capabilities; }
 
 void Completion::operator()(CallOutcome outcome) const {
+    if (!state_ || state_->called.exchange(true)) return;
+    if (auto core = state_->call->core.lock()) core->complete(state_->call, std::move(outcome));
+}
+
+void Completion::operator()(FeatureOutcome outcome) const {
     if (!state_ || state_->called.exchange(true)) return;
     if (auto core = state_->call->core.lock()) core->complete(state_->call, std::move(outcome));
 }

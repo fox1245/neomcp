@@ -115,12 +115,6 @@ using IdleCallback = std::function<void()>;
 // Checks tool arguments against the tool's input schema: a message when they fail it, empty when they pass.
 using ArgumentCheck = std::function<std::optional<std::string>(const ToolDefinition& tool, const json& arguments)>;
 
-// Caching hints a revision that has them requires on list and discovery results (`ttlMs`, `cacheScope`).
-struct CacheHints {
-    std::uint64_t ttl_ms = 0;                         // 0: stale at once
-    CacheScope scope = CacheScope::private_scope;     // reuse only within the same authorization context
-};
-
 struct SessionOptions {
     // The revisions served; empty: every built-in profile. Two profiles of the same revision are an error.
     std::vector<profile::ProfilePtr> profiles;
