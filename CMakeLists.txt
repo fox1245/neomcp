@@ -102,6 +102,19 @@ target_link_libraries(neomcp_schema PUBLIC neojson::neojson)
 target_compile_features(neomcp_schema PUBLIC cxx_std_20)
 neomcp_configure_target(neomcp_schema)
 
+# The protocol core: JSON-RPC messages, the revision-independent model, the members filter, the mechanisms and their
+# registry, the session engine and the in-memory test peer. It does no I/O of its own.
+find_package(Threads REQUIRED)
+add_library(neomcp_core
+    src/core/jsonrpc.cpp
+    src/core/model.cpp
+    src/core/wire.cpp)
+add_library(neomcp::core ALIAS neomcp_core)
+target_include_directories(neomcp_core PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+target_link_libraries(neomcp_core PUBLIC neomcp::profile neojson::neojson Threads::Threads)
+target_compile_features(neomcp_core PUBLIC cxx_std_20)
+neomcp_configure_target(neomcp_core)
+
 if(NEOMCP_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
