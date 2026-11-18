@@ -30,7 +30,9 @@ repository and the date they were read.
 
 ## The `wire` member
 
-`wire` is generated from the revision's official `schema.json` and must not be edited:
+`wire` is generated from the revision's official `schema.json` and must not be edited. The schema is part of the
+Model Context Protocol specification, which carries its own licence terms; [NOTICE](../NOTICE) at the root of this
+repository gives the attribution that goes with data derived from it. To regenerate or check it:
 
 ```sh
 tools/profile_wire.py path/to/schema/2026-07-28/schema.json --write profiles/2026-07-28.json

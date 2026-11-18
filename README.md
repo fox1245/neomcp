@@ -144,3 +144,7 @@ stream open besides its requests, so allow one worker per such client plus the r
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+The `wire` member of every file in `profiles/` is derived from the schema of the Model Context Protocol
+specification, whose repository licenses new contributions under the Apache License 2.0 and keeps older ones that
+have not been relicensed under the MIT License. See [NOTICE](NOTICE).
