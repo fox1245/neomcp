@@ -1,21 +1,11 @@
-# The scenarios of the official conformance runner, revision 2025-11-25, that the fixture server cannot pass yet: it
-# serves tools only. Resources, resource templates and subscriptions, prompts, completion, and tools that ask the
-# client for sampling or elicitation while they run are not implemented.
+# The scenarios of the official conformance runner, revision 2025-11-25, that the fixture server cannot pass yet. It
+# serves tools, resources, a resource template, prompts and completion; it does not subscribe a client to the changes
+# of a resource, and it has no tool that asks the client for sampling or elicitation while it runs.
 # An entry that starts to pass fails the run, so this list shrinks as the server grows.
 server:
-  - completion-complete
   - tools-call-sampling
   - tools-call-elicitation
   - elicitation-sep1034-defaults
   - elicitation-sep1330-enums
-  - resources-list
-  - resources-read-text
-  - resources-read-binary
-  - resources-templates-read
   - resources-subscribe
   - resources-unsubscribe
-  - prompts-list
-  - prompts-get-simple
-  - prompts-get-with-args
-  - prompts-get-embedded-resource
-  - prompts-get-with-image

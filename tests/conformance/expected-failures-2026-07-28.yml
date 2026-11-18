@@ -1,29 +1,12 @@
 # The scenarios and checks of the official conformance runner, revision 2026-07-28, that the fixture server cannot
-# pass yet: it serves tools only. Resources, resource templates, prompts, completion and input-required results are
-# not implemented, and the fixture has no tool that needs a client capability or asks for input while it runs.
+# pass yet. It serves tools, resources, a resource template, prompts and completion, and the caching hints of their
+# lists; it has no tool that needs a client capability or asks for input while it runs, and no prompt that does.
 # An entry that starts to pass fails the run, so this list shrinks as the server grows.
 server:
   # Needs the tools test_missing_capability and test_streaming_elicitation.
   - server-stateless:sep-2575-server-rejects-undeclared-capability
   - server-stateless:sep-2575-missing-capability-http-400
   - server-stateless:sep-2575-http-server-no-independent-requests-on-stream
-  - completion-complete
-  - resources-list
-  - resources-read-text
-  - resources-read-binary
-  - resources-templates-read
-  # resources/read does not exist yet, so the error is not the one for an unknown resource.
-  - sep-2164-resource-not-found:sep-2164-error-code
-  - sep-2164-resource-not-found:sep-2164-data-uri
-  - prompts-list
-  - prompts-get-simple
-  - prompts-get-with-args
-  - prompts-get-embedded-resource
-  - prompts-get-with-image
-  # tools/list carries the caching hints; the other lists do not exist yet.
-  - caching:sep-2549-prompts-list-caching-hints
-  - caching:sep-2549-resources-list-caching-hints
-  - caching:sep-2549-resources-templates-list-caching-hints
   - input-required-result-basic-elicitation
   - input-required-result-basic-sampling
   - input-required-result-basic-list-roots
