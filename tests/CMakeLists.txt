@@ -75,3 +75,22 @@ target_link_libraries(neomcp_stdio_test PRIVATE neomcp::stdio GTest::gtest_main 
 target_include_directories(neomcp_stdio_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 neomcp_configure_target(neomcp_stdio_test)
 gtest_discover_tests(neomcp_stdio_test DISCOVERY_TIMEOUT 120)
+
+# A real program that serves a few tools over stdio. The interoperability test drives it; it is neither installed nor
+# an example.
+add_executable(neomcp_stdio_fixture fixtures/stdio_server.cpp)
+target_link_libraries(neomcp_stdio_fixture PRIVATE neomcp::stdio Threads::Threads)
+neomcp_configure_target(neomcp_stdio_fixture)
+
+if(NEOMCP_INTEROP_TESTS)
+    if(NEOMCP_INTEROP_PYTHON STREQUAL "")
+        message(FATAL_ERROR "neomcp: NEOMCP_INTEROP_TESTS needs NEOMCP_INTEROP_PYTHON, the Python interpreter that has tests/interop/requirements.txt installed")
+    endif()
+    # Isolated mode (-I): the interpreter reads neither the environment nor the current directory; the packages come
+    # from the interpreter's own site-packages.
+    add_test(NAME interop_stdio_python_sdk
+        COMMAND "${NEOMCP_INTEROP_PYTHON}" -I "${CMAKE_CURRENT_SOURCE_DIR}/interop/test_stdio_interop.py")
+    set_tests_properties(interop_stdio_python_sdk PROPERTIES
+        ENVIRONMENT "NEOMCP_STDIO_FIXTURE=$<TARGET_FILE:neomcp_stdio_fixture>"
+        TIMEOUT 300)
+endif()

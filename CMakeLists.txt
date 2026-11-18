@@ -9,6 +9,11 @@ endif()
 
 option(NEOMCP_BUILD_TESTS "Build the tests" ${NEOMCP_IS_TOP_LEVEL})
 option(NEOMCP_WARNINGS_AS_ERRORS "Treat warnings in neomcp's own targets as errors" OFF)
+option(NEOMCP_INTEROP_TESTS
+    "Register the interoperability test, which drives the fixture server with the official Python SDK's client. Needs NEOMCP_INTEROP_PYTHON"
+    OFF)
+set(NEOMCP_INTEROP_PYTHON "" CACHE FILEPATH
+    "With NEOMCP_INTEROP_TESTS: the Python interpreter that has tests/interop/requirements.txt installed")
 option(NEOMCP_TEST_TIME_BOUNDS
     "Give the tests that check how cost grows with size a short time limit. Turn it off for instrumented builds, whose slowdown is not uniform across platforms"
     ON)

@@ -2,7 +2,8 @@ name: CI
 
 # Every push and pull request builds and tests on Linux x64 (GCC and Clang) and Linux arm64, with AddressSanitizer
 # and UndefinedBehaviorSanitizer. macOS (arm64 and x64) and Windows (x64 and arm64) run on pushes to main and on
-# demand, and on every event once the repository is public.
+# demand, and on every event once the repository is public. One more job runs the stdio server against the official
+# Python SDK's client.
 
 on:
   push:
@@ -70,3 +71,25 @@ jobs:
         run: cmake --build build --config Release --parallel
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure --timeout 300
+
+  interop:
+    name: interop-python-sdk
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install the Python SDK at the pinned versions
+        run: |
+          python -m venv "$RUNNER_TEMP/interop-venv"
+          "$RUNNER_TEMP/interop-venv/bin/python" -m pip install -r tests/interop/requirements.txt
+      - name: Configure (Release)
+        run: >-
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON
+          -DNEOMCP_INTEROP_TESTS=ON "-DNEOMCP_INTEROP_PYTHON=$RUNNER_TEMP/interop-venv/bin/python"
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --timeout 300
