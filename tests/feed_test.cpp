@@ -892,8 +892,9 @@ TEST(SubscriptionFeed, AnAbandonedSubscriptionEndsWithoutAWord) {
 }
 
 // The acknowledgement is the first message of a subscription even while changes are reported on another thread as the
-// subscription opens: in each round the reporter reports without pause until the listen request was read, and the
-// subscription is abandoned before the next round, so that one is open at a time.
+// subscription opens: in each round the reporter reports without pause until the listen request was read (at most a
+// bounded number of times, so that a lock that favours the reporter cannot hold the round up), and the subscription
+// is abandoned before the next round, so that one is open at a time.
 TEST(SubscriptionFeed, TheAcknowledgementIsFirstWhileChangesRace) {
     constexpr neomcp::UnitId rounds = 300;
     FeedHost host;
@@ -903,7 +904,7 @@ TEST(SubscriptionFeed, TheAcknowledgementIsFirstWhileChangesRace) {
     std::thread reporter([&] {
         for (neomcp::UnitId unit = 1; unit <= rounds; ++unit) {
             meeting.arrive();
-            while (!read.load()) host.report(neomcp::ChangeKind::tools_list);
+            for (int report = 0; report < 200 && !read.load(); ++report) host.report(neomcp::ChangeKind::tools_list);
             meeting.arrive();
         }
     });
