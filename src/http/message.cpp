@@ -100,7 +100,7 @@ struct Responder::State {
 Responder::Responder(Sink sink) : state_(std::make_shared<State>(std::move(sink))) {}
 
 bool Responder::complete(Response response) const {
-    if (state_->done.exchange(true)) return false;
+    if (!state_ || state_->done.exchange(true)) return false;  // a moved-from responder has no state
     try {
         return state_->sink && state_->sink(std::move(response));
     } catch (...) {
@@ -108,6 +108,6 @@ bool Responder::complete(Response response) const {
     }
 }
 
-bool Responder::completed() const noexcept { return state_->done.load(); }
+bool Responder::completed() const noexcept { return state_ && state_->done.load(); }
 
 }  // namespace neomcp::http

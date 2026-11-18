@@ -1,0 +1,111 @@
+// An HTTP/1.1 listener: accepts connections, turns each request on one path into a Request, hands it to a Handler and
+// writes what the handler's Responder is completed with. It knows nothing of the protocol that runs over it.
+//
+// The listener is plain HTTP (no TLS) on blocking sockets, one worker thread per connection that is being served. Two
+// consequences matter for sizing:
+//
+//   - A worker thread serves a connection until it ends. A response that streams (Response::stream) therefore holds
+//     its worker for as long as the stream is open, and so does a request whose Responder has not been completed yet
+//     (the worker waits for the completion). The number of such responses that can be open at once is
+//     ListenerOptions::max_worker_threads. Size it for the number of streams you expect plus the requests in flight.
+//   - A connection that arrives when every worker is busy is accepted and queued, up to max_queued_connections; it
+//     gets no answer until a worker is free. A connection that arrives when the queue is full is closed at once.
+//
+// The peer's disconnect is noticed by polling (ListenerOptions::disconnect_poll_interval), because a blocking
+// socket gives the worker no wake-up: a client that went away is noticed within about one interval, and the stream's
+// on_close callback runs then. Before a response has started, a disconnect is noticed only when the response is
+// written.
+//
+// Constructing the first listener ignores SIGPIPE for the whole process (the HTTP library does that) and nothing
+// restores it, so a write to a closed socket fails with an error instead of ending the process.
+#pragma once
+
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+
+#include "neomcp/http/message.h"
+#include "neomcp/http/outcome.h"
+
+namespace neomcp::http {
+
+struct ListenerOptions {
+    // The address to bind: an IP address or a name the system resolves. Loopback by default: a listener is reachable
+    // from other machines only when the caller asks for it.
+    std::string bind_address = "127.0.0.1";
+
+    // The port to bind. 0: any free port; start() reports the one chosen. A port that is in use is an error: the
+    // listener does not share addresses.
+    std::uint16_t port = 0;
+
+    // The one path served. It starts with '/' and holds only letters, digits and '-', '_', '~', '/'. Every method on
+    // it goes to the handler (GET, HEAD, POST, PUT, DELETE, PATCH and OPTIONS; a method the HTTP library does not know is
+    // answered 400 by it). Any other path is answered 404, and the handler is not called.
+    std::string path = "/";
+
+    // The largest request body in bytes, at least 1. A larger body is answered 413 before the handler runs. Default
+    // 8 MiB.
+    std::size_t max_body_bytes = std::size_t{8} * 1024 * 1024;
+
+    // Worker threads: `worker_threads` always exist; up to `max_worker_threads` (at least that many) exist while
+    // connections are waiting, and the extra ones leave after `worker_idle_timeout` without work.
+    std::size_t worker_threads = 8;
+    std::size_t max_worker_threads = 32;
+    std::chrono::seconds worker_idle_timeout{3};
+
+    // Connections accepted while every worker is busy and kept waiting for one; at least 1.
+    std::size_t max_queued_connections = 64;
+
+    // How long the listener waits for the next bytes of a request, and for the peer to accept bytes it writes. A
+    // stream whose reader stops reading ends after the write timeout.
+    std::chrono::milliseconds read_timeout{5000};
+    std::chrono::milliseconds write_timeout{5000};
+
+    // How long an idle connection is kept for another request (whole seconds, at least 1).
+    std::chrono::seconds idle_connection_timeout{5};
+
+    // On an event stream (Content-Type text/event-stream) that has been idle this long the listener writes a
+    // keep-alive comment. Other streams get none. Must be positive.
+    std::chrono::milliseconds keep_alive_interval{15000};
+
+    // How often the listener looks for a disconnected peer while a stream is idle. Must be positive.
+    std::chrono::milliseconds disconnect_poll_interval{250};
+};
+
+class Listener {
+public:
+    // The handler is called on worker threads, possibly several at once.
+    Listener(ListenerOptions options, Handler handler);
+
+    // Calls stop().
+    ~Listener();
+
+    Listener(const Listener&) = delete;
+    Listener& operator=(const Listener&) = delete;
+
+    // Binds, starts serving and returns the bound port, or the reason it could not (an option out of range, a port in
+    // use, an address that cannot be bound). Does not throw for those. A listener starts once: a second call, and a
+    // call after stop(), fail.
+    Outcome<std::uint16_t> start();
+
+    // Stops serving and returns when every worker has left. Idempotent and safe to call from any thread except a
+    // worker (a handler, or a stream's on_close callback). Requests whose Responder is still uncompleted are answered
+    // 503, every open stream is closed (so its producer is told through on_close, and the connection is cut without
+    // the terminating chunk), and the listening socket is closed. It returns within about the read and write
+    // timeouts, except while a handler itself blocks: a handler that does not return keeps its worker.
+    void stop() noexcept;
+
+    // True between a successful start() and stop().
+    bool running() const noexcept;
+
+    // The bound port; 0 before start().
+    std::uint16_t port() const noexcept;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace neomcp::http

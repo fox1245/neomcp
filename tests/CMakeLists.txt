@@ -113,3 +113,9 @@ add_executable(neomcp_http_random_test http_random_test.cpp)
 target_link_libraries(neomcp_http_random_test PRIVATE neomcp::http GTest::gtest_main Threads::Threads)
 neomcp_configure_target(neomcp_http_random_test)
 gtest_discover_tests(neomcp_http_random_test DISCOVERY_TIMEOUT 120)
+
+# The listener tests use the HTTP library's own client as the peer; the library is header-only.
+add_executable(neomcp_http_listener_test http_listener_test.cpp)
+target_link_libraries(neomcp_http_listener_test PRIVATE neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_http_listener_test)
+gtest_discover_tests(neomcp_http_listener_test DISCOVERY_TIMEOUT 120)
