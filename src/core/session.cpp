@@ -832,10 +832,15 @@ void SessionCore::complete(const std::shared_ptr<CallState>& call, CallOutcome o
     json response;
     if (const auto* result = std::get_if<ToolResult>(&outcome)) {
         response = make_result(call->id, call_result(*result, *call->profile));
-    } else {
+    } else if (std::holds_alternative<Refusal>(outcome)) {
         json data = json::object();
         data["reason"] = "busy";
         response = make_error(call->id, error_code::internal_error, "Internal error: the server is busy", std::move(data));
+    } else {
+        std::string message = "Internal error: the tool call failed";
+        const auto& failure = std::get<HostFailure>(outcome);
+        if (options_.expose_error_details && !failure.message.empty()) message += ": " + failure.message;
+        response = make_error(call->id, error_code::internal_error, std::move(message));
     }
     finish_call(call, std::move(response));
 }

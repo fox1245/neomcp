@@ -37,7 +37,14 @@ enum class Refusal {
     busy  // no capacity to run it now
 };
 
-using CallOutcome = std::variant<ToolResult, Refusal>;
+// The host could not produce a result: a defect of the server program rather than of the call, such as a structured
+// result that does not match the tool's own output schema. It is answered with an internal error, which carries
+// `message` only when SessionOptions::expose_error_details is on.
+struct HostFailure {
+    std::string message;
+};
+
+using CallOutcome = std::variant<ToolResult, Refusal, HostFailure>;
 
 // The handle of one call in flight.
 class CallControl {

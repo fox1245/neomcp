@@ -78,6 +78,10 @@ struct SessionOptions {
     // limit. Zero is an error. Default 1024.
     std::size_t max_queued_notifications = 1024;
 
+    // Whether the internal error that answers a HostFailure carries the host's message. Off: the message is fixed,
+    // so that nothing about the server's internals reaches the client.
+    bool expose_error_details = false;
+
     // Runs before every tools/call; empty: arguments are not checked.
     ArgumentCheck check_arguments;
 

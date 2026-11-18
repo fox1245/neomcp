@@ -1037,6 +1037,65 @@ TEST_P(PerRevision, BusyAndHostFailures) {
     EXPECT_TRUE(conversation.ask("tools/call", {{"name", "echo"}}).contains("result")) << "the connection goes on";
 }
 
+// A host whose one tool reports that the host itself failed.
+class FailingHost : public neomcp::ToolHost {
+public:
+    FailingHost() {
+        tool_.name = "fails";
+        tool_.description = "fails inside the host";
+    }
+    std::span<const neomcp::ToolDefinition> tools() const override { return {&tool_, 1}; }
+    void call(const neomcp::CallRequest&, neomcp::CallControl, neomcp::Completion done) override {
+        done(neomcp::HostFailure{"the secret detail"});
+    }
+
+private:
+    neomcp::ToolDefinition tool_;
+};
+
+TEST_P(PerRevision, HostFailureIsAnInternalErrorWithoutDetails) {
+    const auto revision = builtin(GetParam());
+    FailingHost host;
+    Peer peer(host, test_options());
+    if (is_legacy(GetParam())) {
+        ASSERT_TRUE(peer.initialize(*revision, patience));
+    }
+    const auto answer = peer.request(Peer::make_request(*revision, 1, "tools/call", {{"name", "fails"}}), patience);
+    ASSERT_TRUE(answer);
+    EXPECT_EQ(error_code_of(*answer), -32603) << answer->dump();
+    EXPECT_EQ(error_message_of(*answer), "Internal error: the tool call failed");
+    EXPECT_FALSE(answer->at("error").contains("data"));
+}
+
+TEST_P(PerRevision, HostFailureCarriesItsMessageWhenDetailsAreExposed) {
+    const auto revision = builtin(GetParam());
+    FailingHost host;
+    neomcp::SessionOptions options = test_options();
+    options.expose_error_details = true;
+    Peer peer(host, options);
+    if (is_legacy(GetParam())) {
+        ASSERT_TRUE(peer.initialize(*revision, patience));
+    }
+    const auto answer = peer.request(Peer::make_request(*revision, 1, "tools/call", {{"name", "fails"}}), patience);
+    ASSERT_TRUE(answer);
+    EXPECT_EQ(error_code_of(*answer), -32603) << answer->dump();
+    EXPECT_EQ(error_message_of(*answer), "Internal error: the tool call failed: the secret detail");
+}
+
+TEST(Batch, HostFailureIsAnswerOfItsMember) {
+    FailingHost host;
+    Peer peer(host, test_options());
+    const auto revision = builtin(batch_revision);
+    ASSERT_TRUE(peer.initialize(*revision, patience));
+    peer.send(neomcp::serialize(json::array({Peer::make_request(*revision, "f1", "tools/call", {{"name", "fails"}}),
+                                             Peer::make_request(*revision, "p1", "ping")})));
+    const auto answer = peer.next_other(patience);
+    ASSERT_TRUE(answer && answer->is_array());
+    ASSERT_EQ(answer->size(), 2u);
+    EXPECT_EQ(error_code_of(answer->at(0)), -32603);
+    EXPECT_EQ(answer->at(1).at("result"), json::object());
+}
+
 // server/tools.mdx of each revision: invalid arguments are a protocol error up to 2025-06-18 and a tool execution
 // error from 2025-11-25.
 const std::map<std::string, bool> invalid_arguments_are_results{
