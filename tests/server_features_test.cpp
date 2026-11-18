@@ -778,9 +778,8 @@ TEST_P(PerRevision, TheResourcesCapabilityIsDeclaredExactlyWhenSomethingIsRegist
         Client client(server, revision);
         const json capabilities = client.capabilities();
         ASSERT_TRUE(capabilities.contains(resources_capability)) << capabilities.dump();
-        // Nothing is promised that a later feature will deliver.
-        EXPECT_FALSE(capabilities.at(resources_capability).contains("listChanged"));
-        EXPECT_FALSE(capabilities.at(resources_capability).contains("subscribe"));
+        // The server reports list changes and updates of every kind it has.
+        EXPECT_EQ(capabilities.at(resources_capability), (json{{"listChanged", true}, {"subscribe", true}}));
         EXPECT_TRUE(client.ask("resources/templates/list").contains("result"));
     }
     {
@@ -1203,7 +1202,7 @@ TEST_P(PerRevision, ThePromptsCapabilityIsDeclaredExactlyWhenAPromptIsRegistered
         Client client(server, revision);
         const json capabilities = client.capabilities();
         ASSERT_TRUE(capabilities.contains("prompts")) << capabilities.dump();
-        EXPECT_FALSE(capabilities.at("prompts").contains("listChanged"));
+        EXPECT_EQ(capabilities.at("prompts"), (json{{"listChanged", true}}));
         EXPECT_FALSE(capabilities.contains(resources_capability));
         EXPECT_EQ(error_code_of(client.ask("resources/list")), -32601);
     }

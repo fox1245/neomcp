@@ -23,6 +23,14 @@
 //   the io thread: when it fires first the wait expires, and when the wait ends first a stop callback on the wait's
 //   token posts the timer's cancellation. The timers are found through timers_ (io_mutex_), which shutdown() uses to
 //   cancel them all, so that the io_context runs out of work.
+// - What a client sees can change while the server serves: every registered item has an atomic switch (in a deque,
+//   which never moves its elements), and a switch that changes a list reports the change. Changes go to the sessions
+//   through the feed: the listeners the sessions registered, the changes not yet told (each kind of change, and each
+//   updated URI, once), and one thread that tells them, so that the thread that reports never waits for a client. The
+//   feed's mutex (feed_mutex_) is taken alone, never together with mutex_ or io_mutex_, and is not held while a
+//   listener is called or the watcher callback runs. shutdown() closes the feed first: the thread tells what is still
+//   pending, then tells every listener that the feed ended (each session ends its subscriptions gracefully), and
+//   leaves.
 #include "neomcp/server.h"
 
 #include "neomcp/feature_host.h"
@@ -38,6 +46,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <stop_token>
 #include <thread>
@@ -258,14 +267,21 @@ public:
     std::variant<std::unique_ptr<Session>, CreateError> connect_tagged(profile::Transport transport, OutputSink sink,
                                                                        IdleCallback on_idle);
     std::span<const ToolDefinition> tools() const override;
+    bool tool_enabled(std::size_t index) const override;
     void call(const CallRequest& request, CallControl control, Completion done) override;
+    ChangeSupport change_support() const override;
+    ChangeRegistration watch(std::weak_ptr<ChangeListener> listener) override;
     ResourceHost* resource_host() noexcept override;
     std::span<const ResourceDefinition> resources() const override;
     std::span<const ResourceTemplateDefinition> resource_templates() const override;
+    bool resource_enabled(std::size_t index) const override;
+    bool template_enabled(std::size_t index) const override;
+    bool offers(std::string_view uri) const override;
     ListSettings resource_list_settings() const override;
     void read(const ReadRequest& request, CallControl control, Completion done) override;
     PromptHost* prompt_host() noexcept override;
     std::span<const PromptDefinition> prompts() const override;
+    bool prompt_enabled(std::size_t index) const override;
     ListSettings prompt_list_settings() const override;
     void get(const PromptRequest& request, CallControl control, Completion done) override;
     CompletionHost* completion_host() noexcept override;
@@ -273,6 +289,15 @@ public:
     std::optional<std::string> check(const ToolDefinition& tool, const json& arguments) const;
 
     const ServerOptions& options() const noexcept { return options_; }
+
+    // Switching items; each reports the change of its list when the switch changed.
+    void enable_tool(std::size_t index, bool on);
+    void enable_resource(std::size_t index, bool on);
+    void enable_template(std::size_t index, bool on);
+    void enable_prompt(std::size_t index, bool on);
+    // The feed: a change to tell the sessions, and the sessions registered.
+    void report(Change change);
+    std::size_t watchers() const;
 
     void post_cancel(const std::weak_ptr<CallRecord>& record);
     void finish(const std::shared_ptr<CallRecord>& record, JobOutcome outcome);
@@ -305,6 +330,19 @@ private:
     json_schema::Validator compile(const std::string& tool, std::string_view which, const json& schema) const;
     void ensure_registering(const std::string& label, std::string_view action) const;
     bool admits() const;  // with mutex_ held
+
+    // What a read of `uri` finds: a resource that is on at that URI, else the first template that is on, matches and
+    // whose variables decode.
+    struct Found {
+        Callable* entry = nullptr;
+        json arguments;
+        std::optional<std::string> mime;
+        std::optional<CacheHints> cache;
+    };
+    std::optional<Found> find_resource(std::string_view uri) const;
+    void unwatch(std::uint64_t id);
+    void watchers_changed() const;
+    void run_feed();
 
     void work();
     void run_io();
@@ -349,6 +387,22 @@ private:
     std::size_t completer_count_ = 0;
     mutable std::atomic<bool> serving_{false};
 
+    // Whether each item is on, parallel to its definitions.
+    std::deque<std::atomic<bool>> tool_on_;
+    std::deque<std::atomic<bool>> resource_on_;
+    std::deque<std::atomic<bool>> template_on_;
+    std::deque<std::atomic<bool>> prompt_on_;
+
+    // The feed. Guarded by feed_mutex_.
+    mutable std::mutex feed_mutex_;
+    std::condition_variable feed_ready_;
+    std::map<std::uint64_t, std::weak_ptr<ChangeListener>> watchers_;
+    std::uint64_t next_watcher_ = 1;
+    std::deque<Change> pending_;                                  // in the order reported
+    std::set<std::pair<ChangeKind, std::string>, std::less<>> pending_keys_;  // what pending_ holds
+    bool feed_open_ = true;  // false once shutdown() began: no registration and no change is taken any more
+    std::thread feed_thread_;
+
     // Guarded by mutex_.
     std::mutex mutex_;
     std::condition_variable work_ready_;
@@ -392,6 +446,12 @@ ServerCore::ServerCore(ServerOptions options) : options_(std::move(options)) {
         throw std::invalid_argument("neomcp: ServerOptions::prompts_page_size is zero");
     }
     if (options_.max_input_rounds == 0) throw std::invalid_argument("neomcp: ServerOptions::max_input_rounds is zero");
+    if (options_.max_subscriptions == 0) {
+        throw std::invalid_argument("neomcp: ServerOptions::max_subscriptions is zero");
+    }
+    if (options_.max_watched_resources == 0) {
+        throw std::invalid_argument("neomcp: ServerOptions::max_watched_resources is zero");
+    }
     if (options_.input_timeout <= std::chrono::milliseconds::zero()) {
         throw std::invalid_argument("neomcp: ServerOptions::input_timeout is not positive");
     }
@@ -406,6 +466,7 @@ ServerCore::ServerCore(ServerOptions options) : options_(std::move(options)) {
     }
     io_work_.emplace(asio::make_work_guard(io_));
     try {
+        feed_thread_ = std::thread([this] { run_feed(); });
         io_thread_ = std::thread([this] { run_io(); });
         workers_.reserve(options_.max_concurrent_calls);
         for (std::size_t i = 0; i < options_.max_concurrent_calls; ++i) workers_.emplace_back([this] { work(); });
@@ -418,6 +479,15 @@ ServerCore::ServerCore(ServerOptions options) : options_(std::move(options)) {
 ServerCore::~ServerCore() { shutdown(); }
 
 void ServerCore::shutdown() {
+    // The feed first: what is pending is told, then every listener learns that the feed ended, while the handlers may
+    // still run.
+    {
+        const std::lock_guard<std::mutex> lock(feed_mutex_);
+        feed_open_ = false;
+    }
+    feed_ready_.notify_all();
+    if (feed_thread_.joinable()) feed_thread_.join();
+
     std::deque<std::shared_ptr<CallRecord>> waiting;
     std::vector<std::shared_ptr<CallRecord>> running;
     {
@@ -500,6 +570,7 @@ std::size_t ServerCore::add(ToolDefinition definition, Body body) {
     definitions_.push_back(std::move(definition));
     entries_.push_back(std::move(entry));
     by_name_.emplace(name, index);
+    tool_on_.emplace_back(true);
     return index;
 }
 
@@ -546,6 +617,7 @@ std::size_t ServerCore::add_resource(ResourceDefinition definition, FeatureBody<
     resource_by_uri_.emplace(definition.uri, index);
     resource_defs_.push_back(std::move(definition));
     resource_slots_.push_back(ResourceSlot{std::make_unique<FeatureEntry<ReadResult>>(std::move(body), label), std::nullopt});
+    resource_on_.emplace_back(true);
     return index;
 }
 
@@ -591,6 +663,7 @@ std::size_t ServerCore::add_resource_template(ResourceTemplateDefinition definit
     template_slots_.push_back(TemplateSlot{std::make_unique<FeatureEntry<ReadResult>>(std::move(body), label),
                                            std::move(matcher), std::move(members), std::move(check), std::nullopt});
     template_completers_.emplace_back();
+    template_on_.emplace_back(true);
     return index;
 }
 
@@ -606,6 +679,7 @@ std::size_t ServerCore::add_prompt(PromptDefinition definition, FeatureBody<Prom
     prompt_defs_.push_back(std::move(definition));
     prompt_entries_.push_back(std::make_unique<FeatureEntry<PromptResult>>(std::move(body), label));
     prompt_completers_.emplace_back();
+    prompt_on_.emplace_back(true);
     return index;
 }
 
@@ -714,6 +788,8 @@ SessionOptions ServerCore::session_options(profile::Transport transport, IdleCal
     session.request_state_ttl = options_.request_state_ttl;
     session.clock = options_.clock;
     session.on_request_state_rejected = options_.on_request_state_rejected;
+    session.max_subscriptions = options_.max_subscriptions;
+    session.max_watched_resources = options_.max_watched_resources;
     session.on_idle = std::move(on_idle);
     // The session keeps this, and with it the core: the core outlives every session it serves.
     session.check_arguments = [core = shared_from_this()](const ToolDefinition& tool, const json& arguments) {
@@ -725,6 +801,122 @@ SessionOptions ServerCore::session_options(profile::Transport transport, IdleCal
 std::span<const ToolDefinition> ServerCore::tools() const {
     serving_.store(true);
     return definitions_;
+}
+
+bool ServerCore::tool_enabled(std::size_t index) const { return tool_on_.at(index).load(); }
+bool ServerCore::resource_enabled(std::size_t index) const { return resource_on_.at(index).load(); }
+bool ServerCore::template_enabled(std::size_t index) const { return template_on_.at(index).load(); }
+bool ServerCore::prompt_enabled(std::size_t index) const { return prompt_on_.at(index).load(); }
+
+// A switch is a change of its list only when it changed: switching on what is on tells nobody anything.
+void ServerCore::enable_tool(std::size_t index, bool on) {
+    if (tool_on_.at(index).exchange(on) != on) report(Change{ChangeKind::tools_list, {}});
+}
+void ServerCore::enable_resource(std::size_t index, bool on) {
+    if (resource_on_.at(index).exchange(on) != on) report(Change{ChangeKind::resources_list, {}});
+}
+void ServerCore::enable_template(std::size_t index, bool on) {
+    if (template_on_.at(index).exchange(on) != on) report(Change{ChangeKind::resources_list, {}});
+}
+void ServerCore::enable_prompt(std::size_t index, bool on) {
+    if (prompt_on_.at(index).exchange(on) != on) report(Change{ChangeKind::prompts_list, {}});
+}
+
+ChangeSupport ServerCore::change_support() const {
+    // Every list can change, and every resource can be updated; a kind the server has nothing of is not declared by
+    // the session (tools: the server declares the capability always, so an empty list reports no changes).
+    ChangeSupport support;
+    support.tools_list = !definitions_.empty();
+    support.prompts_list = true;
+    support.resources_list = true;
+    support.resource_updates = true;
+    return support;
+}
+
+ChangeRegistration ServerCore::watch(std::weak_ptr<ChangeListener> listener) {
+    std::uint64_t id = 0;
+    {
+        const std::lock_guard<std::mutex> lock(feed_mutex_);
+        if (!feed_open_) return {};
+        id = next_watcher_++;
+        watchers_.emplace(id, std::move(listener));
+    }
+    watchers_changed();
+    return ChangeRegistration([core = weak_from_this(), id] {
+        if (const auto held = core.lock()) held->unwatch(id);
+    });
+}
+
+void ServerCore::unwatch(std::uint64_t id) {
+    bool erased = false;
+    {
+        const std::lock_guard<std::mutex> lock(feed_mutex_);
+        erased = watchers_.erase(id) != 0;
+    }
+    if (erased) watchers_changed();
+}
+
+std::size_t ServerCore::watchers() const {
+    const std::lock_guard<std::mutex> lock(feed_mutex_);
+    return watchers_.size();
+}
+
+void ServerCore::watchers_changed() const {
+    if (!options_.on_change_watchers) return;
+    try {
+        options_.on_change_watchers();
+    } catch (...) {
+        // A diagnostic that fails changes nothing.
+    }
+}
+
+void ServerCore::report(Change change) {
+    {
+        const std::lock_guard<std::mutex> lock(feed_mutex_);
+        // Nobody listens, or nobody will: the change reaches no client.
+        if (!feed_open_ || watchers_.empty()) return;
+        // A change that is pending already is told once.
+        if (!pending_keys_.emplace(change.kind, change.uri).second) return;
+        pending_.push_back(std::move(change));
+    }
+    feed_ready_.notify_one();
+}
+
+void ServerCore::run_feed() {
+    std::unique_lock<std::mutex> lock(feed_mutex_);
+    for (;;) {
+        feed_ready_.wait(lock, [&] { return !pending_.empty() || !feed_open_; });
+        // The listeners alive now; the expired ones (a session that went without closing) are dropped.
+        std::vector<std::shared_ptr<ChangeListener>> listeners;
+        bool dropped = false;
+        for (auto it = watchers_.begin(); it != watchers_.end();) {
+            if (auto held = it->second.lock()) {
+                listeners.push_back(std::move(held));
+                ++it;
+            } else {
+                it = watchers_.erase(it);
+                dropped = true;
+            }
+        }
+        if (!pending_.empty()) {
+            Change change = std::move(pending_.front());
+            pending_.pop_front();
+            pending_keys_.erase(std::pair<ChangeKind, std::string>(change.kind, change.uri));
+            lock.unlock();
+            if (dropped) watchers_changed();
+            for (const auto& listener : listeners) listener->changed(change);
+            listeners.clear();  // a session may end here, and its registration takes the lock
+            lock.lock();
+            continue;
+        }
+        // The feed is closed and nothing is pending: every listener learns that it ended.
+        watchers_.clear();
+        lock.unlock();
+        for (const auto& listener : listeners) listener->ended();
+        listeners.clear();
+        watchers_changed();
+        return;
+    }
 }
 
 std::optional<std::string> ServerCore::check(const ToolDefinition& tool, const json& arguments) const {
@@ -826,26 +1018,27 @@ ListSettings ServerCore::resource_list_settings() const {
     return settings;
 }
 
-void ServerCore::read(const ReadRequest& request, CallControl control, Completion done) {
-    serving_.store(true);
+std::optional<ServerCore::Found> ServerCore::find_resource(std::string_view uri) const {
     // A resource registered at the URI wins over every template; among templates the first registered that matches.
-    if (const auto found = resource_by_uri_.find(request.uri); found != resource_by_uri_.end()) {
+    if (const auto found = resource_by_uri_.find(uri); found != resource_by_uri_.end()) {
         const std::size_t index = found->second;
-        admit(*resource_slots_[index].entry, json(nullptr), request.meta, std::move(control), std::move(done),
-              Answers{request.input_responses, request.request_state}, request.uri, resource_defs_[index].mime_type,
-              resource_slots_[index].cache);
-        return;
+        if (resource_on_[index].load()) {
+            return Found{resource_slots_[index].entry.get(), json(nullptr), resource_defs_[index].mime_type,
+                         resource_slots_[index].cache};
+        }
     }
+    const std::string text(uri);
     for (std::size_t index = 0; index < template_slots_.size(); ++index) {
-        TemplateSlot& slot = template_slots_[index];
-        const auto bindings = slot.matcher.match(request.uri);
+        if (!template_on_[index].load()) continue;
+        const TemplateSlot& slot = template_slots_[index];
+        const auto bindings = slot.matcher.match(text);
         if (!bindings) continue;
         json arguments = json::object();
         bool decodable = true;
-        for (const auto& [name, text] : *bindings) {
+        for (const auto& [name, value_text] : *bindings) {
             const auto member = std::find_if(slot.members.begin(), slot.members.end(),
                                              [&](const TemplateMember& candidate) { return candidate.name == name; });
-            auto value = member == slot.members.end() ? std::nullopt : variable_value(member->kind, text);
+            auto value = member == slot.members.end() ? std::nullopt : variable_value(member->kind, value_text);
             if (!value) {
                 decodable = false;
                 break;
@@ -854,12 +1047,25 @@ void ServerCore::read(const ReadRequest& request, CallControl control, Completio
         }
         // A match whose variables are not of the member's kind, or that lacks one the struct requires, is no match.
         if (!decodable || !slot.check(arguments)) continue;
-        admit(*slot.entry, std::move(arguments), request.meta, std::move(control), std::move(done),
-              Answers{request.input_responses, request.request_state}, request.uri, template_defs_[index].mime_type,
-              slot.cache);
+        return Found{slot.entry.get(), std::move(arguments), template_defs_[index].mime_type, slot.cache};
+    }
+    return std::nullopt;
+}
+
+bool ServerCore::offers(std::string_view uri) const {
+    serving_.store(true);
+    return find_resource(uri).has_value();
+}
+
+void ServerCore::read(const ReadRequest& request, CallControl control, Completion done) {
+    serving_.store(true);
+    auto found = find_resource(request.uri);
+    if (!found) {
+        done(FeatureOutcome(NotFound{request.uri}));
         return;
     }
-    done(FeatureOutcome(NotFound{request.uri}));
+    admit(*found->entry, std::move(found->arguments), request.meta, std::move(control), std::move(done),
+          Answers{request.input_responses, request.request_state}, request.uri, std::move(found->mime), found->cache);
 }
 
 PromptHost* ServerCore::prompt_host() noexcept {
@@ -902,7 +1108,8 @@ void ServerCore::complete(const CompletionRequest& request, CallControl control,
     const Completers* completers = nullptr;
     if (request.kind == CompletionRefKind::prompt) {
         const auto found = prompt_by_name_.find(request.reference);
-        if (found == prompt_by_name_.end()) {
+        // A prompt that is off is one the server lacks.
+        if (found == prompt_by_name_.end() || !prompt_on_[found->second].load()) {
             done(FeatureOutcome(InvalidRequest{"unknown prompt: " + request.reference}));
             return;
         }
@@ -913,9 +1120,12 @@ void ServerCore::complete(const CompletionRequest& request, CallControl control,
         const auto found =
             std::find_if(template_defs_.begin(), template_defs_.end(),
                          [&](const ResourceTemplateDefinition& candidate) { return candidate.uri_template == request.reference; });
-        if (found != template_defs_.end()) {
-            completers = &template_completers_[static_cast<std::size_t>(found - template_defs_.begin())];
-        } else if (resource_by_uri_.find(request.reference) == resource_by_uri_.end()) {
+        const auto fixed = resource_by_uri_.find(request.reference);
+        const auto index = static_cast<std::size_t>(found - template_defs_.begin());
+        if (found != template_defs_.end() && template_on_[index].load()) {
+            completers = &template_completers_[index];
+        } else if (fixed == resource_by_uri_.end() || !resource_on_[fixed->second].load()) {
+            // A template or a resource that is off is one the server lacks.
             done(FeatureOutcome(InvalidRequest{"unknown resource reference: " + request.reference}));
             return;
         }
@@ -1241,6 +1451,13 @@ ToolHandle ToolHandle::icons(std::vector<Icon> list) const {
     return *this;
 }
 
+ToolHandle ToolHandle::enable(bool on) const {
+    core_->enable_tool(index_, on);
+    return *this;
+}
+
+bool ToolHandle::enabled() const { return core_->tool_enabled(index_); }
+
 const std::string& ToolHandle::name() const { return core_->definition(index_).name; }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1271,6 +1488,13 @@ void PromptHandle::add_completer(std::string argument, detail::FeatureBody<Compl
 void ResourceTemplateHandle::add_completer(std::string variable, detail::FeatureBody<CompletionResult> body) const {
     core_->add_template_completer(index_, std::move(variable), std::move(body));
 }
+
+PromptHandle PromptHandle::enable(bool on) const {
+    core_->enable_prompt(index_, on);
+    return *this;
+}
+
+bool PromptHandle::enabled() const { return core_->prompt_enabled(index_); }
 
 const std::string& PromptHandle::name() const { return core_->prompt_definition(index_).name; }
 
@@ -1328,6 +1552,13 @@ ResourceHandle ResourceHandle::cache(CacheHints hints) const {
     return *this;
 }
 
+ResourceHandle ResourceHandle::enable(bool on) const {
+    core_->enable_resource(index_, on);
+    return *this;
+}
+
+bool ResourceHandle::enabled() const { return core_->resource_enabled(index_); }
+
 const std::string& ResourceHandle::uri() const { return core_->resource_definition(index_).uri; }
 
 ResourceTemplateHandle ResourceTemplateHandle::title(std::string text) const {
@@ -1370,6 +1601,13 @@ ResourceTemplateHandle ResourceTemplateHandle::cache(CacheHints hints) const {
     return *this;
 }
 
+ResourceTemplateHandle ResourceTemplateHandle::enable(bool on) const {
+    core_->enable_template(index_, on);
+    return *this;
+}
+
+bool ResourceTemplateHandle::enabled() const { return core_->template_enabled(index_); }
+
 const std::string& ResourceTemplateHandle::uri_template() const { return core_->template_definition(index_).uri_template; }
 
 
@@ -1394,6 +1632,18 @@ std::variant<std::unique_ptr<Session>, CreateError> Server::connect_tagged(profi
 }
 
 std::span<const ToolDefinition> Server::tools() const { return core_->tools(); }
+
+bool Server::tool_enabled(std::size_t index) const { return core_->tool_enabled(index); }
+
+ChangeSupport Server::change_support() const { return core_->change_support(); }
+
+ChangeRegistration Server::watch(std::weak_ptr<ChangeListener> listener) { return core_->watch(std::move(listener)); }
+
+void Server::notify_resource_updated(std::string uri) {
+    core_->report(Change{ChangeKind::resource_updated, std::move(uri)});
+}
+
+std::size_t Server::change_watchers() const { return core_->watchers(); }
 
 void Server::call(const CallRequest& request, CallControl control, Completion done) {
     core_->call(request, std::move(control), std::move(done));

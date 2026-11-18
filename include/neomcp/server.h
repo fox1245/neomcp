@@ -11,7 +11,8 @@
 // writes the server's through the sink.
 //
 // Registration. Every tool is registered before the server serves: the first connect() (or the first use of the
-// server as a ToolHost) ends registration, and registering or changing a tool after that throws std::logic_error.
+// server as a ToolHost) ends registration, and registering or changing a tool after that throws std::logic_error
+// (switching it on and off does not; see "Changes while serving" below).
 // A tool's input schema comes from its arguments type (neomcp::schema_of), and arguments are checked against it
 // before the handler runs; a call whose arguments fail it never reaches the handler. The forms a handler can take
 // are listed in neomcp/server/handler.h.
@@ -114,6 +115,22 @@
 // ServerOptions::input_timeout per round and max_input_rounds rounds. Before asking, Context::client_supports tells
 // whether the client can take a request; asking for one it cannot take fails the call as the revision prescribes.
 //
+// Changes while serving. Registration ends when the server serves, but every tool, resource, template and prompt can be
+// switched off and on again at any time, from any thread, a handler included:
+//
+//   const auto beta = server.tool("beta", "A tool offered later", [] { return std::string("beta"); }).enable(false);
+//   server.tool("offer_beta", "Offer beta", [beta] { beta.enable(); return std::string("offered"); });
+//   server.notify_resource_updated("config://app");  // the content of a resource changed
+//
+// Something switched off is not listed and is answered as something that does not exist (a call that was admitted
+// before still runs). A switch that changes what a list shows tells the clients that the list changed, and
+// notify_resource_updated tells the clients that watch the resource. The server declares `listChanged` for the kinds it
+// has and `subscribe` for resources, and each session tells its client the way the revision it is served under
+// prescribes: notifications of the connection after resources/subscribe (2025-11-25 and earlier), or the subscriptions
+// a client opens with subscriptions/listen (2026-07-28). The server tells the sessions on a thread of its own, so the
+// thread that reports a change never waits for a client; a session whose client reads slowly drops the notification
+// when its output queue is full. When the server shuts down, every open subscription ends gracefully.
+//
 // Threads. Plain-function handlers run on a pool of worker threads the server owns, bounded by
 // ServerOptions::max_concurrent_calls and max_pending_calls. Coroutine handlers run on one thread the server owns,
 // which drives an asio::io_context, and are bounded by max_coroutine_calls; a coroutine handler must not block, or
@@ -123,6 +140,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -131,6 +149,7 @@
 #include <variant>
 #include <vector>
 
+#include "neomcp/change.h"
 #include "neomcp/describe.h"
 #include "neomcp/feature_host.h"
 #include "neomcp/input.h"
@@ -223,6 +242,16 @@ struct ServerOptions {
     StateClock clock{};
     // Told why a state was refused, for the server's log; the client only learns that it was.
     RequestStateDiagnostic on_request_state_rejected{};
+
+    // ---- Change notifications (see SessionOptions)
+    // Where clients open subscriptions: the subscriptions one session keeps open at once. Zero is an error. Default 16.
+    std::size_t max_subscriptions = SessionOptions{}.max_subscriptions;
+    // The resources a connection watches at once, and the resources one subscription names. Zero is an error.
+    // Default 256.
+    std::size_t max_watched_resources = SessionOptions{}.max_watched_resources;
+    // Told, with no lock held, after the number of sessions registered for the server's changes changed; read
+    // Server::change_watchers() for it. For tests and diagnostics; it must not block.
+    std::function<void()> on_change_watchers{};
 };
 
 class Server;
@@ -241,6 +270,9 @@ public:
     // `_meta` of the tool; an object, else std::invalid_argument.
     ToolHandle meta(json value) const;
     ToolHandle icons(std::vector<Icon> list) const;
+    // Switches the tool on or off (see Server). Unlike the setters it may be called at any time, from any thread.
+    ToolHandle enable(bool on = true) const;
+    bool enabled() const;
 
     const std::string& name() const;
 
@@ -268,6 +300,10 @@ public:
     // The caching hints of this resource's reads, where the revision has them, instead of
     // ServerOptions::resource_read_cache.
     ResourceHandle cache(CacheHints hints) const;
+    // Switches the resource on or off (see Server). May be called at any time, from any thread. A read of a URI whose
+    // resource is off is served by a template that matches it, if one is on.
+    ResourceHandle enable(bool on = true) const;
+    bool enabled() const;
 
     const std::string& uri() const;
 
@@ -289,6 +325,10 @@ public:
     ResourceTemplateHandle icons(std::vector<Icon> list) const;
     ResourceTemplateHandle meta(json value) const;
     ResourceTemplateHandle cache(CacheHints hints) const;
+    // Switches the template on or off (see Server), which changes the list of templates; its completers are off with
+    // it. May be called at any time, from any thread.
+    ResourceTemplateHandle enable(bool on = true) const;
+    bool enabled() const;
 
     // Suggests values for the variable `variable` of the template; the handler is as PromptHandle::complete's. A
     // completion refers to the template by its URI template text.
@@ -312,6 +352,10 @@ public:
     PromptHandle icons(std::vector<Icon> list) const;
     // `_meta` of the prompt; an object, else std::invalid_argument.
     PromptHandle meta(json value) const;
+    // Switches the prompt on or off (see Server); its completers are off with it. May be called at any time, from any
+    // thread.
+    PromptHandle enable(bool on = true) const;
+    bool enabled() const;
 
     // Suggests values for the argument `argument` of the prompt (a member of its Args). The handler takes the text
     // typed so far (std::string_view, const std::string& or std::string), optionally the arguments the client has
@@ -372,7 +416,17 @@ public:
 
     // ToolHost. The first use ends registration.
     std::span<const ToolDefinition> tools() const override;
+    bool tool_enabled(std::size_t index) const override;
     void call(const CallRequest& request, CallControl control, Completion done) override;
+    ChangeSupport change_support() const override;
+    ChangeRegistration watch(std::weak_ptr<ChangeListener> listener) override;
+
+    // The content of the resource at `uri` changed: the clients that watch it are told. Thread-safe; it returns at
+    // once (the sessions are told on the server's own thread), and a change reported again before the sessions were
+    // told of it is told once.
+    void notify_resource_updated(std::string uri);
+    // The sessions registered for the server's changes now. For tests and diagnostics.
+    std::size_t change_watchers() const;
 
     const ServerOptions& options() const noexcept;
 
