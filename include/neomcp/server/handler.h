@@ -362,6 +362,13 @@ typename Shape<in, F>::returned invoke_handler(F& handler, Args& args, Context& 
     }
 }
 
+// A handler that always throws makes the conversion of its result unreachable in the instantiation for that
+// handler, which one compiler reports as a warning in this header; the code is right for every other handler.
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4702)
+#endif
+
 template <Input in, class Args, class F>
 class PlainBodyOf final : public PlainBody {
 public:
@@ -406,6 +413,10 @@ public:
 private:
     F handler_;
 };
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 template <Input in, class Args, class F, class H>
 Body make_body(H&& handler) {
