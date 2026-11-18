@@ -14,7 +14,8 @@
       "docs/specification/2026-07-28/basic/patterns/cancellation.mdx",
       "docs/specification/2026-07-28/basic/patterns/mrtr.mdx",
       "docs/specification/2026-07-28/basic/patterns/subscriptions.mdx",
-      "docs/specification/2026-07-28/server/discover.mdx"
+      "docs/specification/2026-07-28/server/discover.mdx",
+      "docs/specification/2026-07-28/server/tools.mdx"
     ],
     "schema": "schema/2026-07-28/schema.json"
   },
@@ -75,6 +76,9 @@
       -32002,
       -32042
     ]
+  },
+  "tools": {
+    "invalid_arguments": "error_result"
   },
   "wire": {
     "schema": {

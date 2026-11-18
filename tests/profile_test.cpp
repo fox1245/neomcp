@@ -348,6 +348,73 @@ TEST(Rejects, UndeclaredMechanismName) {
     EXPECT_NE(error.expected.find("request_meta"), std::string::npos) << error.expected;
 }
 
+// The expected values are stated here from the error-handling section of each revision's server/tools.mdx, not
+// read back from the profiles: tool arguments that fail the input schema are a protocol error up to 2025-06-18
+// and a tool execution error from 2025-11-25.
+TEST(Values, InvalidArgumentsPerRevision) {
+    const std::vector<std::pair<std::string_view, std::string_view>> expected{
+        {"2024-11-05", "invalid_params_error"},
+        {"2025-03-26", "invalid_params_error"},
+        {"2025-06-18", "invalid_params_error"},
+        {"2025-11-25", "error_result"},
+        {"2026-07-28", "error_result"},
+    };
+    ASSERT_EQ(builtin_revisions().size(), expected.size()) << "a new revision needs its expected value here";
+    for (const auto& [revision, name] : expected) {
+        SCOPED_TRACE(std::string(revision));
+        const ProfilePtr profile = require_builtin(revision);
+        ASSERT_NE(profile, nullptr);
+        EXPECT_EQ(profile->invalid_arguments(), name);
+        const auto declared = declared_invalid_arguments();
+        EXPECT_NE(std::find(declared.begin(), declared.end(), profile->invalid_arguments()), declared.end());
+        const auto& pages = profile->evidence().pages;
+        const std::string page = "docs/specification/" + std::string(revision) + "/server/tools.mdx";
+        EXPECT_NE(std::find(pages.begin(), pages.end(), page), pages.end()) << "the evidence names " << page;
+    }
+}
+
+TEST(Values, DeclaredNamesAreDistinctAndNonEmpty) {
+    const auto check = [](std::span<const std::string_view> names) {
+        EXPECT_FALSE(names.empty());
+        std::vector<std::string_view> sorted(names.begin(), names.end());
+        std::sort(sorted.begin(), sorted.end());
+        EXPECT_EQ(std::adjacent_find(sorted.begin(), sorted.end()), sorted.end());
+        for (const auto name : names) EXPECT_FALSE(name.empty());
+    };
+    for (std::size_t i = 0; i < slot_count; ++i) check(declared_mechanisms(static_cast<Slot>(i)));
+    for (const Transport transport : {Transport::stdio, Transport::http_sse, Transport::streamable_http}) {
+        check(declared_cancel(transport));
+    }
+    check(declared_invalid_arguments());
+}
+
+TEST(Rejects, UndeclaredInvalidArgumentsName) {
+    json document = builtin_document(modern_revision);
+    document["tools"]["invalid_arguments"] = "shrug";
+    const Error error = rejected(document);
+    EXPECT_EQ(error.pointer, "/tools/invalid_arguments");
+    EXPECT_NE(error.expected.find("error_result"), std::string::npos) << error.expected;
+    EXPECT_NE(error.expected.find("invalid_params_error"), std::string::npos) << error.expected;
+}
+
+TEST(Rejects, InvalidArgumentsRemoved) {
+    json document = builtin_document(modern_revision);
+    document["tools"].erase("invalid_arguments");
+    EXPECT_EQ(rejected(document).pointer, "/tools/invalid_arguments");
+}
+
+TEST(Rejects, InvalidArgumentsThatIsNotAString) {
+    json document = builtin_document(sse_revision);
+    document["tools"]["invalid_arguments"] = true;
+    EXPECT_EQ(rejected(document).pointer, "/tools/invalid_arguments");
+}
+
+TEST(Rejects, ExtraMemberInTools) {
+    json document = builtin_document(modern_revision);
+    document["tools"]["extra"] = "error_result";
+    EXPECT_EQ(rejected(document).pointer, "/tools/extra");
+}
+
 TEST(Rejects, UndeclaredCancelName) {
     json document = builtin_document(modern_revision);
     document["transports"]["stdio"]["cancel"] = "close_response_stream";

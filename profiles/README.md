@@ -25,6 +25,7 @@ repository and the date they were read.
 | `mechanisms.batch` | `array` when a JSON-RPC batch is allowed, else `none`. |
 | `transports` | The transports of the revision and, per transport, how a request is cancelled and which headers, streams and session rules apply. |
 | `errors` | Error codes the revision defines, and codes it forbids a sender to use. |
+| `tools.invalid_arguments` | How a server reports tool arguments that fail the tool's input schema: `invalid_params_error` (the JSON-RPC error Invalid params, a protocol error) or `error_result` (a tool result with `isError` set, a tool execution error). The revision's `server/tools.mdx` says which. |
 
 ## The `wire` member
 

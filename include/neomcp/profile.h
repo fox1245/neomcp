@@ -40,6 +40,16 @@ inline constexpr std::size_t slot_count = 5;
 std::string_view to_string(Slot slot) noexcept;
 std::string_view to_string(Era era) noexcept;
 
+// The transports a profile can describe.
+enum class Transport { stdio, http_sse, streamable_http };
+
+// The names the library declares. A profile may select only these, and code that implements a mechanism attaches
+// to one of them: the mechanisms of a slot, the cancellation mechanisms of a transport, and the ways a revision
+// reports tool arguments that fail the tool's input schema (`tools.invalid_arguments`).
+std::span<const std::string_view> declared_mechanisms(Slot slot);
+std::span<const std::string_view> declared_cancel(Transport transport);
+std::span<const std::string_view> declared_invalid_arguments();
+
 struct Evidence {
     std::string verified_at;
     std::string repository;
@@ -166,6 +176,10 @@ public:
     // The name of the mechanism the profile selects for the slot.
     std::string_view mechanism(Slot slot) const noexcept;
 
+    // How the revision reports tool arguments that fail the tool's input schema (member `tools.invalid_arguments`):
+    // one of declared_invalid_arguments().
+    std::string_view invalid_arguments() const noexcept { return invalid_arguments_; }
+
     // Present when the revision defines the transport.
     const std::optional<StdioTransport>& stdio() const noexcept { return stdio_; }
     const std::optional<HttpSseTransport>& http_sse() const noexcept { return http_sse_; }
@@ -202,6 +216,7 @@ private:
     Era era_ = Era::legacy;
     Evidence evidence_;
     std::vector<std::string_view> mechanisms_;  // indexed by Slot; views of the declared names
+    std::string_view invalid_arguments_;        // a view of a declared name
     std::optional<StdioTransport> stdio_;
     std::optional<HttpSseTransport> http_sse_;
     std::optional<StreamableHttpTransport> streamable_http_;

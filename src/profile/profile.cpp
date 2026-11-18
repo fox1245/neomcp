@@ -13,8 +13,6 @@
 
 #include <neojson/json.hpp>
 
-#include "profile/internal.h"
-
 namespace neomcp::profile {
 
 std::string_view to_string(Slot slot) noexcept {
@@ -333,6 +331,7 @@ private:
                                    {"mechanisms", true},
                                    {"transports", true},
                                    {"errors", true},
+                                   {"tools", true},
                                    {"wire", true}});
 
         const Node version = object.at("profile_version");
@@ -347,6 +346,7 @@ private:
         evidence(object.at("evidence"));
         mechanisms(object.at("mechanisms"));
         errors(object.at("errors"));
+        tools(object.at("tools"));
         wire(object.at("wire"));
         transports(object.at("transports"));
     }
@@ -372,8 +372,13 @@ private:
         profile_.mechanisms_.clear();
         for (std::size_t i = 0; i < slot_count; ++i) {
             const Slot slot = static_cast<Slot>(i);
-            profile_.mechanisms_.push_back(declared_name(object.at(to_string(slot)), detail::declared_mechanisms(slot)));
+            profile_.mechanisms_.push_back(declared_name(object.at(to_string(slot)), declared_mechanisms(slot)));
         }
+    }
+
+    void tools(const Node& node) {
+        const Object object(node, {{"invalid_arguments", true}});
+        profile_.invalid_arguments_ = declared_name(object.at("invalid_arguments"), declared_invalid_arguments());
     }
 
     void errors(const Node& node) {
@@ -634,12 +639,12 @@ private:
         if (const auto stdio = object.find("stdio")) {
             const Object body(*stdio, {{"cancel", true}});
             profile_.stdio_ = StdioTransport{
-                std::string(declared_name(body.at("cancel"), detail::declared_cancel(detail::Transport::stdio)))};
+                std::string(declared_name(body.at("cancel"), declared_cancel(Transport::stdio)))};
         }
         if (const auto http_sse = object.find("http_sse")) {
             const Object body(*http_sse, {{"cancel", true}});
             profile_.http_sse_ = HttpSseTransport{
-                std::string(declared_name(body.at("cancel"), detail::declared_cancel(detail::Transport::http_sse)))};
+                std::string(declared_name(body.at("cancel"), declared_cancel(Transport::http_sse)))};
         }
         if (const auto streamable = object.find("streamable_http")) {
             profile_.streamable_http_ = streamable_http(*streamable);
@@ -674,7 +679,7 @@ private:
         HeaderNames names;
 
         transport.cancel = std::string(
-            declared_name(object.at("cancel"), detail::declared_cancel(detail::Transport::streamable_http)));
+            declared_name(object.at("cancel"), declared_cancel(Transport::streamable_http)));
 
         const Node session = object.at("session_header");
         if (!session.value().is_null()) {

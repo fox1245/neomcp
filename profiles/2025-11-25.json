@@ -10,7 +10,8 @@
       "docs/specification/2025-11-25/basic/index.mdx",
       "docs/specification/2025-11-25/basic/lifecycle.mdx",
       "docs/specification/2025-11-25/basic/transports.mdx",
-      "docs/specification/2025-11-25/basic/utilities/cancellation.mdx"
+      "docs/specification/2025-11-25/basic/utilities/cancellation.mdx",
+      "docs/specification/2025-11-25/server/tools.mdx"
     ],
     "schema": "schema/2025-11-25/schema.json"
   },
@@ -40,6 +41,9 @@
   "errors": {
     "resource_not_found": -32002,
     "url_elicitation_required": -32042
+  },
+  "tools": {
+    "invalid_arguments": "error_result"
   },
   "wire": {
     "schema": {

@@ -9,7 +9,8 @@
     "pages": [
       "docs/specification/2024-11-05/basic/lifecycle.mdx",
       "docs/specification/2024-11-05/basic/transports.mdx",
-      "docs/specification/2024-11-05/basic/utilities/cancellation.mdx"
+      "docs/specification/2024-11-05/basic/utilities/cancellation.mdx",
+      "docs/specification/2024-11-05/server/tools.mdx"
     ],
     "schema": "schema/2024-11-05/schema.json"
   },
@@ -30,6 +31,9 @@
   },
   "errors": {
     "resource_not_found": -32002
+  },
+  "tools": {
+    "invalid_arguments": "invalid_params_error"
   },
   "wire": {
     "schema": {

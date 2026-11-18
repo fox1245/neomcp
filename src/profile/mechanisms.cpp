@@ -1,8 +1,10 @@
-#include "profile/internal.h"
-
+// The single place where the library declares a name: a profile that selects any other name is rejected, and code
+// that implements a mechanism attaches to a name here.
 #include <array>
 
-namespace neomcp::profile::detail {
+#include "neomcp/profile.h"
+
+namespace neomcp::profile {
 namespace {
 
 using Names = std::span<const std::string_view>;
@@ -17,6 +19,9 @@ constexpr std::array<std::string_view, 1> stdio_cancel_names{"cancelled_notifica
 constexpr std::array<std::string_view, 1> http_sse_cancel_names{"cancelled_notification"};
 constexpr std::array<std::string_view, 2> streamable_http_cancel_names{"cancelled_notification",
                                                                        "close_response_stream"};
+
+// error_result: a tool result with isError set; invalid_params_error: the JSON-RPC error Invalid params.
+constexpr std::array<std::string_view, 2> invalid_arguments_names{"error_result", "invalid_params_error"};
 
 }  // namespace
 
@@ -40,4 +45,6 @@ Names declared_cancel(Transport transport) {
     return {};
 }
 
-}  // namespace neomcp::profile::detail
+Names declared_invalid_arguments() { return invalid_arguments_names; }
+
+}  // namespace neomcp::profile
