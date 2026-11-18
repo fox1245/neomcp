@@ -652,7 +652,7 @@ TEST(Options, SigpipeIsIgnoredWhileTheTransportRunsAndRestoredAfter) {
         SCOPED_TRACE(ignore);
         struct sigaction ours = {};
         ours.sa_handler = on_sigpipe;
-        ::sigemptyset(&ours.sa_mask);
+        sigemptyset(&ours.sa_mask);
         struct sigaction before = {};
         ASSERT_EQ(::sigaction(SIGPIPE, &ours, &before), 0);
 
