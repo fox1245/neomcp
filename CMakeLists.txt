@@ -180,9 +180,10 @@ target_link_libraries(neomcp_stdio PUBLIC neomcp::server)
 target_compile_features(neomcp_stdio PUBLIC cxx_std_20)
 neomcp_configure_target(neomcp_stdio)
 
-# The HTTP building blocks: the request and response model, a body stream, server-sent events framing, media types,
-# the Host and Origin policy, random bytes from the operating system, and one listener. Nothing in it knows the
-# protocol. The HTTP library is header-only, used by one source file, and absent from the public headers.
+# The HTTP transport. The building blocks know nothing of the protocol: the request and response model, a body
+# stream, server-sent events framing, media types, the Host and Origin policy, random bytes from the operating system,
+# and one listener. On them: the protocol's endpoint (a handler without I/O) and HttpServer, which runs it on the
+# listener. The HTTP library is header-only, used by one source file, and absent from the public headers.
 include(cmake/NeomcpHttplib.cmake)
 
 add_library(neomcp_http
@@ -193,12 +194,15 @@ add_library(neomcp_http
     src/http/authority.cpp
     src/http/policy.cpp
     src/http/random.cpp
-    src/http/listener.cpp)
+    src/http/listener.cpp
+    src/http/timer.cpp
+    src/http/endpoint.cpp
+    src/http/http_server.cpp)
 add_library(neomcp::http ALIAS neomcp_http)
 target_include_directories(neomcp_http
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(neomcp_http PUBLIC Threads::Threads PRIVATE neomcp_httplib asio::asio)
+target_link_libraries(neomcp_http PUBLIC neomcp::server Threads::Threads PRIVATE neomcp_httplib asio::asio)
 if(WIN32)
     target_link_libraries(neomcp_http PRIVATE ws2_32 bcrypt)
 endif()
