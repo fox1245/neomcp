@@ -1,5 +1,6 @@
 #include "neomcp/wire.h"
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <variant>
@@ -308,6 +309,30 @@ json to_wire(const PromptResult& result, const profile::Profile& profile) {
     object["messages"] = std::move(messages);
     put(object, "_meta", result.meta);
     keep_members(object, "GetPromptResult", profile);
+    return object;
+}
+
+json to_wire(const CompletionResult& result, const profile::Profile& profile) {
+    const std::size_t kept = std::min(result.values.size(), max_completion_values);
+    const bool truncated = kept < result.values.size();
+    json values = json::array();
+    for (std::size_t i = 0; i < kept; ++i) values.push_back(result.values[i]);
+    json completion = json::object();
+    completion["values"] = std::move(values);
+    if (result.total) {
+        completion["total"] = *result.total;
+    } else if (truncated) {
+        completion["total"] = static_cast<std::uint64_t>(result.values.size());
+    }
+    if (truncated) {
+        completion["hasMore"] = true;
+    } else if (result.has_more) {
+        completion["hasMore"] = *result.has_more;
+    }
+    json object = json::object();
+    object["completion"] = std::move(completion);
+    put(object, "_meta", result.meta);
+    keep_members(object, "CompleteResult", profile);
     return object;
 }
 

@@ -68,4 +68,30 @@ public:
     virtual void get(const PromptRequest& request, CallControl control, Completion done) = 0;
 };
 
+// What a completion request refers to.
+enum class CompletionRefKind {
+    prompt,   // `ref/prompt`: `reference` is the prompt's name
+    resource  // `ref/resource`: `reference` is the URI or URI template of the resource
+};
+
+struct CompletionRequest {
+    CompletionRefKind kind = CompletionRefKind::prompt;
+    std::string reference;
+    std::string argument;  // the name of the argument being completed
+    std::string value;     // what has been typed of it
+    // The arguments already resolved, from the request's `context` where it carries them; all strings.
+    std::map<std::string, std::string> resolved;
+    json meta = nullptr;  // the request's params._meta; null when absent
+};
+
+class CompletionHost {
+public:
+    virtual ~CompletionHost() = default;
+
+    // Completes with a CompletionResult (empty when the host can suggest nothing for the argument), with
+    // InvalidRequest when the reference names nothing the host offers, with a Refusal or a HostFailure. Must not block
+    // for the duration of the call.
+    virtual void complete(const CompletionRequest& request, CallControl control, Completion done) = 0;
+};
+
 }  // namespace neomcp

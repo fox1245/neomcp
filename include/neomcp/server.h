@@ -69,6 +69,15 @@
 // missing required argument with Invalid params. The server declares the `prompts` capability exactly when a prompt
 // is registered.
 //
+// Completion. A prompt's argument and a template's variable can have a completer, which suggests values for what the
+// user has typed so far:
+//
+//   server.prompt<ReviewArgs>(...).complete("title", [](std::string_view typed) { return std::vector<std::string>{...}; });
+//
+// completion/complete for a `ref/prompt` or a `ref/resource` (the template's text) runs the completer of the argument
+// named, and answers with an empty list when there is none; a reference to a prompt or template the server lacks is
+// answered with Invalid params. At most neomcp::max_completion_values values are sent.
+//
 // Threads. Plain-function handlers run on a pool of worker threads the server owns, bounded by
 // ServerOptions::max_concurrent_calls and max_pending_calls. Coroutine handlers run on one thread the server owns,
 // which drives an asio::io_context, and are bounded by max_coroutine_calls; a coroutine handler must not block, or
@@ -228,11 +237,17 @@ public:
     ResourceTemplateHandle meta(json value) const;
     ResourceTemplateHandle cache(CacheHints hints) const;
 
+    // Suggests values for the variable `variable` of the template; the handler is as PromptHandle::complete's. A
+    // completion refers to the template by its URI template text.
+    template <class Handler>
+    ResourceTemplateHandle complete(std::string variable, Handler&& handler) const;
+
     const std::string& uri_template() const;
 
 private:
     friend class Server;
     ResourceTemplateHandle(detail::ServerCore* core, std::size_t index) : core_(core), index_(index) {}
+    void add_completer(std::string variable, detail::FeatureBody<CompletionResult> body) const;
     detail::ServerCore* core_;
     std::size_t index_;
 };
@@ -245,11 +260,22 @@ public:
     // `_meta` of the prompt; an object, else std::invalid_argument.
     PromptHandle meta(json value) const;
 
+    // Suggests values for the argument `argument` of the prompt (a member of its Args). The handler takes the text
+    // typed so far (std::string_view, const std::string& or std::string), optionally the arguments the client has
+    // resolved already (const std::map<std::string, std::string>&), and optionally a Context&, and returns a
+    // std::vector<std::string> or a neomcp::CompletionResult; it is a plain function or a coroutine. At most
+    // neomcp::max_completion_values values are sent. Throws std::invalid_argument for an argument the prompt lacks and
+    // one that has a completer already, std::logic_error once the server serves. The server declares the
+    // `completions` capability exactly when a completer is registered.
+    template <class Handler>
+    PromptHandle complete(std::string argument, Handler&& handler) const;
+
     const std::string& name() const;
 
 private:
     friend class Server;
     PromptHandle(detail::ServerCore* core, std::size_t index) : core_(core), index_(index) {}
+    void add_completer(std::string argument, detail::FeatureBody<CompletionResult> body) const;
     detail::ServerCore* core_;
     std::size_t index_;
 };
@@ -318,6 +344,7 @@ public:
     // registered.
     ResourceHost* resource_host() noexcept override;
     PromptHost* prompt_host() noexcept override;
+    CompletionHost* completion_host() noexcept override;
 
 private:
     ToolHandle add(ToolDefinition definition, detail::Body body);
@@ -466,6 +493,30 @@ PromptHandle Server::prompt(std::string name, std::string description, Handler&&
         return add_prompt(std::move(definition),
                           detail::make_feature_body<detail::PromptNoArgumentsKind, detail::NoArguments, F>(
                               std::forward<Handler>(handler)));
+    }
+}
+
+template <class Handler>
+PromptHandle PromptHandle::complete(std::string argument, Handler&& handler) const {
+    using F = std::decay_t<Handler>;
+    if constexpr (!detail::check_feature_handler<detail::CompleterKind, F>()) {
+        return *this;
+    } else {
+        add_completer(std::move(argument), detail::make_feature_body<detail::CompleterKind, detail::CompleterInput, F>(
+                                               std::forward<Handler>(handler)));
+        return *this;
+    }
+}
+
+template <class Handler>
+ResourceTemplateHandle ResourceTemplateHandle::complete(std::string variable, Handler&& handler) const {
+    using F = std::decay_t<Handler>;
+    if constexpr (!detail::check_feature_handler<detail::CompleterKind, F>()) {
+        return *this;
+    } else {
+        add_completer(std::move(variable), detail::make_feature_body<detail::CompleterKind, detail::CompleterInput, F>(
+                                               std::forward<Handler>(handler)));
+        return *this;
     }
 }
 

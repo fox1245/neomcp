@@ -89,6 +89,8 @@ constexpr std::string_view set_level_method = "logging/setLevel";
 constexpr std::string_view unsupported_version_error = "unsupported_protocol_version";
 constexpr std::string_view header_mismatch_error = "header_mismatch";
 constexpr std::string_view resource_not_found_error = "resource_not_found";
+constexpr std::string_view prompt_reference_type = "ref/prompt";
+constexpr std::string_view resource_reference_type = "ref/resource";
 
 const json* member(const json& object, std::string_view name) {
     const auto* members = object.get_ptr<const json::object_t*>();
@@ -194,7 +196,7 @@ struct Place {
 };
 
 // What a call in flight is for; it decides which outcomes may complete it.
-enum class CallKind { tool, resource_read, prompt_get };
+enum class CallKind { tool, resource_read, prompt_get, completion };
 
 struct CallState {
     std::weak_ptr<SessionCore> core;
@@ -305,6 +307,7 @@ private:
     std::optional<Answer> on_resources_list(Message& request, const Served& served, Origin&, const Place&);
     std::optional<Answer> on_resource_templates_list(Message& request, const Served& served, Origin&, const Place&);
     std::optional<Answer> on_resources_read(Message& request, const Served& served, Origin& origin, const Place& place);
+    std::optional<Answer> on_completion(Message& request, const Served& served, Origin& origin, const Place& place);
     std::optional<Answer> on_prompts_list(Message& request, const Served& served, Origin&, const Place&);
     std::optional<Answer> on_prompts_get(Message& request, const Served& served, Origin& origin, const Place& place);
     std::optional<Answer> on_set_level(Message& request, const Served& served, Origin& origin, const Place&);
@@ -923,6 +926,7 @@ const std::map<std::string, SessionCore::Handler, std::less<>>& SessionCore::han
         {"resources/list", &SessionCore::on_resources_list},
         {"resources/templates/list", &SessionCore::on_resource_templates_list},
         {"resources/read", &SessionCore::on_resources_read},
+        {"completion/complete", &SessionCore::on_completion},
         {"prompts/list", &SessionCore::on_prompts_list},
         {"prompts/get", &SessionCore::on_prompts_get},
         {std::string(set_level_method), &SessionCore::on_set_level},
@@ -1195,6 +1199,74 @@ std::optional<Answer> SessionCore::on_resources_read(Message& request, const Ser
     return std::nullopt;
 }
 
+std::optional<Answer> SessionCore::on_completion(Message& request, const Served& served, Origin& origin,
+                                                 const Place& place) {
+    CompletionHost* host = host_.completion_host();
+    if (host == nullptr) return method_not_found(request, served);
+    const RequestId& id = *request.id;
+    const auto invalid = [&](std::string message) {
+        return served_answer(make_error(id, error_code::invalid_params, "Invalid params: " + message), served);
+    };
+    const auto text_of = [](const json* value) -> const std::string* {
+        return value == nullptr ? nullptr : value->get_ptr<const std::string*>();
+    };
+    CompletionRequest completion;
+
+    const json* ref = member(request.params, "ref");
+    if (ref == nullptr || !ref->is_object()) return invalid("params.ref must be an object");
+    const std::string* type = text_of(member(*ref, "type"));
+    if (type == nullptr) return invalid("params.ref.type must be a string");
+    if (*type == prompt_reference_type) {
+        const std::string* name = text_of(member(*ref, "name"));
+        if (name == nullptr) return invalid("params.ref.name must be a string");
+        completion.kind = CompletionRefKind::prompt;
+        completion.reference = *name;
+    } else if (*type == resource_reference_type) {
+        const std::string* uri = text_of(member(*ref, "uri"));
+        if (uri == nullptr) return invalid("params.ref.uri must be a string");
+        completion.kind = CompletionRefKind::resource;
+        completion.reference = *uri;
+    } else {
+        return invalid("params.ref.type must be '" + std::string(prompt_reference_type) + "' or '" +
+                       std::string(resource_reference_type) + "'");
+    }
+
+    const json* argument = member(request.params, "argument");
+    if (argument == nullptr || !argument->is_object()) return invalid("params.argument must be an object");
+    const std::string* argument_name = text_of(member(*argument, "name"));
+    const std::string* argument_value = text_of(member(*argument, "value"));
+    if (argument_name == nullptr) return invalid("params.argument.name must be a string");
+    if (argument_value == nullptr) return invalid("params.argument.value must be a string");
+    completion.argument = *argument_name;
+    completion.value = *argument_value;
+
+    // `context.arguments` where the request has it (the revisions that define it); read whenever it is given.
+    if (const json* context = member(request.params, "context")) {
+        if (!context->is_object()) return invalid("params.context must be an object");
+        if (const json* resolved = member(*context, "arguments")) {
+            const auto* members = resolved->get_ptr<const json::object_t*>();
+            if (members == nullptr) return invalid("params.context.arguments must be an object");
+            for (const auto& [name, value] : *members) {
+                const std::string* text = value.get_ptr<const std::string*>();
+                if (text == nullptr) return invalid("params.context.arguments." + name + " must be a string");
+                completion.resolved.emplace(name, *text);
+            }
+        }
+    }
+    auto token = progress_token_of(request, served);
+    if (auto* refusal = std::get_if<Answer>(&token)) return std::move(*refusal);
+
+    auto call = begin_call(CallKind::completion, id, served, origin, place, std::move(std::get<json>(token)));
+    if (!call) return std::nullopt;
+    if (const json* meta = member(request.params, "_meta")) completion.meta = *meta;
+    try {
+        host->complete(completion, CallControl(call), Completion(std::make_shared<CompletionState>(call)));
+    } catch (...) {
+        // The completion answers with an internal error once its last copy is gone.
+    }
+    return std::nullopt;
+}
+
 std::optional<Answer> SessionCore::on_prompts_list(Message& request, const Served& served, Origin&, const Place&) {
     PromptHost* host = host_.prompt_host();
     if (host == nullptr) return method_not_found(request, served);
@@ -1398,6 +1470,7 @@ json SessionCore::capabilities(const profile::Profile& profile) const {
     if (options_.protocol_logging) capabilities["logging"] = json::object();
     if (host_.resource_host() != nullptr) capabilities["resources"] = json::object();
     if (host_.prompt_host() != nullptr) capabilities["prompts"] = json::object();
+    if (host_.completion_host() != nullptr) capabilities["completions"] = json::object();
     keep_members(capabilities, "ServerCapabilities", profile);
     return capabilities;
 }
@@ -1477,6 +1550,14 @@ void SessionCore::complete(const std::shared_ptr<CallState>& call, FeatureOutcom
         } else {
             json body = to_wire(*prompt, profile);
             finish_result(body, "GetPromptResult", profile);
+            response = make_result(call->id, std::move(body));
+        }
+    } else if (const auto* completion = std::get_if<CompletionResult>(&outcome)) {
+        if (call->kind != CallKind::completion) {
+            response = wrong_kind();
+        } else {
+            json body = to_wire(*completion, profile);
+            finish_result(body, "CompleteResult", profile);
             response = make_result(call->id, std::move(body));
         }
     } else if (const auto* missing = std::get_if<NotFound>(&outcome)) {

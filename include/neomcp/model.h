@@ -239,4 +239,20 @@ struct PromptResult {
     std::optional<json> meta;  // an object, written as `_meta`
 };
 
+// ---------------------------------------------------------------------------------------------------------------
+// Completion
+
+// The most values a completion/complete result carries: every revision's schema states it ("must not exceed 100 items").
+inline constexpr std::size_t max_completion_values = 100;
+
+// The outcome of completion/complete: suggestions for the argument being typed. More values than
+// max_completion_values are cut to that many when written, `hasMore` is then set, and `total` is the number of values
+// given unless the handler stated a total.
+struct CompletionResult {
+    std::vector<std::string> values;
+    std::optional<std::uint64_t> total;  // how many suggestions exist; may exceed values.size()
+    std::optional<bool> has_more;        // whether there are suggestions beyond those given
+    std::optional<json> meta;            // an object, written as `_meta`
+};
+
 }  // namespace neomcp

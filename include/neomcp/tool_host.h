@@ -60,7 +60,7 @@ struct InvalidRequest {
 
 // What a call of a kind other than a tool produced. Refusal and HostFailure stay in CallOutcome and mean the same
 // for every kind of call.
-using FeatureOutcome = std::variant<ReadResult, PromptResult, NotFound, InvalidRequest>;
+using FeatureOutcome = std::variant<ReadResult, PromptResult, CompletionResult, NotFound, InvalidRequest>;
 
 // The handle of one call in flight.
 class CallControl {
@@ -111,6 +111,7 @@ private:
 
 class ResourceHost;
 class PromptHost;
+class CompletionHost;
 
 class ToolHost {
 public:
@@ -121,6 +122,7 @@ public:
     // not found". The pointers stay valid as long as the host does. A host that offers only tools overrides none.
     virtual ResourceHost* resource_host() noexcept { return nullptr; }
     virtual PromptHost* prompt_host() noexcept { return nullptr; }
+    virtual CompletionHost* completion_host() noexcept { return nullptr; }
 
     // The tools, in a stable order. The span stays valid and its contents unchanged while a session uses the host.
     virtual std::span<const ToolDefinition> tools() const = 0;

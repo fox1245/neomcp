@@ -12,6 +12,10 @@
 //   resource_template<Params>(...)           `const Params&` or `Params`                       see below
 //   prompt(name, description, ...)           none                                              see below
 //   prompt<Args>(...)                        `const Args&` or `Args`                           see below
+//   .complete(argument, ...)                 the text typed so far (`std::string_view`,        std::vector<std::string>
+//                                            `const std::string&` or `std::string`), and       or neomcp::CompletionResult
+//                                            optionally the arguments already resolved
+//                                            (`const std::map<std::string, std::string>&`)
 //
 // The result of a resource or template handler becomes the contents of the read:
 //
@@ -92,15 +96,17 @@ struct Inputs {
     A args;
 };
 
+// How a kind sees one parameter of a handler: 0 when it is no input of the kind, 1 for its main input (the arguments, the
+// text typed so far) and 2 for its secondary input (the arguments already resolved).
 template <class Kind, class P>
-inline constexpr bool is_args_param_v = Kind::takes_args && is_arguments_param_v<P, typename Kind::Args>;
+inline constexpr int input_slot_v = Kind::template input_slot<P>();
 
 template <class Kind, class A, class P>
 decltype(auto) take(Inputs<A>& inputs, Context& context) {
     if constexpr (is_context_param_v<P>) {
         return (context);
     } else {
-        return pass_arguments<P>(inputs.args);
+        return Kind::template take_input<P>(inputs);
     }
 }
 
@@ -112,7 +118,7 @@ std::remove_cv_t<typename CallSignature<F>::result> call_with_inputs(F& handler,
 }
 
 // Which registration a handler belongs to; it decides what the compile-time messages say.
-enum class KindId { resource, resource_template, prompt, prompt_no_arguments };
+enum class KindId { resource, resource_template, prompt, prompt_no_arguments, completer };
 
 // What is wrong with the parameters of a handler of the kind, if anything.
 enum class ParamProblem { none, unknown, context_not_last, args_missing, args_twice };
@@ -120,17 +126,19 @@ enum class ParamProblem { none, unknown, context_not_last, args_missing, args_tw
 template <class Kind, class Params, std::size_t... I>
 constexpr ParamProblem param_problem(std::index_sequence<I...>) {
     constexpr std::size_t arity = sizeof...(I);
-    constexpr std::size_t args = (std::size_t{0} + ... + (is_args_param_v<Kind, std::tuple_element_t<I, Params>> ? 1u : 0u));
+    constexpr std::size_t args = (std::size_t{0} + ... + (input_slot_v<Kind, std::tuple_element_t<I, Params>> == 1 ? 1u : 0u));
+    constexpr std::size_t secondary =
+        (std::size_t{0} + ... + (input_slot_v<Kind, std::tuple_element_t<I, Params>> == 2 ? 1u : 0u));
     constexpr bool unknown = (false || ... ||
                               (!is_context_param_v<std::tuple_element_t<I, Params>> &&
-                               !is_args_param_v<Kind, std::tuple_element_t<I, Params>>));
+                               input_slot_v<Kind, std::tuple_element_t<I, Params>> == 0));
     constexpr bool context_not_last =
         (false || ... || (is_context_param_v<std::tuple_element_t<I, Params>> && I + 1 != arity));
     if constexpr (unknown) {
         return ParamProblem::unknown;
     } else if constexpr (context_not_last) {
         return ParamProblem::context_not_last;
-    } else if constexpr (args > 1) {
+    } else if constexpr (args > 1 || secondary > 1) {
         return ParamProblem::args_twice;
     } else if constexpr (Kind::takes_args && args == 0) {
         return ParamProblem::args_missing;
@@ -170,6 +178,11 @@ constexpr bool check_feature_handler() {
                 static_assert(dependent_false<F>,
                               "neomcp: a handler registered with server.prompt<Args>(...) takes the arguments as "
                               "`const Args&` or `Args`, and optionally `neomcp::Context&` after them");
+            } else if constexpr (Kind::id == KindId::completer) {
+                static_assert(dependent_false<F>,
+                              "neomcp: a completion handler takes the text typed so far (`std::string_view`, `const "
+                              "std::string&` or `std::string`), optionally the arguments already resolved (`const "
+                              "std::map<std::string, std::string>&`), and optionally `neomcp::Context&` last");
             } else {
                 static_assert(dependent_false<F>,
                               "neomcp: a handler registered with server.resource_template<Params>(...) takes the "
@@ -184,6 +197,10 @@ constexpr bool check_feature_handler() {
                 static_assert(dependent_false<F>,
                               "neomcp: a handler registered with server.prompt<Args>(...) takes the arguments as "
                               "`const Args&` or `Args`");
+            } else if constexpr (Kind::id == KindId::completer) {
+                static_assert(dependent_false<F>,
+                              "neomcp: a completion handler takes the text typed so far (`std::string_view`, `const "
+                              "std::string&` or `std::string`)");
             } else {
                 static_assert(dependent_false<F>,
                               "neomcp: a handler registered with server.resource_template<Params>(...) takes the "
@@ -206,6 +223,10 @@ constexpr bool check_feature_handler() {
                               "neomcp: a prompt handler returns std::string, neomcp::PromptMessage, "
                               "std::vector<neomcp::PromptMessage> or neomcp::PromptResult, or an asio::awaitable of "
                               "one of them");
+            } else if constexpr (Kind::id == KindId::completer) {
+                static_assert(dependent_false<F>,
+                              "neomcp: a completion handler returns std::vector<std::string> or "
+                              "neomcp::CompletionResult, or an asio::awaitable of one of them");
             } else {
                 static_assert(dependent_false<F>,
                               "neomcp: a resource handler returns std::string, neomcp::Bytes, a described struct, "
@@ -349,6 +370,10 @@ struct ResourceKind {
     using Args = NoArguments;
     static constexpr KindId id = KindId::resource;
     static constexpr bool takes_args = false;
+    template <class P>
+    static constexpr int input_slot() {
+        return 0;
+    }
 
     template <class R>
     static constexpr bool valid_result() {
@@ -371,6 +396,14 @@ struct TemplateKind {
     using Args = Params;
     static constexpr KindId id = KindId::resource_template;
     static constexpr bool takes_args = true;
+    template <class P>
+    static constexpr int input_slot() {
+        return is_arguments_param_v<P, Params> ? 1 : 0;
+    }
+    template <class P, class A>
+    static decltype(auto) take_input(Inputs<A>& inputs) {
+        return pass_arguments<P>(inputs.args);
+    }
 
     template <class R>
     static constexpr bool valid_result() {
@@ -431,6 +464,14 @@ struct PromptKind {
     using Args = Parameters;
     static constexpr KindId id = KindId::prompt;
     static constexpr bool takes_args = true;
+    template <class P>
+    static constexpr int input_slot() {
+        return is_arguments_param_v<P, Parameters> ? 1 : 0;
+    }
+    template <class P, class A>
+    static decltype(auto) take_input(Inputs<A>& inputs) {
+        return pass_arguments<P>(inputs.args);
+    }
 
     template <class R>
     static constexpr bool valid_result() {
@@ -452,6 +493,10 @@ struct PromptNoArgumentsKind {
     using Args = NoArguments;
     static constexpr KindId id = KindId::prompt_no_arguments;
     static constexpr bool takes_args = false;
+    template <class P>
+    static constexpr int input_slot() {
+        return 0;
+    }
 
     template <class R>
     static constexpr bool valid_result() {
@@ -499,6 +544,89 @@ std::vector<PromptArgumentDefinition> prompt_arguments_of() {
         Described<Args>::fields.items);
     return arguments;
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Completion
+
+template <class R>
+constexpr bool is_completion_result_type() {
+    return std::is_same_v<R, std::vector<std::string>> || std::is_same_v<R, CompletionResult>;
+}
+
+using ResolvedArguments = std::map<std::string, std::string>;
+
+template <class P>
+inline constexpr bool is_text_param_v =
+    std::is_same_v<P, std::string_view> || std::is_same_v<P, const std::string&> || std::is_same_v<P, std::string>;
+
+template <class P>
+inline constexpr bool is_resolved_param_v =
+    std::is_same_v<P, const ResolvedArguments&> || std::is_same_v<P, ResolvedArguments>;
+
+// What a completion handler is given.
+struct CompleterInput {
+    std::string text;
+    ResolvedArguments resolved;
+};
+
+// The kind of `.complete(argument, handler)` handlers. The call's arguments are `{"value": text, "arguments": {...}}`.
+struct CompleterKind {
+    using Out = CompletionResult;
+    using Args = CompleterInput;
+    static constexpr KindId id = KindId::completer;
+    static constexpr bool takes_args = true;
+
+    template <class P>
+    static constexpr int input_slot() {
+        return is_text_param_v<P> ? 1 : (is_resolved_param_v<P> ? 2 : 0);
+    }
+    template <class P, class A>
+    static decltype(auto) take_input(Inputs<A>& inputs) {
+        if constexpr (std::is_same_v<P, std::string_view>) {
+            return std::string_view(inputs.args.text);
+        } else if constexpr (std::is_same_v<P, const std::string&>) {
+            return static_cast<const std::string&>(inputs.args.text);
+        } else if constexpr (std::is_same_v<P, std::string>) {
+            return std::string(inputs.args.text);
+        } else if constexpr (std::is_same_v<P, const ResolvedArguments&>) {
+            return static_cast<const ResolvedArguments&>(inputs.args.resolved);
+        } else {
+            return ResolvedArguments(inputs.args.resolved);
+        }
+    }
+
+    template <class R>
+    static constexpr bool valid_result() {
+        return is_completion_result_type<R>();
+    }
+    template <class A>
+    static Inputs<A> decode(const Invocation& invocation) {
+        Inputs<A> inputs;
+        if (const auto* value = invocation.arguments.get_ptr<const json::object_t*>()) {
+            const auto text = value->find("value");
+            if (text != value->end() && text->second.is_string()) inputs.args.text = text->second.template get<std::string>();
+            const auto resolved = value->find("arguments");
+            if (resolved != value->end()) {
+                if (const auto* entries = resolved->second.template get_ptr<const json::object_t*>()) {
+                    for (const auto& [name, entry] : *entries) {
+                        if (entry.is_string()) inputs.args.resolved.emplace(name, entry.template get<std::string>());
+                    }
+                }
+            }
+        }
+        return inputs;
+    }
+    template <class R>
+    static Out convert(R value, const Invocation&) {
+        if constexpr (std::is_same_v<R, CompletionResult>) {
+            return value;
+        } else {
+            CompletionResult result;
+            result.values = std::move(value);
+            return result;
+        }
+    }
+};
 
 // ---------------------------------------------------------------------------------------------------------------
 // The variables of a resource template

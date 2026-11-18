@@ -93,7 +93,8 @@ struct CancelPoster {
 struct CallRecord;
 
 // What a call produced: any outcome a host can complete a call with.
-using JobOutcome = std::variant<ToolResult, ReadResult, PromptResult, NotFound, InvalidRequest, Refusal, HostFailure>;
+using JobOutcome =
+    std::variant<ToolResult, ReadResult, PromptResult, CompletionResult, NotFound, InvalidRequest, Refusal, HostFailure>;
 
 // Something a call can run: a registered tool, resource or resource template. A call runs it on a worker (plain) or on the coroutine thread, and the
 // run never throws: what the handler throws becomes an outcome.
@@ -191,6 +192,7 @@ struct CallRecord {
 class ServerCore final : public ToolHost,
                          public ResourceHost,
                          public PromptHost,
+                         public CompletionHost,
                          public std::enable_shared_from_this<ServerCore> {
 public:
     explicit ServerCore(ServerOptions options);
@@ -218,6 +220,8 @@ public:
     std::size_t add_prompt(PromptDefinition definition, FeatureBody<PromptResult> body);
     void edit_prompt(std::size_t index, const std::function<void(PromptDefinition&)>& change);
     const PromptDefinition& prompt_definition(std::size_t index) const { return prompt_defs_.at(index); }
+    void add_prompt_completer(std::size_t index, std::string argument, FeatureBody<CompletionResult> body);
+    void add_template_completer(std::size_t index, std::string variable, FeatureBody<CompletionResult> body);
 
     std::variant<std::unique_ptr<Session>, CreateError> connect(Sink sink, IdleCallback on_idle);
     std::span<const ToolDefinition> tools() const override;
@@ -231,6 +235,8 @@ public:
     std::span<const PromptDefinition> prompts() const override;
     ListSettings prompt_list_settings() const override;
     void get(const PromptRequest& request, CallControl control, Completion done) override;
+    CompletionHost* completion_host() noexcept override;
+    void complete(const CompletionRequest& request, CallControl control, Completion done) override;
     std::optional<std::string> check(const ToolDefinition& tool, const json& arguments) const;
 
     const ServerOptions& options() const noexcept { return options_; }
@@ -294,6 +300,12 @@ private:
     std::vector<PromptDefinition> prompt_defs_;
     std::vector<std::unique_ptr<FeatureEntry<PromptResult>>> prompt_entries_;
     std::map<std::string, std::size_t, std::less<>> prompt_by_name_;
+
+    // The completers of an argument, by the argument's name; parallel to the prompts and to the templates.
+    using Completers = std::map<std::string, std::unique_ptr<FeatureEntry<CompletionResult>>, std::less<>>;
+    std::vector<Completers> prompt_completers_;
+    std::vector<Completers> template_completers_;
+    std::size_t completer_count_ = 0;
     mutable std::atomic<bool> serving_{false};
 
     // Guarded by mutex_.
@@ -513,6 +525,7 @@ std::size_t ServerCore::add_resource_template(ResourceTemplateDefinition definit
     template_defs_.push_back(std::move(definition));
     template_slots_.push_back(TemplateSlot{std::make_unique<FeatureEntry<ReadResult>>(std::move(body), label),
                                            std::move(matcher), std::move(members), std::move(check), std::nullopt});
+    template_completers_.emplace_back();
     return index;
 }
 
@@ -527,6 +540,7 @@ std::size_t ServerCore::add_prompt(PromptDefinition definition, FeatureBody<Prom
     prompt_by_name_.emplace(definition.name, index);
     prompt_defs_.push_back(std::move(definition));
     prompt_entries_.push_back(std::make_unique<FeatureEntry<PromptResult>>(std::move(body), label));
+    prompt_completers_.emplace_back();
     return index;
 }
 
@@ -534,6 +548,44 @@ void ServerCore::edit_prompt(std::size_t index, const std::function<void(PromptD
     PromptDefinition& prompt = prompt_defs_.at(index);
     ensure_registering("prompt '" + prompt.name + "'", "changed");
     change(prompt);
+}
+
+void ServerCore::add_prompt_completer(std::size_t index, std::string argument, FeatureBody<CompletionResult> body) {
+    const PromptDefinition& prompt = prompt_defs_.at(index);
+    const std::string label = "the completer of argument '" + argument + "' of prompt '" + prompt.name + "'";
+    ensure_registering("prompt '" + prompt.name + "'", "given a completer");
+    const bool known = std::any_of(prompt.arguments.begin(), prompt.arguments.end(),
+                                   [&](const PromptArgumentDefinition& candidate) { return candidate.name == argument; });
+    if (!known) {
+        throw std::invalid_argument("neomcp: prompt '" + prompt.name + "' has no argument '" + argument + "' to complete");
+    }
+    Completers& completers = prompt_completers_.at(index);
+    if (completers.find(argument) != completers.end()) {
+        throw std::invalid_argument("neomcp: argument '" + argument + "' of prompt '" + prompt.name +
+                                    "' has a completer already");
+    }
+    completers.emplace(std::move(argument), std::make_unique<FeatureEntry<CompletionResult>>(std::move(body), label));
+    ++completer_count_;
+}
+
+void ServerCore::add_template_completer(std::size_t index, std::string variable, FeatureBody<CompletionResult> body) {
+    const std::string& uri_template = template_defs_.at(index).uri_template;
+    const std::string label = "the completer of variable '" + variable + "' of resource template '" + uri_template + "'";
+    ensure_registering("resource template '" + uri_template + "'", "given a completer");
+    const auto& members = template_slots_.at(index).members;
+    const bool known = std::any_of(members.begin(), members.end(),
+                                   [&](const TemplateMember& candidate) { return candidate.name == variable; });
+    if (!known) {
+        throw std::invalid_argument("neomcp: resource template '" + uri_template + "' has no variable '" + variable +
+                                    "' to complete");
+    }
+    Completers& completers = template_completers_.at(index);
+    if (completers.find(variable) != completers.end()) {
+        throw std::invalid_argument("neomcp: variable '" + variable + "' of resource template '" + uri_template +
+                                    "' has a completer already");
+    }
+    completers.emplace(std::move(variable), std::make_unique<FeatureEntry<CompletionResult>>(std::move(body), label));
+    ++completer_count_;
 }
 
 void ServerCore::edit_resource(std::size_t index, const std::function<void(ResourceDefinition&)>& change) {
@@ -753,6 +805,48 @@ void ServerCore::get(const PromptRequest& request, CallControl control, Completi
     for (const auto& [name, value] : request.arguments) arguments[name] = value;
     admit(*prompt_entries_[found->second], std::move(arguments), request.meta, std::move(control), std::move(done),
           request.name);
+}
+
+CompletionHost* ServerCore::completion_host() noexcept {
+    serving_.store(true);
+    return completer_count_ == 0 ? nullptr : this;
+}
+
+void ServerCore::complete(const CompletionRequest& request, CallControl control, Completion done) {
+    serving_.store(true);
+    const Completers* completers = nullptr;
+    if (request.kind == CompletionRefKind::prompt) {
+        const auto found = prompt_by_name_.find(request.reference);
+        if (found == prompt_by_name_.end()) {
+            done(FeatureOutcome(InvalidRequest{"unknown prompt: " + request.reference}));
+            return;
+        }
+        completers = &prompt_completers_[found->second];
+    } else {
+        // A resource template is named by its text; a resource at a fixed URI is a reference too, with nothing to
+        // complete.
+        const auto found =
+            std::find_if(template_defs_.begin(), template_defs_.end(),
+                         [&](const ResourceTemplateDefinition& candidate) { return candidate.uri_template == request.reference; });
+        if (found != template_defs_.end()) {
+            completers = &template_completers_[static_cast<std::size_t>(found - template_defs_.begin())];
+        } else if (resource_by_uri_.find(request.reference) == resource_by_uri_.end()) {
+            done(FeatureOutcome(InvalidRequest{"unknown resource reference: " + request.reference}));
+            return;
+        }
+    }
+    const auto completer = completers == nullptr ? std::nullopt : std::optional(completers->find(request.argument));
+    if (!completer || *completer == completers->end()) {
+        done(FeatureOutcome(CompletionResult{}));
+        return;
+    }
+    json arguments = json::object();
+    arguments["value"] = request.value;
+    json resolved = json::object();
+    for (const auto& [name, value] : request.resolved) resolved[name] = value;
+    arguments["arguments"] = std::move(resolved);
+    admit(*(*completer)->second, std::move(arguments), request.meta, std::move(control), std::move(done),
+          request.reference);
 }
 
 void ServerCore::post_cancel(const std::weak_ptr<CallRecord>& record) {
@@ -1039,6 +1133,14 @@ PromptHandle PromptHandle::meta(json value) const {
     return *this;
 }
 
+void PromptHandle::add_completer(std::string argument, detail::FeatureBody<CompletionResult> body) const {
+    core_->add_prompt_completer(index_, std::move(argument), std::move(body));
+}
+
+void ResourceTemplateHandle::add_completer(std::string variable, detail::FeatureBody<CompletionResult> body) const {
+    core_->add_template_completer(index_, std::move(variable), std::move(body));
+}
+
 const std::string& PromptHandle::name() const { return core_->prompt_definition(index_).name; }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1166,6 +1268,8 @@ const ServerOptions& Server::options() const noexcept { return core_->options();
 ResourceHost* Server::resource_host() noexcept { return core_->resource_host(); }
 
 PromptHost* Server::prompt_host() noexcept { return core_->prompt_host(); }
+
+CompletionHost* Server::completion_host() noexcept { return core_->completion_host(); }
 
 PromptHandle Server::add_prompt(PromptDefinition definition, detail::FeatureBody<PromptResult> body) {
     return PromptHandle(core_.get(), core_->add_prompt(std::move(definition), std::move(body)));

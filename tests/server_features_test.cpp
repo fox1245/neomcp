@@ -1282,4 +1282,258 @@ TEST(Prompts, ACancelledGetSeesStopAndTwoRunAtOnce) {
     EXPECT_EQ(failures.load(), 0);
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Completion
+
+// Whether a revision's ServerCapabilities has `completions`: the schemas of 2025-03-26 and later define it.
+const std::map<std::string, bool> has_completions_capability{
+    {"2024-11-05", false}, {"2025-03-26", true}, {"2025-06-18", true}, {"2025-11-25", true}, {"2026-07-28", true},
+};
+
+json prompt_ref(const std::string& name) { return json{{"type", "ref/prompt"}, {"name", name}}; }
+json resource_ref(const std::string& uri) { return json{{"type", "ref/resource"}, {"uri", uri}}; }
+
+json complete_params(json ref, const std::string& argument, const std::string& value, json context = nullptr) {
+    json params = json{{"ref", std::move(ref)}, {"argument", {{"name", argument}, {"value", value}}}};
+    if (!context.is_null()) params["context"] = std::move(context);
+    return params;
+}
+
+std::vector<std::string> values_of(const json& answer) {
+    std::vector<std::string> out;
+    for (const auto& value : *result_of(answer).at("completion").at("values").get_ptr<const json::array_t*>()) {
+        out.push_back(value.get<std::string>());
+    }
+    return out;
+}
+
+TEST(Completion, HandlerFormsAreCalledWithWhatWasTyped) {
+    neomcp::Server server(named("completion"));
+    server.prompt<ft::TwoArgs>("two", "d", [](const ft::TwoArgs&) { return std::string(); })
+        .complete("arg1", [](std::string_view typed) { return std::vector<std::string>{std::string(typed) + "1"}; })
+        .complete("arg2", [](const std::string& typed, const std::map<std::string, std::string>& resolved) {
+            return std::vector<std::string>{typed, resolved.count("arg1") != 0 ? resolved.at("arg1") : "none"};
+        });
+    server.prompt<ft::ReviewArgs>("review", "d", [](const ft::ReviewArgs&) { return std::string(); })
+        .complete("title", [](std::string typed, neomcp::Context& context) {
+            return std::vector<std::string>{typed, std::string(context.revision())};
+        })
+        .complete("focus", [](std::string_view typed, const std::map<std::string, std::string>&,
+                              neomcp::Context&) -> asio::awaitable<neomcp::CompletionResult> {
+            neomcp::CompletionResult result;
+            result.values = {std::string(typed) + "!"};
+            result.total = 10;
+            result.has_more = true;
+            co_return result;
+        });
+
+    Client client(server, modern_revision);
+    const auto complete = [&](json params) { return client.ask("completion/complete", std::move(params)); };
+
+    EXPECT_EQ(values_of(complete(complete_params(prompt_ref("two"), "arg1", "ty"))), std::vector<std::string>{"ty1"});
+    EXPECT_EQ(values_of(complete(complete_params(prompt_ref("two"), "arg2", "v", json{{"arguments", {{"arg1", "x"}}}}))),
+              (std::vector<std::string>{"v", "x"}));
+    EXPECT_EQ(values_of(complete(complete_params(prompt_ref("two"), "arg2", "v"))), (std::vector<std::string>{"v", "none"}));
+    EXPECT_EQ(values_of(complete(complete_params(prompt_ref("review"), "title", "t"))),
+              (std::vector<std::string>{"t", modern_revision}));
+    const json built = complete(complete_params(prompt_ref("review"), "focus", "f"));
+    EXPECT_EQ(values_of(built), std::vector<std::string>{"f!"});
+    EXPECT_EQ(result_of(built).at("completion").at("total"), 10);
+    EXPECT_EQ(result_of(built).at("completion").at("hasMore"), true);
+}
+
+TEST_P(PerRevision, ATemplateVariableIsCompletedThroughItsUriTemplate) {
+    neomcp::Server server(named("completion"));
+    server.resource_template<ft::KindParams>("db://{kind}/{name}", "T", [](const ft::KindParams&) { return std::string(); })
+        .complete("name", [](std::string_view typed, const std::map<std::string, std::string>& resolved) {
+            return std::vector<std::string>{std::string(typed) + "-" + (resolved.count("kind") ? resolved.at("kind") : "?")};
+        });
+    server.resource("db://fixed", "F", [] { return std::string(); });
+    Client client(server, GetParam());
+    const auto complete = [&](json params) { return client.ask("completion/complete", std::move(params)); };
+
+    EXPECT_EQ(values_of(complete(complete_params(resource_ref("db://{kind}/{name}"), "name", "ab", json{{"arguments", {{"kind", "k"}}}}))),
+              std::vector<std::string>{"ab-k"});
+    EXPECT_EQ(values_of(complete(complete_params(resource_ref("db://{kind}/{name}"), "kind", "x"))),
+              std::vector<std::string>{}) << "a variable without a completer";
+    EXPECT_EQ(values_of(complete(complete_params(resource_ref("db://fixed"), "any", "x"))), std::vector<std::string>{})
+        << "a resource at a fixed URI has nothing to complete";
+    EXPECT_EQ(error_code_of(complete(complete_params(resource_ref("db://other/{x}"), "x", "y"))), -32602);
+}
+
+TEST_P(PerRevision, CompleteResultsHaveExactlyTheRevisionsMembers) {
+    neomcp::Server server(named("completion"));
+    server.prompt<ft::TwoArgs>("two", "d", [](const ft::TwoArgs&) { return std::string(); })
+        .complete("arg1", [](std::string_view) { return std::vector<std::string>{"a", "b"}; });
+    Client client(server, GetParam());
+    const json answer = client.ask("completion/complete", complete_params(prompt_ref("two"), "arg1", "x"));
+    ASSERT_TRUE(answer.contains("result")) << answer.dump();
+    expect_conforms(result_of(answer), "CompleteResult", *client.revision);
+    EXPECT_EQ(result_of(answer).at("completion"), (json{{"values", {"a", "b"}}}));
+    EXPECT_EQ(result_of(answer).contains("resultType"), GetParam() == modern_revision);
+}
+
+TEST_P(PerRevision, AtMostAHundredValuesAreSentAndTheRestIsSaid) {
+    neomcp::Server server(named("completion"));
+    const auto many = [](std::size_t count) {
+        std::vector<std::string> values;
+        for (std::size_t i = 0; i < count; ++i) values.push_back("v" + std::to_string(i));
+        return values;
+    };
+    server.prompt<ft::TwoArgs>("limit", "d", [](const ft::TwoArgs&) { return std::string(); })
+        .complete("arg1", [&](std::string_view) { return many(150); })
+        .complete("arg2", [&](std::string_view) { return many(100); });
+    server.prompt<ft::ReviewArgs>("limit2", "d", [](const ft::ReviewArgs&) { return std::string(); })
+        .complete("title", [&](std::string_view) {
+            neomcp::CompletionResult result;
+            result.values = many(120);
+            result.total = 500;
+            result.has_more = false;  // the cut says otherwise
+            return result;
+        })
+        .complete("focus", [&](std::string_view) {
+            neomcp::CompletionResult result;
+            result.values = many(3);
+            result.has_more = false;
+            return result;
+        });
+    Client client(server, GetParam());
+    const auto completion = [&](const std::string& prompt, const std::string& argument) {
+        const json answer = client.ask("completion/complete", complete_params(prompt_ref(prompt), argument, ""));
+        EXPECT_TRUE(answer.contains("result")) << answer.dump();
+        return result_of(answer).at("completion");
+    };
+
+    const json cut = completion("limit", "arg1");
+    EXPECT_EQ(cut.at("values").size(), neomcp::max_completion_values);
+    EXPECT_EQ(cut.at("values").at(99), "v99");
+    EXPECT_EQ(cut.at("total"), 150);
+    EXPECT_EQ(cut.at("hasMore"), true);
+
+    const json exact = completion("limit", "arg2");
+    EXPECT_EQ(exact.at("values").size(), 100u);
+    EXPECT_FALSE(exact.contains("total"));
+    EXPECT_FALSE(exact.contains("hasMore"));
+
+    const json stated = completion("limit2", "title");
+    EXPECT_EQ(stated.at("values").size(), 100u);
+    EXPECT_EQ(stated.at("total"), 500) << "a total the handler stated is kept";
+    EXPECT_EQ(stated.at("hasMore"), true);
+
+    const json small = completion("limit2", "focus");
+    EXPECT_EQ(small.at("values").size(), 3u);
+    EXPECT_EQ(small.at("hasMore"), false);
+}
+
+TEST_P(PerRevision, ARequestWithoutACompleterOrWithABadReferenceIsAnsweredAsThePagesSay) {
+    neomcp::Server server(named("completion"));
+    server.prompt<ft::TwoArgs>("two", "d", [](const ft::TwoArgs&) { return std::string(); })
+        .complete("arg1", [](std::string_view) { return std::vector<std::string>{"a"}; });
+    Client client(server, GetParam());
+    const auto complete = [&](json params) { return client.ask("completion/complete", std::move(params)); };
+
+    // A reference with no completer for the argument: an empty list.
+    EXPECT_EQ(values_of(complete(complete_params(prompt_ref("two"), "arg2", "x"))), std::vector<std::string>{});
+    EXPECT_EQ(values_of(complete(complete_params(prompt_ref("two"), "nonexistent", "x"))), std::vector<std::string>{});
+    // A reference to something the server lacks: Invalid params.
+    EXPECT_EQ(error_code_of(complete(complete_params(prompt_ref("nonexistent"), "arg1", "x"))), -32602);
+    EXPECT_EQ(error_code_of(complete(complete_params(json{{"type", "ref/other"}, {"name", "two"}}, "arg1", "x"))), -32602);
+    EXPECT_EQ(error_code_of(complete(complete_params(json{{"type", "ref/prompt"}}, "arg1", "x"))), -32602);
+    EXPECT_EQ(error_code_of(complete(complete_params(json{{"type", "ref/resource"}, {"name", "x"}}, "arg1", "x"))), -32602);
+    EXPECT_EQ(error_code_of(complete(json{{"ref", prompt_ref("two")}})), -32602);
+    EXPECT_EQ(error_code_of(complete(json{{"ref", prompt_ref("two")}, {"argument", {{"name", "arg1"}}}})), -32602);
+    EXPECT_EQ(error_code_of(complete(json{{"ref", prompt_ref("two")}, {"argument", {{"name", "arg1"}, {"value", 3}}}})), -32602);
+    EXPECT_EQ(error_code_of(complete(complete_params(prompt_ref("two"), "arg1", "x", json{{"arguments", {{"k", 1}}}}))), -32602)
+        << "resolved arguments are strings";
+    EXPECT_EQ(error_code_of(complete(complete_params(prompt_ref("two"), "arg1", "x", json{{"arguments", json::array()}}))), -32602);
+    EXPECT_EQ(error_code_of(complete(complete_params(prompt_ref("two"), "arg1", "x", json::array()))), -32602);
+    EXPECT_EQ(values_of(complete(complete_params(prompt_ref("two"), "arg1", "x", json{{"arguments", {{"k", "v"}}}}))),
+              std::vector<std::string>{"a"});
+}
+
+TEST_P(PerRevision, TheCompletionsCapabilityIsDeclaredExactlyWhenACompleterIsRegistered) {
+    const std::string revision = GetParam();
+    ASSERT_EQ(has_completions_capability.size(), profile::builtin_revisions().size());
+    {
+        neomcp::Server server(named("none"));
+        server.prompt<ft::TwoArgs>("two", "d", [](const ft::TwoArgs&) { return std::string(); });
+        Client client(server, revision);
+        EXPECT_FALSE(client.capabilities().contains("completions")) << "a prompt alone declares none";
+        EXPECT_EQ(error_code_of(client.ask("completion/complete", complete_params(prompt_ref("two"), "arg1", "x"))), -32601);
+    }
+    {
+        neomcp::Server server(named("some"));
+        server.prompt<ft::TwoArgs>("two", "d", [](const ft::TwoArgs&) { return std::string(); })
+            .complete("arg1", [](std::string_view) { return std::vector<std::string>{}; });
+        Client client(server, revision);
+        // The schema of 2024-11-05 has no `completions` member, so it is not written there; the method is served.
+        EXPECT_EQ(client.capabilities().contains("completions"), has_completions_capability.at(revision))
+            << client.capabilities().dump();
+        EXPECT_TRUE(client.ask("completion/complete", complete_params(prompt_ref("two"), "arg1", "x")).contains("result"));
+    }
+}
+
+TEST(Completion, RegistrationRefusalsNameTheArgument) {
+    neomcp::Server server(named("completion"));
+    const auto prompt = server.prompt<ft::TwoArgs>("two", "d", [](const ft::TwoArgs&) { return std::string(); });
+    const auto tpl = server.resource_template<ft::FileParams>("f://{path}", "T", [](const ft::FileParams&) { return std::string(); });
+    const auto nothing = [](std::string_view) { return std::vector<std::string>{}; };
+    const auto refused = [&](auto registration, const std::string& part) {
+        try {
+            registration();
+            ADD_FAILURE() << "expected a refusal naming " << part;
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find(part), std::string::npos) << error.what();
+        }
+    };
+    refused([&] { prompt.complete("nonexistent", nothing); }, "'nonexistent'");
+    refused([&] { tpl.complete("nonexistent", nothing); }, "'nonexistent'");
+    prompt.complete("arg1", nothing);
+    tpl.complete("path", nothing);
+    refused([&] { prompt.complete("arg1", nothing); }, "'arg1'");
+    refused([&] { tpl.complete("path", nothing); }, "'path'");
+
+    Client client(server, modern_revision);
+    static_cast<void>(client.ask("prompts/list"));
+    EXPECT_THROW(prompt.complete("arg2", nothing), std::logic_error);
+    EXPECT_THROW(tpl.complete("path", nothing), std::logic_error);
+}
+
+TEST(Completion, ACancelledCompleterSeesStopAndTwoRunAtOnce) {
+    Event entered;
+    Event observed;
+    Meeting meeting(2);
+    std::atomic<int> failures{0};
+    neomcp::Server server(named("completion"));
+    server.prompt<ft::TwoArgs>("two", "d", [](const ft::TwoArgs&) { return std::string(); })
+        .complete("arg1",
+                  [&](std::string_view, const std::map<std::string, std::string>&, neomcp::Context& context) {
+                      entered.set();
+                      Event never;
+                      static_cast<void>(never.wait(context.stop_token()));
+                      if (context.cancelled()) observed.set();
+                      return std::vector<std::string>{};
+                  })
+        .complete("arg2", [&](std::string_view) {
+            if (!meeting.arrive(patience)) ++failures;
+            return std::vector<std::string>{"x"};
+        });
+    server.resource_template<ft::FileParams>("f://{path}", "T", [](const ft::FileParams&) { return std::string(); })
+        .complete("path", [&](std::string_view) -> asio::awaitable<std::vector<std::string>> {
+            if (!meeting.arrive(patience)) ++failures;
+            co_return std::vector<std::string>{"y"};
+        });
+    Client client(server, modern_revision);
+    client.peer.notify(client.message("c1", "completion/complete", complete_params(prompt_ref("two"), "arg1", "")));
+    ASSERT_TRUE(entered.wait(patience));
+    client.peer.notify(cancelled("c1"));
+    EXPECT_TRUE(observed.wait(patience));
+
+    client.peer.notify(client.message("a", "completion/complete", complete_params(prompt_ref("two"), "arg2", "")));
+    client.peer.notify(client.message("b", "completion/complete", complete_params(resource_ref("f://{path}"), "path", "")));
+    ASSERT_TRUE(client.peer.await_response("a", patience));
+    ASSERT_TRUE(client.peer.await_response("b", patience));
+    EXPECT_EQ(failures.load(), 0);
+}
+
 }  // namespace

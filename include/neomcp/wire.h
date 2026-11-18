@@ -47,6 +47,9 @@ json to_wire(const PromptDefinition& prompt, const profile::Profile& profile);
 json to_wire(const PromptMessage& message, const profile::Profile& profile);
 // Type `GetPromptResult`. Members the protocol engine adds (`resultType`) are not written here.
 json to_wire(const PromptResult& result, const profile::Profile& profile);
+// Type `CompleteResult`, with at most max_completion_values values (see CompletionResult). Members the protocol
+// engine adds (`resultType`) are not written here.
+json to_wire(const CompletionResult& result, const profile::Profile& profile);
 // Type `CallToolResult`, its content blocks as above. Members the protocol engine adds (such as `resultType`) are
 // not part of the model and are not written here.
 json to_wire(const ToolResult& result, const profile::Profile& profile);
