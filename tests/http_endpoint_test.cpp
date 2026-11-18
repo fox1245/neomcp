@@ -451,7 +451,8 @@ TEST(HttpEndpointTimer, RunsJobsInTheOrderOfTheirTimesAndDropsCancelledOnes) {
     const auto now = neomcp::http::detail::Timer::Clock::now();
     timer.schedule(now + 60ms, [&] { ran.push(3); });
     timer.schedule(now + 20ms, [&] { ran.push(1); });
-    const auto dropped = timer.schedule(now + 30ms, [&] { ran.push(99); });
+    // Far in the future, so that only the cancellation can keep it from running, however slow the machine.
+    const auto dropped = timer.schedule(now + std::chrono::hours(1), [&] { ran.push(99); });
     timer.schedule(now + 40ms, [&] { ran.push(2); });
     timer.cancel(dropped);
     EXPECT_EQ(ran.pop(), 1);
@@ -1055,8 +1056,9 @@ bool wait_for_sessions(neomcp::HttpServer& http, std::size_t count) {
 
 TEST(HttpEndpointSessions, AnIdleSessionEndsAndAnOpenStreamKeepsItAlive) {
     neomcp::HttpServerOptions options = quick_options();
-    // Long enough for the GET to arrive on a loaded machine before the session it names is idle that long.
-    options.endpoint.session_idle_timeout = 500ms;
+    // A margin, not an event: the GET must arrive before the session it names has been idle this long, which takes a
+    // few milliseconds even in an instrumented build on a loaded machine.
+    options.endpoint.session_idle_timeout = 1500ms;
     Harness harness(options);
     const std::string kept = open_session(harness.port);
     {

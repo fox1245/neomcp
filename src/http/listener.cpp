@@ -291,7 +291,9 @@ void Listener::Impl::handle(const httplib::Request& incoming, httplib::Response&
     // answer settles the request (the handler is told through the responder, with no lock held here), and an answer
     // that arrives later is dropped.
     std::optional<Response> settled;
-    while (!(settled = exchange->wait_for(options.disconnect_poll_interval))) {
+    for (;;) {
+        settled = exchange->wait_for(options.disconnect_poll_interval);
+        if (settled) break;
         if (incoming.is_connection_closed() && watch.report_disconnect()) {
             exchange->deliver(make_response(unavailable_status));  // nobody reads it; it only ends the wait
         }
