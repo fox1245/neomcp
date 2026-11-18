@@ -490,6 +490,7 @@ TEST(Creation, BuiltinRegistryImplementsEveryDeclaredName) {
         {profile::Slot::open, neomcp::MechanismSlot::open},
         {profile::Slot::state, neomcp::MechanismSlot::state},
         {profile::Slot::server_input, neomcp::MechanismSlot::server_input},
+        {profile::Slot::change_feed, neomcp::MechanismSlot::change_feed},
         {profile::Slot::batch, neomcp::MechanismSlot::batch}};
     for (const auto& [declared, slot] : slots) {
         for (const auto name : profile::declared_mechanisms(declared)) {

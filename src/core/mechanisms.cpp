@@ -3,6 +3,7 @@
 // whatever a revision decides about them (which keys are required, which methods exist) is read from the profile.
 #include "neomcp/mechanism.h"
 
+#include <algorithm>
 #include <utility>
 
 namespace neomcp {
@@ -14,6 +15,7 @@ std::string_view to_string(MechanismSlot slot) noexcept {
         case MechanismSlot::batch: return "batch";
         case MechanismSlot::cancel: return "cancel";
         case MechanismSlot::server_input: return "server_input";
+        case MechanismSlot::change_feed: return "change_feed";
     }
     return {};
 }
@@ -356,6 +358,201 @@ public:
     }
 };
 
+// ---- change_feed
+
+// What both mechanisms write about a change: the notifications every revision names the same way.
+class FeedNotifications {
+public:
+    static constexpr std::string_view tools_changed = "notifications/tools/list_changed";
+    static constexpr std::string_view prompts_changed = "notifications/prompts/list_changed";
+    static constexpr std::string_view resources_changed = "notifications/resources/list_changed";
+    static constexpr std::string_view resource_updated = "notifications/resources/updated";
+
+    static FeedMessage of(const Change& change) {
+        FeedMessage message;
+        switch (change.kind) {
+            case ChangeKind::tools_list: message.method = tools_changed; break;
+            case ChangeKind::prompts_list: message.method = prompts_changed; break;
+            case ChangeKind::resources_list: message.method = resources_changed; break;
+            case ChangeKind::resource_updated:
+                message.method = resource_updated;
+                message.params["uri"] = change.uri;
+                break;
+        }
+        return message;
+    }
+
+    static std::variant<FeedRequest, RequestError> uri_request(const Message& request, FeedRequest::Action action) {
+        const json* uri = member(request.params, "uri");
+        const auto* text = uri == nullptr ? nullptr : uri->get_ptr<const std::string*>();
+        if (text == nullptr) return invalid_params("Invalid params: params.uri must be a string");
+        FeedRequest asked;
+        asked.action = action;
+        asked.uri = *text;
+        return asked;
+    }
+};
+
+// `connection_notifications`: the notifications of a change go to the connection a handshake opened, once the client
+// said with `notifications/initialized` that it is ready; resources/subscribe and resources/unsubscribe add a URI to
+// the resources the connection watches and remove it.
+class ConnectionNotifications final : public ChangeFeedMechanism {
+public:
+    static constexpr std::string_view subscribe_method = "resources/subscribe";
+    static constexpr std::string_view unsubscribe_method = "resources/unsubscribe";
+    static constexpr std::string_view ready_method = "notifications/initialized";
+
+    std::optional<std::string> check(const profile::Profile& profile) const override {
+        const profile::Message* ready = profile.notification(ready_method);
+        if (ready == nullptr || !ready->from_client) {
+            return "the profile has no client notification " + std::string(ready_method);
+        }
+        return std::nullopt;
+    }
+
+    FeedDelivery delivery() const override { return FeedDelivery::connection; }
+
+    bool serves(std::string_view method) const override {
+        return method == subscribe_method || method == unsubscribe_method;
+    }
+
+    std::variant<FeedRequest, RequestError> read(const Message& request) const override {
+        return FeedNotifications::uri_request(
+            request, request.method == subscribe_method ? FeedRequest::Action::watch : FeedRequest::Action::unwatch);
+    }
+
+    bool readies(const Message& notification) const override { return notification.method == ready_method; }
+
+    FeedMessage notification(const Change& change) const override { return FeedNotifications::of(change); }
+
+    FeedMessage acknowledgement(const ChangeFilter&) const override { return {}; }
+    void tag(json&, const RequestId&) const override {}
+    std::optional<FeedMessage> ending_notice(const RequestId&) const override { return std::nullopt; }
+    json ending_result() const override { return json::object(); }
+    std::string_view ending_result_type() const override { return {}; }
+};
+
+// `subscriptions_listen`: subscriptions/listen opens a subscription whose answer is a stream. Its first message is the
+// acknowledgement, which names what of the request's filter the server honours; every message of it carries the
+// subscription's id (the listen request's id) in `_meta`; the server ends it with notifications/cancelled naming the
+// listen request and then a result that marks the end as graceful.
+class SubscriptionsListen final : public ChangeFeedMechanism {
+public:
+    static constexpr std::string_view listen_method = "subscriptions/listen";
+    static constexpr std::string_view acknowledged_method = "notifications/subscriptions/acknowledged";
+    static constexpr std::string_view cancelled_method = "notifications/cancelled";
+    static constexpr std::string_view subscription_key = "io.modelcontextprotocol/subscriptionId";
+    static constexpr std::string_view notification_meta_type = "NotificationMetaObject";
+    static constexpr std::string_view filter_member = "notifications";
+    static constexpr std::string_view filter_type = "SubscriptionFilter";
+    static constexpr std::string_view result_type = "SubscriptionsListenResult";
+    static constexpr std::string_view tools_member = "toolsListChanged";
+    static constexpr std::string_view prompts_member = "promptsListChanged";
+    static constexpr std::string_view resources_member = "resourcesListChanged";
+    static constexpr std::string_view updates_member = "resourceSubscriptions";
+    static constexpr std::string_view ending_reason = "The server ended the subscription";
+
+    std::optional<std::string> check(const profile::Profile& profile) const override {
+        const profile::Message* listen = profile.request(listen_method);
+        if (listen == nullptr || !listen->from_client) {
+            return "the profile has no client request " + std::string(listen_method);
+        }
+        const profile::Message* acknowledged = profile.notification(acknowledged_method);
+        if (acknowledged == nullptr || !acknowledged->from_server) {
+            return "the profile has no server notification " + std::string(acknowledged_method);
+        }
+        const profile::Type* meta = profile.type(notification_meta_type);
+        if (meta == nullptr || !meta->has_property(subscription_key)) {
+            return "the profile's " + std::string(notification_meta_type) + " has no member " +
+                   std::string(subscription_key);
+        }
+        for (const auto name : {filter_type, result_type}) {
+            if (profile.type(name) == nullptr) return "the profile has no type " + std::string(name);
+        }
+        return std::nullopt;
+    }
+
+    FeedDelivery delivery() const override { return FeedDelivery::subscription; }
+
+    bool serves(std::string_view method) const override { return method == listen_method; }
+
+    std::variant<FeedRequest, RequestError> read(const Message& request) const override {
+        const json* filter = member(request.params, filter_member);
+        if (filter == nullptr || !filter->is_object()) {
+            return invalid_params("Invalid params: params." + std::string(filter_member) + " must be an object");
+        }
+        FeedRequest asked;
+        asked.action = FeedRequest::Action::listen;
+        const auto flag = [&](std::string_view name, bool& out) -> std::optional<RequestError> {
+            const json* value = member(*filter, name);
+            if (value == nullptr) return std::nullopt;
+            if (!value->is_boolean()) {
+                return invalid_params("Invalid params: params." + std::string(filter_member) + "." + std::string(name) +
+                                      " must be a boolean");
+            }
+            out = value->get<bool>();
+            return std::nullopt;
+        };
+        if (auto error = flag(tools_member, asked.filter.tools_list)) return *error;
+        if (auto error = flag(prompts_member, asked.filter.prompts_list)) return *error;
+        if (auto error = flag(resources_member, asked.filter.resources_list)) return *error;
+        if (const json* uris = member(*filter, updates_member)) {
+            const auto* list = uris->get_ptr<const json::array_t*>();
+            if (list == nullptr) {
+                return invalid_params("Invalid params: params." + std::string(filter_member) + "." +
+                                      std::string(updates_member) + " must be an array of strings");
+            }
+            for (const json& uri : *list) {
+                const auto* text = uri.get_ptr<const std::string*>();
+                if (text == nullptr) {
+                    return invalid_params("Invalid params: params." + std::string(filter_member) + "." +
+                                          std::string(updates_member) + " must be an array of strings");
+                }
+                auto& kept = asked.filter.resources;
+                if (std::find(kept.begin(), kept.end(), *text) == kept.end()) kept.push_back(*text);
+            }
+        }
+        return asked;
+    }
+
+    bool readies(const Message&) const override { return false; }
+
+    FeedMessage notification(const Change& change) const override { return FeedNotifications::of(change); }
+
+    FeedMessage acknowledgement(const ChangeFilter& honoured) const override {
+        json filter = json::object();
+        if (honoured.tools_list) filter[std::string(tools_member)] = true;
+        if (honoured.prompts_list) filter[std::string(prompts_member)] = true;
+        if (honoured.resources_list) filter[std::string(resources_member)] = true;
+        if (!honoured.resources.empty()) {
+            json uris = json::array();
+            for (const auto& uri : honoured.resources) uris.push_back(uri);
+            filter[std::string(updates_member)] = std::move(uris);
+        }
+        FeedMessage message;
+        message.method = acknowledged_method;
+        message.params[std::string(filter_member)] = std::move(filter);
+        return message;
+    }
+
+    void tag(json& members, const RequestId& id) const override {
+        json& meta = members["_meta"];
+        if (!meta.is_object()) meta = json::object();
+        meta[std::string(subscription_key)] = id.to_json();
+    }
+
+    std::optional<FeedMessage> ending_notice(const RequestId& id) const override {
+        FeedMessage message;
+        message.method = cancelled_method;
+        message.params["requestId"] = id.to_json();
+        message.params["reason"] = std::string(ending_reason);
+        return message;
+    }
+
+    json ending_result() const override { return json::object(); }
+    std::string_view ending_result_type() const override { return result_type; }
+};
+
 template <typename Interface, typename Implementation>
 MechanismRegistry::Factory<Interface> factory() {
     return [] { return std::unique_ptr<Interface>(std::make_unique<Implementation>()); };
@@ -373,6 +570,8 @@ MechanismRegistry make_builtin() {
     registry.add_cancel("close_response_stream", factory<CancelMechanism, CloseResponseStream>());
     registry.add_input("input_required_result", factory<InputMechanism, InputRequiredResult>());
     registry.add_input("server_request", factory<InputMechanism, ServerRequest>());
+    registry.add_feed("connection_notifications", factory<ChangeFeedMechanism, ConnectionNotifications>());
+    registry.add_feed("subscriptions_listen", factory<ChangeFeedMechanism, SubscriptionsListen>());
     return registry;
 }
 
@@ -408,6 +607,9 @@ void MechanismRegistry::add_cancel(std::string name, Factory<CancelMechanism> fa
 void MechanismRegistry::add_input(std::string name, Factory<InputMechanism> factory) {
     put(MechanismSlot::server_input, std::move(name), std::move(factory));
 }
+void MechanismRegistry::add_feed(std::string name, Factory<ChangeFeedMechanism> factory) {
+    put(MechanismSlot::change_feed, std::move(name), std::move(factory));
+}
 
 bool MechanismRegistry::remove(MechanismSlot slot, std::string_view name) {
     return factories_.erase(Key(slot, std::string(name))) > 0;
@@ -439,6 +641,9 @@ std::unique_ptr<CancelMechanism> MechanismRegistry::make_cancel(std::string_view
 }
 std::unique_ptr<InputMechanism> MechanismRegistry::make_input(std::string_view name) const {
     return make<InputMechanism>(MechanismSlot::server_input, name);
+}
+std::unique_ptr<ChangeFeedMechanism> MechanismRegistry::make_feed(std::string_view name) const {
+    return make<ChangeFeedMechanism>(MechanismSlot::change_feed, name);
 }
 
 const MechanismRegistry& builtin_mechanisms() {

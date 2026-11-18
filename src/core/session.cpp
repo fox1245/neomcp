@@ -49,6 +49,7 @@
 #include <initializer_list>
 #include <map>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <stop_token>
 #include <thread>
@@ -108,6 +109,8 @@ constexpr std::string_view prompt_reference_type = "ref/prompt";
 constexpr std::string_view resource_reference_type = "ref/resource";
 constexpr std::string_view missing_capability_error = "missing_required_client_capability";
 constexpr std::string_view required_capabilities_member = "requiredCapabilities";
+// The reason in the data of a request refused because a bound of the session is reached.
+constexpr std::string_view limit_reason = "limit";
 // The answer to every refused request state, whatever the cause: the text other implementations use, so that a
 // client sees the same refusal from any server.
 constexpr std::string_view invalid_state_message = "Invalid or expired requestState";
@@ -177,6 +180,7 @@ struct Served {
     const BatchMechanism* batch = nullptr;
     const CancelMechanism* cancel = nullptr;  // the one the profile names for the session's transport
     const InputMechanism* input = nullptr;
+    const ChangeFeedMechanism* feed = nullptr;
     InvalidArguments invalid_arguments = InvalidArguments::invalid_params_error;
     // What the profile's entry for the transport says about headers; views into the profile.
     std::span<const profile::RequestHeader> request_headers;
@@ -341,6 +345,10 @@ public:
                   std::optional<std::string> message);
     void log(const std::shared_ptr<CallState>& call, LogLevel level, json data, std::optional<std::string> logger);
 
+    // ---- the host's changes (through the session's ChangeListener)
+    void on_change(const Change& change);
+    void on_feed_end();
+
     std::span<const profile::ProfilePtr> profiles() const noexcept { return profiles_; }
 
 private:
@@ -354,6 +362,18 @@ private:
         const Served* served = nullptr;
         ClientIdentity client;
         LogLevel log_level = LogLevel::info;
+        // Under a change feed that delivers to the connection: whether the client said it is ready, and the
+        // resources whose updates it watches.
+        bool ready = false;
+        std::set<std::string, std::less<>> watched;
+    };
+
+    // Where the session stands with the host's changes. Only the reading thread registers.
+    enum class Watch {
+        none,         // not registered
+        registering,  // the reading thread is registering
+        registered,
+        ended         // the host takes no registration, or stopped reporting: never registered again
     };
 
     using Handler = std::optional<Answer> (SessionCore::*)(Message&, const Served&, Origin&, const Place&);
@@ -386,6 +406,16 @@ private:
     std::optional<Answer> on_prompts_get(Message& request, const Served& served, Origin& origin, const Place& place);
     std::optional<Answer> on_set_level(Message& request, const Served& served, Origin& origin, const Place&);
     static const std::map<std::string, Handler, std::less<>>& handlers();
+
+    // ---- the change feed
+    std::optional<Answer> on_feed(Message& request, const Served& served, Origin& origin, const Place& place);
+    std::optional<Answer> on_watch(const Message& request, const FeedRequest& asked, const Served& served,
+                                   const Origin& origin);
+    // Registers the session for the host's changes, once; false when the host takes no registration.
+    bool watch_host();
+    // The line of a notification of the feed under `served`; empty when the profile has no such notification.
+    std::optional<std::string> feed_line(const Served& served, FeedMessage message) const;
+    Answer limit_refusal(const RequestId& id, std::string message, const Served& served) const;
 
     // ---- headers
     Claims claims_of(std::span<const HeaderField> fields) const;
@@ -480,7 +510,10 @@ private:
     std::map<std::string, std::unique_ptr<BatchMechanism>, std::less<>> batches_;
     std::map<std::string, std::unique_ptr<CancelMechanism>, std::less<>> cancels_;
     std::map<std::string, std::unique_ptr<InputMechanism>, std::less<>> inputs_;
+    std::map<std::string, std::unique_ptr<ChangeFeedMechanism>, std::less<>> feeds_;
     std::optional<StateSealer> sealer_;  // present when a served revision's results carry sealed state
+    // What the session registers with the host for its changes; it holds the core weakly.
+    std::shared_ptr<ChangeListener> listener_;
 
     // Guarded by mutex_.
     mutable std::mutex mutex_;
@@ -505,6 +538,37 @@ private:
     };
     std::map<RequestId, Outgoing> outgoing_;
     std::uint64_t next_outgoing_ = 0;
+    Watch watch_ = Watch::none;
+    ChangeRegistration registration_;  // reset without the lock held
+};
+
+// The listener a session registers with its host: it holds the session weakly, so that a registration the host keeps
+// longer than the session reaches nothing.
+class FeedListener final : public ChangeListener {
+public:
+    explicit FeedListener(std::weak_ptr<SessionCore> core) : core_(std::move(core)) {}
+
+    void changed(const Change& change) override {
+        if (auto core = core_.lock()) {
+            try {
+                core->on_change(change);
+            } catch (...) {
+                // A change that cannot be written (no memory) is a change the client does not hear of.
+            }
+        }
+    }
+
+    void ended() override {
+        if (auto core = core_.lock()) {
+            try {
+                core->on_feed_end();
+            } catch (...) {
+            }
+        }
+    }
+
+private:
+    std::weak_ptr<SessionCore> core_;
 };
 
 CompletionState::~CompletionState() {
@@ -554,6 +618,7 @@ std::variant<std::shared_ptr<SessionCore>, CreateError> SessionCore::create(Sess
     if (options.max_message_bytes == 0) problem("max_message_bytes is zero");
     if (options.max_queued_notifications == 0) problem("max_queued_notifications is zero");
     if (options.max_input_rounds == 0) problem("max_input_rounds is zero");
+    if (options.max_watched_resources == 0) problem("max_watched_resources is zero");
     if (options.request_state_ttl <= std::chrono::seconds::zero()) problem("request_state_ttl is not positive");
     for (const auto& key : options.request_state_keys) {
         if (key.size() < min_state_key_size) {
@@ -612,6 +677,20 @@ std::variant<std::shared_ptr<SessionCore>, CreateError> SessionCore::create(Sess
         } else if (auto why = served.input->check(*profile)) {
             problem("revision " + revision + ": the server_input mechanism '" + std::string(input_name) +
                     "' cannot serve it: " + *why);
+        }
+        const std::string_view feed_name = profile->mechanism(profile::Slot::change_feed);
+        served.feed = find_or_make(core->feeds_, feed_name,
+                                   [&](std::string_view name) { return registry.make_feed(name); });
+        if (served.feed == nullptr) {
+            missing(revision, MechanismSlot::change_feed, feed_name);
+        } else if (auto why = served.feed->check(*profile)) {
+            problem("revision " + revision + ": the change_feed mechanism '" + std::string(feed_name) +
+                    "' cannot serve it: " + *why);
+        } else if (served.feed->delivery() == FeedDelivery::connection && served.state != nullptr &&
+                   !served.state->keeps_connection()) {
+            problem("revision " + revision + ": the change_feed mechanism '" + std::string(feed_name) +
+                    "' delivers to the connection, which the state mechanism '" + std::string(state_name) +
+                    "' does not keep");
         }
         if (transport == profile::Transport::streamable_http) {
             const profile::StreamableHttpTransport& http = *profile->streamable_http();
@@ -673,6 +752,7 @@ std::variant<std::shared_ptr<SessionCore>, CreateError> SessionCore::create(Sess
     }
 
     if (!error.message.empty()) return error;
+    core->listener_ = std::make_shared<FeedListener>(core);
     return core;
 }
 
@@ -831,7 +911,21 @@ void SessionCore::on_notification(const Message& notification) {
             return;
         }
     }
-    // No other notification a client sends needs anything from this server.
+    // A client that says it is ready opens the notifications of its connection, where the change feed delivers there.
+    bool ready = false;
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        if (connection_ && !connection_->ready && connection_->served->feed->readies(notification)) {
+            const profile::Message* entry = connection_->served->profile->notification(notification.method);
+            ready = entry != nullptr && entry->from_client;
+            connection_->ready = ready;
+        }
+    }
+    if (!ready) return;  // no other notification a client sends needs anything from this server
+    const ChangeSupport reported = this->reported();
+    if (reported.tools_list || reported.prompts_list || reported.resources_list || reported.resource_updates) {
+        watch_host();
+    }
 }
 
 std::optional<Answer> SessionCore::on_request(Message request, const Place& place) {
@@ -1042,7 +1136,9 @@ std::optional<Answer> SessionCore::serve(Message request, const Served& served, 
     const profile::Message* entry = profile.request(request.method);
     const auto& table = handlers();
     const auto handler = table.find(request.method);
-    if (entry == nullptr || !entry->from_client || handler == table.end()) {
+    // The requests of the change feed are the mechanism's to name.
+    const bool feed = served.feed->serves(request.method);
+    if (entry == nullptr || !entry->from_client || (!feed && handler == table.end())) {
         return Answer{make_error(id, error_code::method_not_found, "Method not found: " + request.method),
                       RefusalReason::method_not_found, served.profile};
     }
@@ -1057,6 +1153,7 @@ std::optional<Answer> SessionCore::serve(Message request, const Served& served, 
                           RefusalReason::none, served.profile};
         }
     }
+    if (feed) return on_feed(request, served, origin, place);
     return (this->*(handler->second))(request, served, origin, place);
 }
 
@@ -1579,6 +1676,163 @@ std::optional<Answer> SessionCore::on_set_level(Message& request, const Served& 
     json body = json::object();
     finish_result(body, "EmptyResult", *served.profile);
     return served_answer(make_result(id, std::move(body)), served);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The change feed
+
+std::optional<Answer> SessionCore::on_feed(Message& request, const Served& served, Origin& origin, const Place&) {
+    auto read = served.feed->read(request);
+    if (const auto* error = std::get_if<RequestError>(&read)) {
+        return served_answer(make_error(*request.id, error->code, error->message, error->data), served);
+    }
+    const FeedRequest& asked = std::get<FeedRequest>(read);
+    switch (asked.action) {
+        case FeedRequest::Action::watch:
+        case FeedRequest::Action::unwatch: return on_watch(request, asked, served, origin);
+        case FeedRequest::Action::listen: break;
+    }
+    return method_not_found(request, served);
+}
+
+std::optional<Answer> SessionCore::on_watch(const Message& request, const FeedRequest& asked, const Served& served,
+                                            const Origin& origin) {
+    const RequestId& id = *request.id;
+    // Watching a resource is offered where the session declared its updates, on a connection the feed delivers to.
+    ResourceHost* resources = host_.resource_host();
+    if (served.feed->delivery() != FeedDelivery::connection || !origin.connection || resources == nullptr ||
+        !reported().resource_updates) {
+        return method_not_found(request, served);
+    }
+    if (asked.action == FeedRequest::Action::watch) {
+        // A URI that names nothing the host offers is refused as a read of it would be: the pages require a server
+        // to validate every resource URI and name the error for a resource that does not exist.
+        bool offered = false;
+        try {
+            offered = resources->offers(asked.uri);
+        } catch (...) {
+            return served_answer(
+                make_error(id, error_code::internal_error, "Internal error: the resource could not be found"), served);
+        }
+        if (!offered) {
+            const int code = served.profile->error_code(resource_not_found_error).value_or(error_code::invalid_params);
+            json data = json::object();
+            data["uri"] = asked.uri;
+            return served_answer(make_error(id, code, "Resource not found: " + asked.uri, std::move(data)), served);
+        }
+    }
+    std::size_t full = 0;  // the bound, when the URI would exceed it
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        if (connection_) {
+            auto& watched = connection_->watched;
+            if (asked.action == FeedRequest::Action::unwatch) {
+                // Removing a URI the connection does not watch changes nothing, and is not an error.
+                const auto found = watched.find(asked.uri);
+                if (found != watched.end()) watched.erase(found);
+            } else if (watched.find(asked.uri) == watched.end()) {
+                if (watched.size() >= options_.max_watched_resources) {
+                    full = options_.max_watched_resources;
+                } else {
+                    watched.insert(asked.uri);
+                }
+            }
+        }
+    }
+    if (full != 0) {
+        return limit_refusal(id,
+                             "Internal error: the connection watches " + std::to_string(full) +
+                                 " resources already, the most it may",
+                             served);
+    }
+    json body = json::object();
+    finish_result(body, "EmptyResult", *served.profile);
+    return served_answer(make_result(id, std::move(body)), served);
+}
+
+Answer SessionCore::limit_refusal(const RequestId& id, std::string message, const Served& served) const {
+    json data = json::object();
+    data["reason"] = std::string(limit_reason);
+    return served_answer(make_error(id, error_code::internal_error, std::move(message), std::move(data)), served);
+}
+
+bool SessionCore::watch_host() {
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        if (closed_ || watch_ == Watch::ended) return false;
+        if (watch_ == Watch::registered) return true;
+        watch_ = Watch::registering;
+    }
+    ChangeRegistration registration;
+    try {
+        registration = host_.watch(listener_);
+    } catch (...) {
+        // A host that cannot register the session reports nothing to it.
+    }
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        // The session closed, or the host ended its feed, while it registered.
+        const bool keep = registration && !closed_ && watch_ == Watch::registering;
+        if (watch_ == Watch::registering) watch_ = keep ? Watch::registered : Watch::ended;
+        if (keep) {
+            registration_ = std::move(registration);
+            return true;
+        }
+    }
+    registration.reset();
+    return false;
+}
+
+std::optional<std::string> SessionCore::feed_line(const Served& served, FeedMessage message) const {
+    const profile::Profile& profile = *served.profile;
+    const profile::Message* entry = profile.notification(message.method);
+    if (entry == nullptr || !entry->from_server) return std::nullopt;
+    if (entry->params) keep_members(message.params, *entry->params, profile);
+    json params = message.params.empty() ? json(nullptr) : std::move(message.params);
+    return serialize(make_notification(entry->method, std::move(params)));
+}
+
+void SessionCore::on_change(const Change& change) {
+    // Only the kinds the session declared reach its client.
+    const ChangeSupport reported = this->reported();
+    const bool declared = [&] {
+        switch (change.kind) {
+            case ChangeKind::tools_list: return reported.tools_list;
+            case ChangeKind::prompts_list: return reported.prompts_list;
+            case ChangeKind::resources_list: return reported.resources_list;
+            case ChangeKind::resource_updated: return reported.resource_updates;
+        }
+        return false;
+    }();
+    if (!declared) return;
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (closed_ || watch_ != Watch::registered) return;
+    bool queued = false;
+    // The connection, once its client is ready; an update only when the connection watches the resource. Like a
+    // progress notification, a change notification is dropped while the queue is full.
+    if (connection_ && connection_->ready && connection_->served->feed->delivery() == FeedDelivery::connection &&
+        (change.kind != ChangeKind::resource_updated ||
+         connection_->watched.find(change.uri) != connection_->watched.end()) &&
+        queue_.size() < options_.max_queued_notifications) {
+        const Served& served = *connection_->served;
+        if (auto line = feed_line(served, served.feed->notification(change))) {
+            queued = enqueue(Queued{make_output(std::move(*line), OutputKind::notification, false, RefusalReason::none,
+                                                served.profile),
+                                    nullptr, nullptr});
+        }
+    }
+    if (queued) drain(lock, Writer::host);
+}
+
+void SessionCore::on_feed_end() {
+    ChangeRegistration registration;
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        watch_ = Watch::ended;
+        registration = std::move(registration_);
+    }
+    // The host has let the listener go already; releasing the registration again changes nothing there.
+    registration.reset();
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -2460,10 +2714,12 @@ void SessionCore::abandon(UnitId number) {
 void SessionCore::close() {
     std::vector<std::shared_ptr<CallState>> calls;
     std::vector<std::shared_ptr<WaitState>> waits;
+    ChangeRegistration registration;  // released without the lock: the host takes its own
     std::unique_lock<std::mutex> lock(mutex_);
     const bool inside_sink = drainer_ == std::this_thread::get_id();
     if (!closed_) {
         closed_ = true;
+        registration = std::move(registration_);
         queue_.clear();
         for (auto& entry : in_flight_) {
             entry.second->active = false;
@@ -2489,6 +2745,7 @@ void SessionCore::close() {
         units_.clear();
     }
     lock.unlock();
+    registration.reset();
     for (const auto& wait : waits) wait->ended.request_stop();
     for (const auto& call : calls) call->stop.request_stop();
     lock.lock();

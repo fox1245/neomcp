@@ -2,9 +2,8 @@
 //
 // A profile names one mechanism per slot (profile.h); a session asks the mechanism of the slot, never the revision
 // string or the era, how to behave. The registry maps (slot, name) to a factory; the built-in registry has an
-// implementation for every name the library declares for the slots a session needs (open, state, server_input, batch
-// and the cancellation mechanism of a transport). The slot change_feed is declared by the profile library only;
-// nothing here needs it yet.
+// implementation for every name the library declares for the slots (open, state, server_input, change_feed, batch and
+// the cancellation mechanism of a transport).
 #pragma once
 
 #include <functional>
@@ -18,6 +17,7 @@
 #include <variant>
 #include <vector>
 
+#include "neomcp/change.h"
 #include "neomcp/json.h"
 #include "neomcp/jsonrpc.h"
 #include "neomcp/model.h"
@@ -158,8 +158,68 @@ public:
     virtual json asking_request(const RequestId& id, std::string method, json params) const = 0;
 };
 
+// How change notifications reach a client.
+enum class FeedDelivery {
+    // As notifications of the connection a handshake opened, once the client said it is ready; the client watches
+    // resources with requests that add and remove a URI.
+    connection,
+    // On subscriptions: a request the client sends opens one, its answer is a stream of the notifications it asked
+    // for, and it ends when the client or the server ends it.
+    subscription
+};
+
+// What a request of a change feed asks.
+struct FeedRequest {
+    enum class Action {
+        watch,    // connection: be told of the updates of `uri`
+        unwatch,  // connection: no longer
+        listen    // subscription: open one that tells of what `filter` names
+    };
+    Action action = Action::watch;
+    std::string uri;
+    ChangeFilter filter;
+};
+
+// A notification a change feed writes: its method, and its params (an object; empty when it has none).
+struct FeedMessage {
+    std::string method;
+    json params = json::object();
+};
+
+// Slot `change_feed`: how a server tells its clients that what it offers changed.
+class ChangeFeedMechanism {
+public:
+    virtual ~ChangeFeedMechanism() = default;
+
+    // Why the mechanism cannot serve the profile; empty when it can.
+    virtual std::optional<std::string> check(const profile::Profile& profile) const = 0;
+    virtual FeedDelivery delivery() const = 0;
+
+    // Whether a client request of `method` is one of the mechanism's, and what such a request asks (or why it is
+    // malformed). The session asks only about requests the profile has.
+    virtual bool serves(std::string_view method) const = 0;
+    virtual std::variant<FeedRequest, RequestError> read(const Message& request) const = 0;
+
+    // delivery connection: whether a client notification says the client is ready for the connection's
+    // notifications. delivery subscription: always false.
+    virtual bool readies(const Message& notification) const = 0;
+
+    // The notification that tells of a change.
+    virtual FeedMessage notification(const Change& change) const = 0;
+
+    // delivery subscription. The first message of a subscription, which tells what of the request is honoured; the
+    // members that mark a message of the subscription `id` (the params of a notification, or a result); the notice
+    // of a subscription the server ends, empty when the mechanism sends none; the result that ends it, and the name
+    // of that result's type for the profile's filters. delivery connection: empty values.
+    virtual FeedMessage acknowledgement(const ChangeFilter& honoured) const = 0;
+    virtual void tag(json& members, const RequestId& id) const = 0;
+    virtual std::optional<FeedMessage> ending_notice(const RequestId& id) const = 0;
+    virtual json ending_result() const = 0;
+    virtual std::string_view ending_result_type() const = 0;
+};
+
 // The slots of the registry.
-enum class MechanismSlot { open, state, batch, cancel, server_input };
+enum class MechanismSlot { open, state, batch, cancel, server_input, change_feed };
 std::string_view to_string(MechanismSlot slot) noexcept;
 
 class MechanismRegistry {
@@ -173,6 +233,7 @@ public:
     void add_batch(std::string name, Factory<BatchMechanism> factory);
     void add_cancel(std::string name, Factory<CancelMechanism> factory);
     void add_input(std::string name, Factory<InputMechanism> factory);
+    void add_feed(std::string name, Factory<ChangeFeedMechanism> factory);
     // Removes a name; returns whether it was there.
     bool remove(MechanismSlot slot, std::string_view name);
 
@@ -186,11 +247,12 @@ public:
     std::unique_ptr<BatchMechanism> make_batch(std::string_view name) const;
     std::unique_ptr<CancelMechanism> make_cancel(std::string_view name) const;
     std::unique_ptr<InputMechanism> make_input(std::string_view name) const;
+    std::unique_ptr<ChangeFeedMechanism> make_feed(std::string_view name) const;
 
 private:
     using Key = std::pair<MechanismSlot, std::string>;
     using AnyFactory = std::variant<Factory<OpenMechanism>, Factory<StateMechanism>, Factory<BatchMechanism>,
-                                    Factory<CancelMechanism>, Factory<InputMechanism>>;
+                                    Factory<CancelMechanism>, Factory<InputMechanism>, Factory<ChangeFeedMechanism>>;
 
     template <typename Interface>
     void put(MechanismSlot slot, std::string name, Factory<Interface> factory);
@@ -200,8 +262,8 @@ private:
     std::map<Key, AnyFactory> factories_;
 };
 
-// The mechanisms of the library: every name profile::declared_mechanisms declares for open, state, server_input and
-// batch, and every name profile::declared_cancel declares for a transport.
+// The mechanisms of the library: every name profile::declared_mechanisms declares for open, state, server_input,
+// change_feed and batch, and every name profile::declared_cancel declares for a transport.
 const MechanismRegistry& builtin_mechanisms();
 
 }  // namespace neomcp

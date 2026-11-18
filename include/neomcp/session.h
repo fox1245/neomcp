@@ -213,6 +213,12 @@ struct SessionOptions {
     // so that nothing about the server's internals reaches the client.
     bool expose_error_details = false;
 
+    // ---- Change notifications (ToolHost::change_support)
+
+    // Under the mechanism that tells the connection (connection_notifications): the resources a connection may watch
+    // at once; one more is refused. Zero is an error. Default 256.
+    std::size_t max_watched_resources = 256;
+
     // Runs before every tools/call; empty: arguments are not checked.
     ArgumentCheck check_arguments;
 

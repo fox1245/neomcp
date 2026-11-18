@@ -21,6 +21,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -28,6 +29,7 @@
 #include "neomcp/change.h"
 #include "neomcp/feature_host.h"
 #include "neomcp/jsonrpc.h"
+#include "neomcp/mechanism.h"
 #include "neomcp/profile.h"
 #include "neomcp/session.h"
 #include "neomcp/testing/peer.h"
@@ -49,6 +51,26 @@ profile::ProfilePtr builtin(const std::string& revision) {
     if (!found) throw std::logic_error("no built-in profile " + revision);
     return found;
 }
+
+class Counter {
+public:
+    void add() {
+        {
+            std::lock_guard lock(mutex_);
+            ++value_;
+        }
+        changed_.notify_all();
+    }
+    bool wait_for_at_least(int n) {
+        std::unique_lock lock(mutex_);
+        return changed_.wait_for(lock, patience, [&] { return value_ >= n; });
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    int value_ = 0;
+};
 
 neomcp::ToolResult text_result(std::string text) {
     neomcp::ToolResult result;
@@ -365,6 +387,167 @@ TEST_P(EveryRevision, OnlyTheKindsReportedAreDeclared) {
     EXPECT_EQ(capabilities.at("tools"), (json{{"listChanged", false}}));
     EXPECT_EQ(capabilities.at("prompts"), json::object());
     EXPECT_EQ(capabilities.at("resources"), (json{{"subscribe", true}}));
+}
+
+TEST(FeedMechanism, ARevisionWhoseChangeFeedHasNoImplementationIsNotServed) {
+    FeedHost host;
+    neomcp::MechanismRegistry registry = neomcp::builtin_mechanisms();
+    ASSERT_TRUE(registry.remove(neomcp::MechanismSlot::change_feed, "connection_notifications"));
+    neomcp::SessionOptions options = options_for(legacy_revision);
+    options.mechanisms = &registry;
+    auto made = neomcp::Session::create(std::move(options), host, [](std::string) {});
+    ASSERT_TRUE(std::holds_alternative<neomcp::CreateError>(made));
+    const auto& error = std::get<neomcp::CreateError>(made);
+    ASSERT_EQ(error.missing.size(), 1u) << error.message;
+    EXPECT_EQ(error.missing[0].slot, neomcp::MechanismSlot::change_feed);
+    EXPECT_EQ(error.missing[0].name, "connection_notifications");
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// connection_notifications (2025-11-25): notifications of the connection
+
+json notification(const std::string& method) { return json{{"jsonrpc", "2.0"}, {"method", method}}; }
+
+json updated(const std::string& uri) {
+    return json{{"jsonrpc", "2.0"}, {"method", "notifications/resources/updated"}, {"params", {{"uri", uri}}}};
+}
+
+TEST(ConnectionFeed, ListChangesReachTheConnectionOnceItsClientIsReady) {
+    FeedHost host;
+    const auto profile = builtin(legacy_revision);
+    Peer peer(host, options_for(legacy_revision));
+    ASSERT_TRUE(peer.request(Peer::initialize_request(*profile, 1), patience));
+    EXPECT_EQ(host.watchers(), 0u) << "no registration before the client is ready";
+    host.report(neomcp::ChangeKind::tools_list);  // reaches nobody
+    peer.notify(notification("notifications/initialized"));
+    EXPECT_EQ(host.watchers(), 1u);
+    host.report(neomcp::ChangeKind::prompts_list);
+    host.report(neomcp::ChangeKind::resources_list);
+    host.report(neomcp::ChangeKind::tools_list);
+    EXPECT_EQ(peer.next_notification(patience), notification("notifications/prompts/list_changed"))
+        << "nothing of the change before the client was ready";
+    EXPECT_EQ(peer.next_notification(patience), notification("notifications/resources/list_changed"));
+    EXPECT_EQ(peer.next_notification(patience), notification("notifications/tools/list_changed"));
+}
+
+TEST(ConnectionFeed, AWatchedResourceIsUpdatedAndNoOther) {
+    FeedHost host;
+    Client client(host, legacy_revision);
+    EXPECT_EQ(client.result("resources/subscribe", json{{"uri", "test://one"}}), json::object());
+    EXPECT_EQ(client.result("resources/subscribe", json{{"uri", "test://item/7"}}), json::object())
+        << "a URI a template matches names a resource";
+    host.report(neomcp::ChangeKind::resource_updated, "test://two");  // not watched
+    host.report(neomcp::ChangeKind::resource_updated, "test://one");
+    EXPECT_EQ(client.peer.next_notification(patience), updated("test://one"));
+    host.report(neomcp::ChangeKind::resource_updated, "test://item/7");
+    EXPECT_EQ(client.peer.next_notification(patience), updated("test://item/7"));
+
+    EXPECT_EQ(client.result("resources/unsubscribe", json{{"uri", "test://one"}}), json::object());
+    EXPECT_EQ(client.result("resources/unsubscribe", json{{"uri", "test://never"}}), json::object())
+        << "removing a URI that is not watched changes nothing and is not an error";
+    host.report(neomcp::ChangeKind::resource_updated, "test://one");
+    host.report(neomcp::ChangeKind::resource_updated, "test://item/7");
+    EXPECT_EQ(client.peer.next_notification(patience), updated("test://item/7")) << "test://one is no longer watched";
+}
+
+TEST(ConnectionFeed, AUriThatNamesNoResourceIsRefusedAsAReadOfItIs) {
+    FeedHost host;
+    Client client(host, legacy_revision);
+    const json read = client.request("resources/read", json{{"uri", "test://missing"}});
+    const json refused = client.request("resources/subscribe", json{{"uri", "test://missing"}});
+    ASSERT_TRUE(refused.contains("error")) << refused.dump();
+    EXPECT_EQ(refused.at("error").at("code"), read.at("error").at("code"));
+    EXPECT_EQ(refused.at("error").at("code"), *client.profile->error_code("resource_not_found"));
+    EXPECT_EQ(refused.at("error").at("data"), (json{{"uri", "test://missing"}}));
+    // A resource switched off names nothing either.
+    host.switch_resource(0, false);
+    EXPECT_TRUE(client.request("resources/subscribe", json{{"uri", "test://one"}}).contains("error"));
+}
+
+TEST(ConnectionFeed, AConnectionWatchesNoMoreResourcesThanTheBound) {
+    FeedHost host;
+    neomcp::SessionOptions options = options_for(legacy_revision);
+    options.max_watched_resources = 2;
+    Client client(host, legacy_revision, std::move(options));
+    EXPECT_EQ(client.result("resources/subscribe", json{{"uri", "test://one"}}), json::object());
+    EXPECT_EQ(client.result("resources/subscribe", json{{"uri", "test://two"}}), json::object());
+    const json refused = client.request("resources/subscribe", json{{"uri", "test://item/1"}});
+    ASSERT_TRUE(refused.contains("error")) << refused.dump();
+    EXPECT_EQ(refused.at("error").at("code"), neomcp::error_code::internal_error);
+    EXPECT_EQ(refused.at("error").at("data"), (json{{"reason", "limit"}}));
+    EXPECT_EQ(client.result("resources/subscribe", json{{"uri", "test://one"}}), json::object())
+        << "a URI watched already takes no more room";
+    EXPECT_EQ(client.result("resources/unsubscribe", json{{"uri", "test://two"}}), json::object());
+    EXPECT_EQ(client.result("resources/subscribe", json{{"uri", "test://item/1"}}), json::object());
+}
+
+TEST(ConnectionFeed, WithoutUpdatesReportedWatchingIsNotOffered) {
+    FeedHost host(neomcp::ChangeSupport{true, true, true, false});
+    Client client(host, legacy_revision);
+    const json refused = client.request("resources/subscribe", json{{"uri", "test://one"}});
+    ASSERT_TRUE(refused.contains("error")) << refused.dump();
+    EXPECT_EQ(refused.at("error").at("code"), neomcp::error_code::method_not_found);
+}
+
+TEST(ConnectionFeed, TheSessionRegistersOnceAndLetsGoWhenItCloses) {
+    FeedHost host;
+    Client client(host, legacy_revision);
+    EXPECT_EQ(host.watchers(), 1u);
+    client.result("resources/subscribe", json{{"uri", "test://one"}});
+    client.result("resources/subscribe", json{{"uri", "test://two"}});
+    EXPECT_EQ(host.registrations(), 1u);
+    client.peer.close();
+    EXPECT_EQ(host.watchers(), 0u);
+}
+
+TEST(ConnectionFeed, AHostThatStopsTakesTheRegistrationAndNothingComesAfter) {
+    FeedHost host;
+    Client client(host, legacy_revision);
+    client.result("resources/subscribe", json{{"uri", "test://one"}});
+    host.end_feed();
+    EXPECT_EQ(host.watchers(), 0u);
+    host.report(neomcp::ChangeKind::tools_list);
+    EXPECT_EQ(client.result("tools/list").at("tools").size(), 3u) << "the session serves on";
+    const auto transcript = client.peer.transcript();
+    EXPECT_TRUE(std::none_of(transcript.begin(), transcript.end(),
+                             [](const json& message) { return message.contains("method"); }));
+}
+
+// The race the registration is for: a change reported on one thread while the session closes on another. Nothing is
+// written after close() returned, and the host holds no registration of the closed session.
+TEST(ConnectionFeed, AChangeRacingCloseIsNeverWrittenAfterIt) {
+    const auto profile = builtin(legacy_revision);
+    for (int round = 0; round < 200; ++round) {
+        FeedHost host;
+        std::atomic<bool> closed{false};
+        Counter written;
+        std::atomic<int> late{0};
+        auto created = neomcp::Session::create(options_for(legacy_revision), host, [&](std::string) {
+            if (closed.load()) ++late;
+            written.add();
+        });
+        ASSERT_TRUE(std::holds_alternative<std::unique_ptr<neomcp::Session>>(created));
+        auto session = std::get<std::unique_ptr<neomcp::Session>>(std::move(created));
+        session->receive(Peer::initialize_request(*profile, 1).dump());
+        session->receive(notification("notifications/initialized").dump());
+        ASSERT_EQ(host.watchers(), 1u);
+        std::atomic<bool> stop{false};
+        std::thread reporter([&] {
+            while (!stop.load()) host.report(neomcp::ChangeKind::tools_list);
+        });
+        ASSERT_TRUE(written.wait_for_at_least(2));  // the handshake's answer and one notification
+        if (round % 2 == 0) {
+            session->close();
+            closed = true;
+        } else {
+            session.reset();  // destroying closes too, and the reporter may hold the listener meanwhile
+            closed = true;
+        }
+        EXPECT_EQ(host.watchers(), 0u);
+        stop = true;
+        reporter.join();
+        EXPECT_EQ(late.load(), 0) << "round " << round;
+    }
 }
 
 }  // namespace
