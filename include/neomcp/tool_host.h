@@ -8,7 +8,14 @@
 // A call may also end with InputRequired (neomcp/input.h): the host needs something only the client can give. The
 // session asks the client and calls the host again with the answers, in a new call() with a new Completion (and the
 // same CallControl); the host decides from the answers and its state what is still missing.
+//
+// What a host offers may change while it serves: an item can be switched off (a tool, a prompt, a resource or a
+// template that is not enabled is not listed and is answered as one that does not exist), and a resource's content can
+// change. A host that reports such changes says which kinds (change_support) and takes the listeners of the sessions
+// that tell their clients (watch); see change.h.
 #pragma once
+
+#include <cstddef>
 
 #include <memory>
 #include <optional>
@@ -18,6 +25,7 @@
 #include <utility>
 #include <variant>
 
+#include "neomcp/change.h"
 #include "neomcp/input.h"
 #include "neomcp/json.h"
 #include "neomcp/model.h"
@@ -162,11 +170,30 @@ public:
 
     // The tools, in a stable order. The span stays valid and its contents unchanged while a session uses the host.
     virtual std::span<const ToolDefinition> tools() const = 0;
+    // Whether the tool at `index` of tools() is offered now. One that is not is left out of tools/list and a call of
+    // it is answered as a call of a tool that does not exist. May change at any time; thread-safe. Default: every
+    // tool is.
+    virtual bool tool_enabled(std::size_t index) const {
+        static_cast<void>(index);
+        return true;
+    }
 
-    // Runs the tool `request.name`, one of tools(). Must not block for the duration of the tool: a session calls
-    // it on the thread that reads its input (and, for a call that asked for input, on the thread that delivered the
-    // last answer). An exception that escapes is treated as the call never completing: `done` then answers with an
-    // internal error once its last copy is gone.
+    // The kinds of change the host reports to the listeners registered with watch(). Default: none.
+    virtual ChangeSupport change_support() const { return {}; }
+    // Registers a listener for the host's changes, which the host holds weakly until the registration is reset or
+    // destroyed; an empty registration when the host reports no changes (or no more: it has stopped). The host tells
+    // a listener of every change it reports after watch() returned, through ChangeListener::changed, and that it stops,
+    // through ChangeListener::ended. Called with no lock of the session held; thread-safe. Default: an empty
+    // registration.
+    virtual ChangeRegistration watch(std::weak_ptr<ChangeListener> listener) {
+        static_cast<void>(listener);
+        return {};
+    }
+
+    // Runs the tool `request.name`, one of tools() that tool_enabled() admitted. Must not block for the duration of the
+    // tool: a session calls it on the thread that reads its input (and, for a call that asked for input, on the thread
+    // that delivered the last answer). An exception that escapes is treated as the call never completing: `done` then
+    // answers with an internal error once its last copy is gone.
     virtual void call(const CallRequest& request, CallControl control, Completion done) = 0;
 
     // Told that a call waits for its client's answers (see InputWait): after the session has handed the round's

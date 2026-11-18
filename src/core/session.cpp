@@ -45,6 +45,7 @@
 #include <condition_variable>
 #include <deque>
 #include <exception>
+#include <functional>
 #include <initializer_list>
 #include <map>
 #include <mutex>
@@ -404,19 +405,24 @@ private:
     // The enabled revisions, newest first: those a request can name under `opener`, or every one when null.
     json supported_versions(const OpenMechanism* opener = nullptr) const;
     json capabilities(const profile::Profile& profile) const;
+    // The kinds of change the host reports among the kinds it has things of: what the session declares.
+    ChangeSupport reported() const;
     void finish_result(json& body, std::string_view type, const profile::Profile& profile) const;
     void finish_result(json& body, std::string_view type, const profile::Profile& profile, const CacheHints& cache) const;
     json call_result(const ToolResult& result, const profile::Profile& profile) const;
-    // The members of a page of a list of `total` items that a request asks for, or the answer to a bad cursor.
+    // The page of a list of `total` items that a request asks for: the indices of the next `page_size` items from the
+    // request's cursor that `enabled` admits, and the cursor of the page after it; or the answer to a bad cursor. A
+    // cursor is the index of an item in the whole list, so that switching items on and off moves no page.
     struct Page {
-        std::size_t start = 0;
-        std::size_t count = 0;
+        std::vector<std::size_t> items;
+        std::optional<std::size_t> next;  // empty: no admitted item follows
     };
     std::variant<Page, Answer> page_of(const Message& request, const Served& served, std::size_t total,
-                                       const std::optional<std::size_t>& page_size) const;
+                                       const std::optional<std::size_t>& page_size,
+                                       const std::function<bool(std::size_t)>& enabled) const;
     // A list result with its page of items already written as `member`.
     Answer list_answer(const Message& request, const Served& served, std::string_view member, json items,
-                       std::size_t end, std::size_t total, std::string_view type, const CacheHints& cache) const;
+                       const std::optional<std::size_t>& next, std::string_view type, const CacheHints& cache) const;
     static Answer method_not_found(const Message& request, const Served& served);
     // Registers a call of `kind` that the host will complete; null when nothing is to be started (the session closed,
     // or the unit was abandoned).
@@ -1088,7 +1094,8 @@ std::optional<Answer> SessionCore::on_ping(Message& request, const Served& serve
 
 std::variant<SessionCore::Page, Answer> SessionCore::page_of(const Message& request, const Served& served,
                                                               std::size_t total,
-                                                              const std::optional<std::size_t>& page_size) const {
+                                                              const std::optional<std::size_t>& page_size,
+                                                              const std::function<bool(std::size_t)>& enabled) const {
     const RequestId& id = *request.id;
     std::size_t start = 0;
     if (const json* cursor = member(request.params, "cursor")) {
@@ -1103,16 +1110,24 @@ std::variant<SessionCore::Page, Answer> SessionCore::page_of(const Message& requ
         if (!index) return served_answer(make_error(id, error_code::invalid_params, "Invalid params: invalid cursor"), served);
         start = *index;
     }
-    const std::size_t count = page_size ? std::min(total - start, *page_size) : total - start;
-    return Page{start, count};
+    Page page;
+    for (std::size_t index = start; index < total; ++index) {
+        if (!enabled(index)) continue;
+        if (page_size && page.items.size() == *page_size) {
+            page.next = index;
+            break;
+        }
+        page.items.push_back(index);
+    }
+    return page;
 }
 
 Answer SessionCore::list_answer(const Message& request, const Served& served, std::string_view member_name, json items,
-                                std::size_t end, std::size_t total, std::string_view type,
+                                const std::optional<std::size_t>& next, std::string_view type,
                                 const CacheHints& cache) const {
     json body = json::object();
     body[std::string(member_name)] = std::move(items);
-    if (end < total) body["nextCursor"] = std::to_string(end);
+    if (next) body["nextCursor"] = std::to_string(*next);
     finish_result(body, type, *served.profile, cache);
     return served_answer(make_result(*request.id, std::move(body)), served);
 }
@@ -1126,19 +1141,20 @@ std::optional<Answer> SessionCore::on_tools_list(Message& request, const Served&
     const RequestId& id = *request.id;
     const profile::Profile& profile = *served.profile;
     std::span<const ToolDefinition> tools;
+    std::variant<Page, Answer> page;
     try {
         tools = host_.tools();
+        page = page_of(request, served, tools.size(), options_.tools_page_size,
+                       [this](std::size_t index) { return host_.tool_enabled(index); });
     } catch (...) {
         return served_answer(make_error(id, error_code::internal_error, "Internal error: the tools could not be listed"),
                              served);
     }
-    auto page = page_of(request, served, tools.size(), options_.tools_page_size);
     if (auto* refusal = std::get_if<Answer>(&page)) return std::move(*refusal);
-    const auto [start, count] = std::get<Page>(page);
+    const Page& found = std::get<Page>(page);
     json list = json::array();
-    for (std::size_t i = start; i < start + count; ++i) list.push_back(to_wire(tools[i], profile));
-    return list_answer(request, served, "tools", std::move(list), start + count, tools.size(), "ListToolsResult",
-                       options_.tools_cache);
+    for (const std::size_t index : found.items) list.push_back(to_wire(tools[index], profile));
+    return list_answer(request, served, "tools", std::move(list), found.next, "ListToolsResult", options_.tools_cache);
 }
 
 std::variant<json, Answer> SessionCore::progress_token_of(const Message& request, const Served& served) const {
@@ -1212,15 +1228,21 @@ std::optional<Answer> SessionCore::on_tools_call(Message& request, const Served&
     if (auto* refusal = std::get_if<Answer>(&token)) return std::move(*refusal);
     json progress_token = std::move(std::get<json>(token));
 
+    // A tool that is switched off is answered as one that does not exist. The check is the moment a call is decided:
+    // one admitted here runs even when the tool is switched off before it starts.
     std::span<const ToolDefinition> tools;
+    auto tool = tools.end();
     try {
         tools = host_.tools();
+        tool = std::find_if(tools.begin(), tools.end(),
+                            [&](const ToolDefinition& definition) { return definition.name == *tool_name; });
+        if (tool != tools.end() && !host_.tool_enabled(static_cast<std::size_t>(tool - tools.begin()))) {
+            tool = tools.end();
+        }
     } catch (...) {
         return served_answer(make_error(id, error_code::internal_error, "Internal error: the tools could not be listed"),
                              served);
     }
-    const auto tool = std::find_if(tools.begin(), tools.end(),
-                                   [&](const ToolDefinition& definition) { return definition.name == *tool_name; });
     if (tool == tools.end()) {
         return served_answer(make_error(id, error_code::invalid_params, "Unknown tool: " + *tool_name), served);
     }
@@ -1291,20 +1313,22 @@ std::optional<Answer> SessionCore::on_resources_list(Message& request, const Ser
     if (host == nullptr) return method_not_found(request, served);
     std::span<const ResourceDefinition> resources;
     ListSettings settings;
+    std::variant<Page, Answer> page;
     try {
         resources = host->resources();
         settings = host->resource_list_settings();
+        page = page_of(request, served, resources.size(), settings.page_size,
+                       [host](std::size_t index) { return host->resource_enabled(index); });
     } catch (...) {
         return served_answer(
             make_error(*request.id, error_code::internal_error, "Internal error: the resources could not be listed"), served);
     }
-    auto page = page_of(request, served, resources.size(), settings.page_size);
     if (auto* refusal = std::get_if<Answer>(&page)) return std::move(*refusal);
-    const auto [start, count] = std::get<Page>(page);
+    const Page& found = std::get<Page>(page);
     json list = json::array();
-    for (std::size_t i = start; i < start + count; ++i) list.push_back(to_wire(resources[i], *served.profile));
-    return list_answer(request, served, "resources", std::move(list), start + count, resources.size(),
-                       "ListResourcesResult", settings.cache);
+    for (const std::size_t index : found.items) list.push_back(to_wire(resources[index], *served.profile));
+    return list_answer(request, served, "resources", std::move(list), found.next, "ListResourcesResult",
+                       settings.cache);
 }
 
 std::optional<Answer> SessionCore::on_resource_templates_list(Message& request, const Served& served, Origin&,
@@ -1313,21 +1337,23 @@ std::optional<Answer> SessionCore::on_resource_templates_list(Message& request, 
     if (host == nullptr) return method_not_found(request, served);
     std::span<const ResourceTemplateDefinition> templates;
     ListSettings settings;
+    std::variant<Page, Answer> page;
     try {
         templates = host->resource_templates();
         settings = host->resource_list_settings();
+        page = page_of(request, served, templates.size(), settings.page_size,
+                       [host](std::size_t index) { return host->template_enabled(index); });
     } catch (...) {
         return served_answer(make_error(*request.id, error_code::internal_error,
                                         "Internal error: the resource templates could not be listed"),
                              served);
     }
-    auto page = page_of(request, served, templates.size(), settings.page_size);
     if (auto* refusal = std::get_if<Answer>(&page)) return std::move(*refusal);
-    const auto [start, count] = std::get<Page>(page);
+    const Page& found = std::get<Page>(page);
     json list = json::array();
-    for (std::size_t i = start; i < start + count; ++i) list.push_back(to_wire(templates[i], *served.profile));
-    return list_answer(request, served, "resourceTemplates", std::move(list), start + count, templates.size(),
-                       "ListResourceTemplatesResult", settings.cache);
+    for (const std::size_t index : found.items) list.push_back(to_wire(templates[index], *served.profile));
+    return list_answer(request, served, "resourceTemplates", std::move(list), found.next, "ListResourceTemplatesResult",
+                       settings.cache);
 }
 
 std::optional<Answer> SessionCore::on_resources_read(Message& request, const Served& served, Origin& origin,
@@ -1442,20 +1468,21 @@ std::optional<Answer> SessionCore::on_prompts_list(Message& request, const Serve
     if (host == nullptr) return method_not_found(request, served);
     std::span<const PromptDefinition> prompts;
     ListSettings settings;
+    std::variant<Page, Answer> page;
     try {
         prompts = host->prompts();
         settings = host->prompt_list_settings();
+        page = page_of(request, served, prompts.size(), settings.page_size,
+                       [host](std::size_t index) { return host->prompt_enabled(index); });
     } catch (...) {
         return served_answer(
             make_error(*request.id, error_code::internal_error, "Internal error: the prompts could not be listed"), served);
     }
-    auto page = page_of(request, served, prompts.size(), settings.page_size);
     if (auto* refusal = std::get_if<Answer>(&page)) return std::move(*refusal);
-    const auto [start, count] = std::get<Page>(page);
+    const Page& found = std::get<Page>(page);
     json list = json::array();
-    for (std::size_t i = start; i < start + count; ++i) list.push_back(to_wire(prompts[i], *served.profile));
-    return list_answer(request, served, "prompts", std::move(list), start + count, prompts.size(), "ListPromptsResult",
-                       settings.cache);
+    for (const std::size_t index : found.items) list.push_back(to_wire(prompts[index], *served.profile));
+    return list_answer(request, served, "prompts", std::move(list), found.next, "ListPromptsResult", settings.cache);
 }
 
 std::optional<Answer> SessionCore::on_prompts_get(Message& request, const Served& served, Origin& origin,
@@ -1481,14 +1508,18 @@ std::optional<Answer> SessionCore::on_prompts_get(Message& request, const Served
         }
     }
     std::span<const PromptDefinition> prompts;
+    auto prompt = prompts.end();
     try {
         prompts = host->prompts();
+        prompt = std::find_if(prompts.begin(), prompts.end(),
+                              [&](const PromptDefinition& definition) { return definition.name == get.name; });
+        if (prompt != prompts.end() && !host->prompt_enabled(static_cast<std::size_t>(prompt - prompts.begin()))) {
+            prompt = prompts.end();
+        }
     } catch (...) {
         return served_answer(
             make_error(id, error_code::internal_error, "Internal error: the prompts could not be listed"), served);
     }
-    const auto prompt = std::find_if(prompts.begin(), prompts.end(),
-                                     [&](const PromptDefinition& definition) { return definition.name == get.name; });
     if (prompt == prompts.end()) return invalid("unknown prompt: " + get.name);
     for (const auto& argument : prompt->arguments) {
         if (argument.required && get.arguments.find(argument.name) == get.arguments.end()) {
@@ -1642,16 +1673,38 @@ json SessionCore::supported_versions(const OpenMechanism* opener) const {
 }
 
 json SessionCore::capabilities(const profile::Profile& profile) const {
+    const ChangeSupport reported = this->reported();
     json capabilities = json::object();
     json tools = json::object();
-    tools["listChanged"] = false;
+    tools["listChanged"] = reported.tools_list;
     capabilities["tools"] = std::move(tools);
     if (options_.protocol_logging) capabilities["logging"] = json::object();
-    if (host_.resource_host() != nullptr) capabilities["resources"] = json::object();
-    if (host_.prompt_host() != nullptr) capabilities["prompts"] = json::object();
+    if (host_.resource_host() != nullptr) {
+        json resources = json::object();
+        if (reported.resources_list) resources["listChanged"] = true;
+        if (reported.resource_updates) resources["subscribe"] = true;
+        capabilities["resources"] = std::move(resources);
+    }
+    if (host_.prompt_host() != nullptr) {
+        json prompts = json::object();
+        if (reported.prompts_list) prompts["listChanged"] = true;
+        capabilities["prompts"] = std::move(prompts);
+    }
     if (host_.completion_host() != nullptr) capabilities["completions"] = json::object();
+    // Every revision's schema gives the capabilities of tools, prompts and resources these members, so only the
+    // capabilities themselves are filtered.
     keep_members(capabilities, "ServerCapabilities", profile);
     return capabilities;
+}
+
+ChangeSupport SessionCore::reported() const {
+    const ChangeSupport support = host_.change_support();
+    ChangeSupport reported;
+    reported.tools_list = support.tools_list;
+    reported.prompts_list = support.prompts_list && host_.prompt_host() != nullptr;
+    reported.resources_list = support.resources_list && host_.resource_host() != nullptr;
+    reported.resource_updates = support.resource_updates && host_.resource_host() != nullptr;
+    return reported;
 }
 
 // Adds the members a revision's result type requires that the engine provides, and the server's identity in

@@ -11,6 +11,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 
 #include "neomcp/json.h"
 #include "neomcp/model.h"
@@ -42,6 +43,21 @@ public:
     // while a session uses the host.
     virtual std::span<const ResourceDefinition> resources() const = 0;
     virtual std::span<const ResourceTemplateDefinition> resource_templates() const = 0;
+    // Whether the resource, or the template, at `index` of its list is offered now (see ToolHost::tool_enabled). One
+    // that is not is left out of its list; a read of it is the host's to answer as one of nothing it offers. Default:
+    // every one is.
+    virtual bool resource_enabled(std::size_t index) const {
+        static_cast<void>(index);
+        return true;
+    }
+    virtual bool template_enabled(std::size_t index) const {
+        static_cast<void>(index);
+        return true;
+    }
+    // Whether the host offers a resource at `uri` now, as a read of it would find it: what a client may ask to be told
+    // the updates of. Thread-safe. Default: whether an enabled resource of resources() has exactly this URI (a host
+    // with templates overrides it).
+    virtual bool offers(std::string_view uri) const;
     // Paging and caching of resources/list and resources/templates/list.
     virtual ListSettings resource_list_settings() const { return {}; }
 
@@ -66,12 +82,17 @@ public:
 
     // The prompts, in a stable order. The span stays valid and its contents unchanged while a session uses the host.
     virtual std::span<const PromptDefinition> prompts() const = 0;
+    // Whether the prompt at `index` of prompts() is offered now (see ToolHost::tool_enabled). Default: every one is.
+    virtual bool prompt_enabled(std::size_t index) const {
+        static_cast<void>(index);
+        return true;
+    }
     // Paging and caching of prompts/list.
     virtual ListSettings prompt_list_settings() const { return {}; }
 
-    // Gets the prompt `request.name`, one of prompts(): completes with a PromptResult, with InvalidRequest when its
-    // arguments cannot be used, with InputRequired, a Refusal or a HostFailure. Must not block for the duration of the
-    // call.
+    // Gets the prompt `request.name`, one of prompts() that prompt_enabled() admitted: completes with a PromptResult,
+    // with InvalidRequest when its arguments cannot be used, with InputRequired, a Refusal or a HostFailure. Must not
+    // block for the duration of the call.
     virtual void get(const PromptRequest& request, CallControl control, Completion done) = 0;
 };
 
