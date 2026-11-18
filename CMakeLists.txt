@@ -146,6 +146,18 @@ target_compile_options(neomcp_core PUBLIC ${NEOMCP_STOP_TOKEN_OPTIONS})
 target_link_options(neomcp_core PUBLIC ${NEOMCP_STOP_TOKEN_OPTIONS})
 neomcp_configure_target(neomcp_core)
 
+# The server layer: Server, tools registered from C++ types, the handlers' Context, the worker pool and the thread
+# of coroutine handlers. Coroutine handlers use standalone Asio, which appears in the public headers.
+include(cmake/NeomcpAsio.cmake)
+
+add_library(neomcp_server
+    src/server/server.cpp)
+add_library(neomcp::server ALIAS neomcp_server)
+target_include_directories(neomcp_server PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+target_link_libraries(neomcp_server PUBLIC neomcp::core neomcp::describe neomcp::schema asio::asio)
+target_compile_features(neomcp_server PUBLIC cxx_std_20)
+neomcp_configure_target(neomcp_server)
+
 if(NEOMCP_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
