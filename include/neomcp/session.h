@@ -39,6 +39,16 @@ class SessionCore;
 // thread writing through a Completion or a CallControl never sees it: the sink's owner knows its write failed.
 using Sink = std::function<void(std::string line)>;
 
+// Called when the session becomes idle: no call it started waits for its answer (a call the client cancelled counts
+// as answered from the moment of the cancellation, though its tool may still run), nothing waits to be written or is
+// being written, and no batch is being assembled. It may run on any thread (the reading thread, a tool's thread or the
+// thread that wrote last), possibly on two at once, with no lock of the session held, so that it may call into the
+// session, `Session::idle()` included. It runs whenever an answer was written and nothing else is pending, which is
+// more often than the session goes quiet for good. A callback that started before close() may still be running on
+// another thread when close() returns, so whatever it touches must outlive the session. What it throws is swallowed.
+// Keep it short: it runs on the thread that did the work.
+using IdleCallback = std::function<void()>;
+
 // Checks tool arguments against the tool's input schema: a message when they fail it, empty when they pass.
 using ArgumentCheck = std::function<std::optional<std::string>(const ToolDefinition& tool, const json& arguments)>;
 
@@ -85,6 +95,10 @@ struct SessionOptions {
     // Runs before every tools/call; empty: arguments are not checked.
     ArgumentCheck check_arguments;
 
+    // Told when the session becomes idle (see IdleCallback). Empty: nobody is told; Session::idle() answers the same
+    // question on demand.
+    IdleCallback on_idle;
+
     // Where mechanisms come from; null: builtin_mechanisms(). Must outlive the session's creation.
     const MechanismRegistry* mechanisms = nullptr;
 };
@@ -121,6 +135,11 @@ public:
     // being written and nothing will be: it waits for a sink call in progress on another thread (but not for one
     // on its own thread, when close() is called from inside the sink).
     void close();
+
+    // Whether the session is idle right now (see IdleCallback): true before the first message and after close().
+    // Together with SessionOptions::on_idle this lets a transport wait for the calls in flight without polling:
+    // check idle() after taking the lock the callback takes, and wait on a condition the callback signals.
+    bool idle() const;
 
     // The enabled profiles, newest revision first.
     std::span<const profile::ProfilePtr> profiles() const noexcept;

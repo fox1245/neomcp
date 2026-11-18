@@ -14,6 +14,10 @@
 //   a cancellation is received nothing more is written for that request, even what was queued before it.
 // - close() marks the session closed, empties the queue, takes the calls in flight, releases the mutex, requests
 //   stop on them, and then waits until no other thread is inside the sink.
+// - The idle callback runs with no lock held, after the thread that did the work found the session idle under the
+//   mutex: at the end of a drain, after a cancellation, and when a batch was assembled. A batch counts as pending from
+//   the moment it is read until its answer was handed to the queue, so that the gap between the last call of the batch
+//   and its answer is not mistaken for idleness.
 // - A sink that throws closes the session. The exception goes only to the thread that reads: out of receive() when
 //   that thread was writing, also when it wrote through a Completion or CallControl a tool used inline during
 //   receive() (the exception is held and rethrown after the tool's frames are left). A tool's own thread that was
@@ -137,6 +141,7 @@ public:
 
     void receive(std::string_view line);
     void close();
+    bool idle() const;
 
     void complete(const std::shared_ptr<CallState>& call, CallOutcome outcome);
     void complete_dropped(const std::shared_ptr<CallState>& call);
@@ -200,6 +205,8 @@ private:
     void emit(Output output, Writer writer);
     void emit_error(int code, std::string message);
     void drain(std::unique_lock<std::mutex>& lock, Writer writer);
+    bool idle_locked() const;          // with mutex_ held
+    void signal_idle() noexcept;       // with no lock held
 
     // Immutable after create().
     SessionOptions options_;
@@ -213,13 +220,14 @@ private:
     std::map<std::string, std::unique_ptr<CancelMechanism>, std::less<>> cancels_;
 
     // Guarded by mutex_.
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::condition_variable written_;
     std::deque<Output> queue_;
     bool draining_ = false;
     std::thread::id drainer_;
     bool closed_ = false;
     std::map<RequestId, std::shared_ptr<CallState>> in_flight_;
+    std::size_t pending_batches_ = 0;  // batches read whose answer was not handed to the queue yet
     std::optional<Connection> connection_;
     std::thread::id reading_thread_;   // the thread inside receive(), while it is there
     std::exception_ptr reader_failure_;  // a sink failure the reading thread met through a tool's handle
@@ -409,6 +417,10 @@ void SessionCore::receive_array(json value) {
     auto batch = std::make_shared<BatchState>();
     batch->mechanism = mechanism;
     batch->responses.resize(items.size());
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        ++pending_batches_;
+    }
     for (std::size_t i = 0; i < items.size(); ++i) {
         if (auto answer = handle(std::move(items[i]), batch, i)) {
             const std::lock_guard<std::mutex> lock(mutex_);
@@ -874,6 +886,7 @@ void SessionCore::finish_call(const std::shared_ptr<CallState>& call, json respo
 void SessionCore::cancel(const RequestId& id, const CancelMechanism& mechanism, const std::string& method) {
     std::shared_ptr<CallState> call;
     bool batch_finished = false;
+    bool now_idle = false;
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         const auto found = in_flight_.find(id);
@@ -888,9 +901,11 @@ void SessionCore::cancel(const RequestId& id, const CancelMechanism& mechanism, 
         call->active = false;
         call->cancelled = true;
         if (call->batch) batch_finished = --call->batch->outstanding == 0 && !call->batch->reading;
+        now_idle = !closed_ && idle_locked();
     }
     call->stop.request_stop();
     if (batch_finished) emit_batch(call->batch, Writer::reader);
+    if (now_idle) signal_idle();
 }
 
 void SessionCore::emit_batch(const Batch& batch, Writer writer) {
@@ -906,6 +921,13 @@ void SessionCore::emit_batch(const Batch& batch, Writer writer) {
     if (auto answer = batch->mechanism->assemble(std::move(responses))) {
         emit(Output{serialize(*answer), nullptr}, writer);
     }
+    bool now_idle = false;
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        --pending_batches_;
+        now_idle = !closed_ && idle_locked();
+    }
+    if (now_idle) signal_idle();
 }
 
 void SessionCore::progress(const std::shared_ptr<CallState>& call, double value, std::optional<double> total,
@@ -998,6 +1020,31 @@ void SessionCore::drain(std::unique_lock<std::mutex>& lock, Writer writer) {
         if (writer == Writer::reader) std::rethrow_exception(failure);
         // Through a tool's handle: the reading thread gets it when receive() returns; a tool's thread never does.
         if (reading_thread_ == std::this_thread::get_id() && !reader_failure_) reader_failure_ = failure;
+        return;
+    }
+    if (!closed_ && options_.on_idle && idle_locked()) {
+        lock.unlock();
+        signal_idle();
+        lock.lock();
+    }
+}
+
+bool SessionCore::idle_locked() const {
+    // A queued line implies a drainer, so the queue is checked only for the sake of the invariant. A closed session
+    // has nothing left to wait for.
+    return closed_ || (in_flight_.empty() && queue_.empty() && !draining_ && pending_batches_ == 0);
+}
+
+bool SessionCore::idle() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return idle_locked();
+}
+
+void SessionCore::signal_idle() noexcept {
+    if (!options_.on_idle) return;
+    try {
+        options_.on_idle();
+    } catch (...) {
     }
 }
 
@@ -1044,6 +1091,8 @@ void Session::close() {
     const auto core = core_;
     core->close();
 }
+
+bool Session::idle() const { return core_->idle(); }
 
 std::span<const profile::ProfilePtr> Session::profiles() const noexcept { return core_->profiles(); }
 

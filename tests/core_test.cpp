@@ -4,6 +4,7 @@
 // read back from the profiles, so that a wrong profile makes a test fail. Every wait is on an event a test
 // controls; "nothing was written" is shown by a later request whose answer arrives (the session writes in order).
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -1748,6 +1749,200 @@ TEST(Close, HandlesOutliveTheSession) {
     parked->control.progress(1);
     parked->control.log(neomcp::LogLevel::error, "gone");
     parked->done(text_result("nobody listens"));
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Idle
+
+// Counts the calls of SessionOptions::on_idle and what the session says inside the callback.
+struct IdleProbe {
+    void fired() {
+        const neomcp::Session* current = session.load();
+        const bool idle_inside = current != nullptr && current->idle();  // would deadlock if the callback held a lock
+        const std::lock_guard<std::mutex> lock(mutex);
+        ++count;
+        if (!idle_inside) ++not_idle_inside;
+        changed.notify_all();
+    }
+    bool wait_count(int target) {
+        std::unique_lock<std::mutex> lock(mutex);
+        return changed.wait_for(lock, patience, [&] { return count >= target; });
+    }
+    int value() {
+        const std::lock_guard<std::mutex> lock(mutex);
+        return count;
+    }
+    int disagreements() {
+        const std::lock_guard<std::mutex> lock(mutex);
+        return not_idle_inside;
+    }
+
+    std::atomic<const neomcp::Session*> session{nullptr};
+    std::mutex mutex;
+    std::condition_variable changed;
+    int count = 0;
+    int not_idle_inside = 0;
+};
+
+neomcp::SessionOptions idle_options(IdleProbe& probe) {
+    neomcp::SessionOptions options = test_options();
+    options.on_idle = [&probe] { probe.fired(); };
+    return options;
+}
+
+TEST(Idle, FollowsTheCallsInFlight) {
+    FakeHost host;
+    IdleProbe probe;
+    Peer peer(host, idle_options(probe));
+    probe.session = &peer.session();
+    EXPECT_TRUE(peer.session().idle());
+
+    peer.notify(Peer::make_request(*builtin(modern_revision), 1, "tools/call", {{"name", "gated"}}));
+    auto parked = host.wait_parked(patience);
+    ASSERT_TRUE(parked);
+    EXPECT_FALSE(peer.session().idle());
+    EXPECT_EQ(probe.value(), 0);
+
+    parked->done(text_result("done"));
+    // The callback runs after the answer was written, so the answer is there when it has run.
+    ASSERT_TRUE(probe.wait_count(1));
+    ASSERT_TRUE(peer.await_response(1, patience));
+    EXPECT_TRUE(peer.session().idle());
+    EXPECT_EQ(probe.disagreements(), 0);
+}
+
+TEST(Idle, AnAnswerWrittenWhileNothingElseWaitsTellsToo) {
+    FakeHost host;
+    IdleProbe probe;
+    Peer peer(host, idle_options(probe));
+    probe.session = &peer.session();
+    const auto answer = peer.request(Peer::make_request(*builtin(modern_revision), 1, "tools/list"), patience);
+    ASSERT_TRUE(answer);
+    ASSERT_TRUE(probe.wait_count(1));
+    EXPECT_TRUE(peer.session().idle());
+}
+
+TEST(Idle, ACancelledCallIsFinishedAlthoughItsToolMayRun) {
+    FakeHost host;
+    IdleProbe probe;
+    Peer peer(host, idle_options(probe));
+    probe.session = &peer.session();
+    peer.notify(Peer::make_request(*builtin(modern_revision), 1, "tools/call", {{"name", "gated"}}));
+    auto parked = host.wait_parked(patience);
+    ASSERT_TRUE(parked);
+    EXPECT_FALSE(peer.session().idle());
+
+    peer.notify(cancelled(1));
+    // The callback runs on the thread that delivered the cancellation, before notify() returned.
+    EXPECT_EQ(probe.value(), 1);
+    EXPECT_TRUE(peer.session().idle());
+    EXPECT_TRUE(parked->control.stop_token().stop_requested());
+
+    const int before = probe.value();
+    parked->done(text_result("late"));  // dropped: nothing is written, nothing becomes idle
+    EXPECT_EQ(probe.value(), before);
+}
+
+TEST(Idle, ABatchIsPendingUntilItsAnswerWasHandedOver) {
+    FakeHost host;
+    IdleProbe probe;
+    Peer peer(host, idle_options(probe));
+    probe.session = &peer.session();
+    ASSERT_TRUE(peer.initialize(*builtin(batch_revision), patience));
+    ASSERT_TRUE(probe.wait_count(1));  // the answer to initialize
+    const int before = probe.value();
+
+    json batch = json::array();
+    batch.push_back(Peer::make_request(*builtin(batch_revision), 10, "tools/call", {{"name", "gated"}}));
+    batch.push_back(Peer::make_request(*builtin(batch_revision), 11, "tools/call", {{"name", "echo"}}));
+    peer.send(batch.dump());
+    auto parked = host.wait_parked(patience);
+    ASSERT_TRUE(parked);
+    EXPECT_FALSE(peer.session().idle());  // call 11 was answered inside the batch, call 10 was not
+    EXPECT_EQ(probe.value(), before);
+
+    parked->done(text_result("done"));
+    const auto answer = peer.next_other(patience);
+    ASSERT_TRUE(answer);
+    EXPECT_TRUE(answer->is_array());
+    ASSERT_TRUE(probe.wait_count(before + 1));
+    EXPECT_TRUE(peer.session().idle());
+    EXPECT_EQ(probe.value(), before + 1);
+    EXPECT_EQ(probe.disagreements(), 0);
+}
+
+TEST(Idle, ABatchOfNotificationsOnlyEndsIdle) {
+    FakeHost host;
+    IdleProbe probe;
+    Peer peer(host, idle_options(probe));
+    probe.session = &peer.session();
+    ASSERT_TRUE(peer.initialize(*builtin(batch_revision), patience));
+    ASSERT_TRUE(probe.wait_count(1));
+    const int before = probe.value();
+    peer.send(json::array({json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}}}).dump());
+    ASSERT_TRUE(probe.wait_count(before + 1));
+    EXPECT_TRUE(peer.session().idle());
+}
+
+TEST(Idle, ACloseStopsTheCallbackAndLeavesTheSessionIdle) {
+    FakeHost host;
+    IdleProbe probe;
+    Peer peer(host, idle_options(probe));
+    probe.session = &peer.session();
+    peer.notify(Peer::make_request(*builtin(modern_revision), 1, "tools/call", {{"name", "gated"}}));
+    auto parked = host.wait_parked(patience);
+    ASSERT_TRUE(parked);
+    peer.close();
+    EXPECT_TRUE(peer.session().idle());
+    const int before = probe.value();
+    parked->done(text_result("late"));
+    EXPECT_EQ(probe.value(), before);
+}
+
+TEST(Idle, AThrowingCallbackIsSwallowed) {
+    FakeHost host;
+    neomcp::SessionOptions options = test_options();
+    options.on_idle = [] { throw std::runtime_error("the callback fails"); };
+    Peer peer(host, std::move(options));
+    const auto first = peer.request(Peer::make_request(*builtin(modern_revision), 1, "tools/list"), patience);
+    const auto second = peer.request(Peer::make_request(*builtin(modern_revision), 2, "tools/list"), patience);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    EXPECT_TRUE(first->contains("result"));
+    EXPECT_TRUE(second->contains("result"));
+}
+
+TEST(Idle, ConcurrentCompletionsEndIdleOnce) {
+    FakeHost host;
+    IdleProbe probe;
+    Peer peer(host, idle_options(probe));
+    probe.session = &peer.session();
+    constexpr int calls = 8;
+    for (int i = 1; i <= calls; ++i) {
+        peer.notify(Peer::make_request(*builtin(modern_revision), i, "tools/call", {{"name", "gated"}}));
+    }
+    std::vector<FakeHost::Parked> parked;
+    for (int i = 0; i < calls; ++i) {
+        auto call = host.wait_parked(patience);
+        ASSERT_TRUE(call);
+        parked.push_back(std::move(*call));
+    }
+    EXPECT_FALSE(peer.session().idle());
+    Gate go;
+    std::vector<std::thread> threads;
+    for (auto& call : parked) {
+        threads.emplace_back([&go, &call] {
+            go.wait();
+            call.done(text_result("done"));
+        });
+    }
+    go.open();
+    for (auto& thread : threads) thread.join();
+    for (int i = 1; i <= calls; ++i) ASSERT_TRUE(peer.await_response(i, patience));
+    EXPECT_TRUE(peer.session().idle());
+    // Idleness was reported at least once, and never while a call was left: the last report is the true one.
+    EXPECT_GE(probe.value(), 1);
+    EXPECT_EQ(probe.disagreements(), 0);
 }
 
 }  // namespace

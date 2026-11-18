@@ -168,8 +168,9 @@ public:
     ToolHandle tool(ToolDefinition definition, Handler&& handler);
 
     // A session on this server, writing through `sink`; several may be open at once and share the tools and the
-    // threads. The first call ends registration. The session's options come from the server's.
-    std::variant<std::unique_ptr<Session>, CreateError> connect(Sink sink);
+    // threads. The first call ends registration. The session's options come from the server's. `on_idle`, when given,
+    // is told whenever the session becomes idle (see IdleCallback in neomcp/session.h).
+    std::variant<std::unique_ptr<Session>, CreateError> connect(Sink sink, IdleCallback on_idle = {});
 
     // ToolHost. The first use ends registration.
     std::span<const ToolDefinition> tools() const override;

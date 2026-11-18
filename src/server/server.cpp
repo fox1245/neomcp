@@ -135,7 +135,7 @@ public:
     void edit(std::size_t index, const std::function<void(ToolDefinition&)>& change);
     const ToolDefinition& definition(std::size_t index) const { return definitions_.at(index); }
 
-    std::variant<std::unique_ptr<Session>, CreateError> connect(Sink sink);
+    std::variant<std::unique_ptr<Session>, CreateError> connect(Sink sink, IdleCallback on_idle);
     std::span<const ToolDefinition> tools() const override;
     void call(const CallRequest& request, CallControl control, Completion done) override;
     std::optional<std::string> check(const ToolDefinition& tool, const json& arguments) const;
@@ -311,7 +311,7 @@ void ServerCore::edit(std::size_t index, const std::function<void(ToolDefinition
 // ---------------------------------------------------------------------------------------------------------------
 // Serving
 
-std::variant<std::unique_ptr<Session>, CreateError> ServerCore::connect(Sink sink) {
+std::variant<std::unique_ptr<Session>, CreateError> ServerCore::connect(Sink sink, IdleCallback on_idle) {
     serving_.store(true);
     SessionOptions session;
     session.profiles = options_.profiles;
@@ -331,6 +331,7 @@ std::variant<std::unique_ptr<Session>, CreateError> ServerCore::connect(Sink sin
     session.max_nesting_depth = options_.max_nesting_depth;
     session.max_queued_notifications = options_.max_queued_notifications;
     session.expose_error_details = options_.expose_error_details;
+    session.on_idle = std::move(on_idle);
     // The session keeps this, and with it the core: the core outlives every session it serves.
     session.check_arguments = [core = shared_from_this()](const ToolDefinition& tool, const json& arguments) {
         return core->check(tool, arguments);
@@ -628,8 +629,8 @@ ToolHandle Server::add(ToolDefinition definition, detail::Body body) {
     return ToolHandle(core_.get(), core_->add(std::move(definition), std::move(body)));
 }
 
-std::variant<std::unique_ptr<Session>, CreateError> Server::connect(Sink sink) {
-    return core_->connect(std::move(sink));
+std::variant<std::unique_ptr<Session>, CreateError> Server::connect(Sink sink, IdleCallback on_idle) {
+    return core_->connect(std::move(sink), std::move(on_idle));
 }
 
 std::span<const ToolDefinition> Server::tools() const { return core_->tools(); }
