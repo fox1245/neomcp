@@ -162,6 +162,87 @@ TEST(HttpResponder, ASinkThatThrowsDoesNotEscape) {
     EXPECT_FALSE(responder.complete(neomcp::http::make_response(200)));
 }
 
+TEST(HttpResponder, AReportedDisconnectRunsTheCallbackOnceAndDropsALaterCompletion) {
+    Collector collector;
+    Responder responder(collector.sink());
+    int told = 0;
+    responder.on_disconnect([&] { ++told; });
+    const Responder::Watch watch = responder.watch();
+    EXPECT_TRUE(watch.report_disconnect());
+    EXPECT_EQ(told, 1);
+    EXPECT_TRUE(responder.completed());
+    EXPECT_FALSE(watch.report_disconnect());  // reported once
+    EXPECT_EQ(told, 1);
+    EXPECT_FALSE(responder.complete(neomcp::http::make_response(200)));
+    EXPECT_EQ(collector.calls, 0);  // the listener never gets the late answer
+}
+
+TEST(HttpResponder, ADisconnectAfterTheCompletionIsNotReported) {
+    Collector collector;
+    Responder responder(collector.sink());
+    int told = 0;
+    responder.on_disconnect([&] { ++told; });
+    EXPECT_TRUE(responder.complete(neomcp::http::make_response(200)));
+    EXPECT_FALSE(responder.watch().report_disconnect());
+    EXPECT_EQ(told, 0);
+}
+
+TEST(HttpResponder, ARegistrationAfterTheDisconnectRunsAtOnce) {
+    Collector collector;
+    Responder responder(collector.sink());
+    ASSERT_TRUE(responder.watch().report_disconnect());
+    int told = 0;
+    responder.on_disconnect([&] { ++told; });
+    EXPECT_EQ(told, 1);
+}
+
+TEST(HttpResponder, AWatchDoesNotKeepTheRequestFromBeingAnswered500) {
+    Collector collector;
+    Responder::Watch watch;
+    {
+        Responder responder(collector.sink());
+        watch = responder.watch();
+    }
+    ASSERT_EQ(collector.calls, 1);
+    EXPECT_EQ(collector.statuses[0], 500);
+    EXPECT_FALSE(watch.report_disconnect());  // the request is gone
+}
+
+TEST(HttpResponder, ADisconnectedRequestIsNotAnswered500WhenItsLastCopyGoes) {
+    Collector collector;
+    {
+        Responder responder(collector.sink());
+        ASSERT_TRUE(responder.watch().report_disconnect());
+    }
+    EXPECT_EQ(collector.calls, 0);
+}
+
+TEST(HttpResponder, ACallbackThatThrowsDoesNotEscapeTheReport) {
+    Collector collector;
+    Responder responder(collector.sink());
+    responder.on_disconnect([] { throw 1; });
+    EXPECT_TRUE(responder.watch().report_disconnect());
+}
+
+TEST(HttpResponder, ACompletionRacingADisconnectSettlesTheRequestExactlyOnce) {
+    for (int round = 0; round < 200; ++round) {
+        std::atomic<int> delivered{0};
+        std::atomic<int> told{0};
+        Responder responder([&](Response&&) {
+            ++delivered;
+            return true;
+        });
+        responder.on_disconnect([&] { ++told; });
+        const Responder::Watch watch = responder.watch();
+        std::atomic<bool> completed{false};
+        std::thread completer([&] { completed = responder.complete(neomcp::http::make_response(200)); });
+        const bool reported = watch.report_disconnect();
+        completer.join();
+        EXPECT_NE(reported, completed.load());
+        EXPECT_EQ(delivered.load() + told.load(), 1);
+    }
+}
+
 TEST(HttpMessage, MakeResponseSetsContentType) {
     const Response response = neomcp::http::make_response(200, "application/json", "{}");
     EXPECT_EQ(response.status, 200);

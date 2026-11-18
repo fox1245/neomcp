@@ -61,9 +61,10 @@ public:
         return true;
     }
 
-    Response wait() {
+    // The response once it is there; empty when nothing settled the exchange within `timeout`.
+    std::optional<Response> wait_for(std::chrono::milliseconds timeout) {
         std::unique_lock lock(mutex_);
-        settled_.wait(lock, [this] { return response_.has_value(); });
+        if (!settled_.wait_for(lock, timeout, [this] { return response_.has_value(); })) return std::nullopt;
         return std::move(*response_);
     }
 
@@ -266,6 +267,7 @@ void Listener::Impl::handle(const httplib::Request& incoming, httplib::Response&
         pending.insert(exchange.get());
     }
 
+    Responder::Watch watch;
     try {
         Request request;
         request.method = incoming.method;
@@ -276,14 +278,25 @@ void Listener::Impl::handle(const httplib::Request& incoming, httplib::Response&
         request.body = incoming.body;
         if (!incoming.remote_addr.empty()) request.peer_address = incoming.remote_addr;
 
-        // The handler gets the only copy kept here: when it drops it uncompleted, the exchange is answered 500.
+        // The handler gets the only copy kept here: when it drops it uncompleted, the exchange is answered 500. The
+        // watch does not count as a copy.
         Responder responder([exchange](Response&& response) { return exchange->deliver(std::move(response)); });
+        watch = responder.watch();
         handler(std::move(request), std::move(responder));
     } catch (...) {
         exchange->deliver(make_response(internal_error_status));
     }
 
-    Response response = exchange->wait();
+    // Wait for the answer, and look at the connection every poll interval meanwhile: a peer that went away before the
+    // answer settles the request (the handler is told through the responder, with no lock held here), and an answer
+    // that arrives later is dropped.
+    std::optional<Response> settled;
+    while (!(settled = exchange->wait_for(options.disconnect_poll_interval))) {
+        if (incoming.is_connection_closed() && watch.report_disconnect()) {
+            exchange->deliver(make_response(unavailable_status));  // nobody reads it; it only ends the wait
+        }
+    }
+    Response response = std::move(*settled);
     {
         std::lock_guard lock(mutex);
         pending.erase(exchange.get());

@@ -13,9 +13,11 @@
 //     connections are open at once, and a connection that arrives beyond that is closed at once.
 //
 // The peer's disconnect is noticed by polling (ListenerOptions::disconnect_poll_interval), because a blocking
-// socket gives the worker no wake-up: a client that went away is noticed within about one interval, and the stream's
-// on_close callback runs then. Before a response has started, a disconnect is noticed only when the response is
-// written.
+// socket gives the worker no wake-up: a client that went away is noticed within about one interval. While a stream is
+// open the stream's on_close callback runs then. While the worker waits for the Responder to be completed, the
+// Responder's on_disconnect callback runs then (on the worker, with no lock of the listener held), and a completion
+// that arrives later is dropped. The look at the connection reads without consuming: a peer that sends more bytes
+// (a pipelined request) is not taken for gone, and a peer that shuts down its sending side is.
 //
 // Constructing the first listener ignores SIGPIPE for the whole process (the HTTP library does that) and nothing
 // restores it, so a write to a closed socket fails with an error instead of ending the process.
@@ -71,7 +73,8 @@ struct ListenerOptions {
     // keep-alive comment. Other streams get none. Must be positive.
     std::chrono::milliseconds keep_alive_interval{15000};
 
-    // How often the listener looks for a disconnected peer while a stream is idle. Must be positive.
+    // How often the listener looks for a disconnected peer while a stream is idle, and while a request waits for its
+    // Responder to be completed. Must be positive.
     std::chrono::milliseconds disconnect_poll_interval{250};
 };
 

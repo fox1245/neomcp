@@ -86,23 +86,55 @@ Response make_response(int status, std::string_view content_type = {}, std::stri
 // The completion side of one request. It may be completed at once, or later from any thread; copies share one
 // completion. The first complete() wins and every later one has no effect. When the last copy is destroyed without
 // a completion, the request is answered 500 (a handler that fails to answer must not leave the peer waiting).
+//
+// The peer may go away before the request is completed. A listener that watches its connections (this library's
+// does) reports that through a Watch, and the handler learns of it through on_disconnect(): the request is then
+// settled, and a completion that arrives later is dropped (complete() returns false).
 class Responder {
+    struct State;
+
 public:
     // What a listener supplies: receives the response; returns false when it can no longer use it (the request was
     // abandoned, or the listener stopped). Called at most once, on the thread that completes. Must not throw.
     using Sink = std::function<bool(Response&&)>;
 
+    // The listener's side of a responder: it reports a disconnect without counting as a copy, so a handler that drops
+    // every copy still has the request answered 500.
+    class Watch {
+    public:
+        Watch() = default;
+
+        // The peer went away. When the request was not completed yet, this settles it (later completions are
+        // dropped), runs the callback registered with on_disconnect() once on this thread, and returns true. Returns
+        // false when the request was completed, or settled, already; the callback is not called then.
+        bool report_disconnect() const;
+
+    private:
+        friend class Responder;
+        explicit Watch(std::weak_ptr<State> state) : state_(std::move(state)) {}
+        std::weak_ptr<State> state_;
+    };
+
     explicit Responder(Sink sink);
 
     // True when this call completed the request and the response was taken; false when the request was already
-    // completed or the listener could not take the response.
+    // completed or settled by a disconnect, or the listener could not take the response.
     bool complete(Response response) const;
 
-    // True once any copy completed the request.
+    // True once any copy completed the request, or a disconnect settled it.
     bool completed() const noexcept;
 
+    // Registers the function told that the peer went away before the request was completed. It runs at most once, on
+    // the thread that reports the disconnect (a thread of the listener), with no lock of the listener or of the
+    // responder held, so it may call back into the responder. It does not run when the request was completed first.
+    // When the disconnect was reported already, it runs at once on the calling thread. A second registration replaces
+    // the first when that has not run yet. Must not throw; what it throws is swallowed.
+    void on_disconnect(std::function<void()> callback) const;
+
+    // The handle a listener keeps to report a disconnect.
+    Watch watch() const;
+
 private:
-    struct State;
     std::shared_ptr<State> state_;
 };
 

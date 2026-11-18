@@ -623,6 +623,106 @@ TEST(HttpListener, AClientThatGoesAwayFromABusyStreamMakesLaterAppendsFail) {
     std::cout << "[measure] busy stream, disconnect reported after " << since(start).count() << " ms\n";
 }
 
+// ---- A disconnect before the answer ----------------------------------------------------------------------------------
+
+TEST(HttpListener, AClientThatGoesAwayBeforeTheAnswerIsReportedThroughTheResponderAndALateAnswerIsDropped) {
+    ListenerOptions options = defaults();
+    options.disconnect_poll_interval = 25ms;
+    Mailbox<Responder> kept;
+    Counter told;
+    std::promise<std::thread::id> reporter;
+    auto server = run(options, [&](Request, Responder responder) {
+        responder.on_disconnect([&] {
+            reporter.set_value(std::this_thread::get_id());
+            told.add();
+        });
+        kept.push(responder);
+    });
+    StreamingClient client(server->port);
+    auto responder = kept.pop();
+    ASSERT_TRUE(responder.has_value());
+    EXPECT_EQ(told.value(), 0);
+
+    const auto start = std::chrono::steady_clock::now();
+    client.disconnect();
+    ASSERT_TRUE(told.wait_for_at_least(1, promptly));
+    std::cout << "[measure] pending request, disconnect reported after " << since(start).count()
+              << " ms (poll 25 ms)\n";
+    auto thread = reporter.get_future();
+    ASSERT_EQ(thread.wait_for(patience), std::future_status::ready);
+    EXPECT_NE(thread.get(), std::this_thread::get_id());  // on a thread of the listener
+    EXPECT_TRUE(responder->completed());
+    EXPECT_FALSE(responder->complete(neomcp::http::make_response(200, "application/json", "{}")));
+    EXPECT_EQ(told.value(), 1);
+}
+
+TEST(HttpListener, TheDisconnectCallbackMayCallBackIntoTheResponderAndTheListener) {
+    ListenerOptions options = defaults();
+    options.disconnect_poll_interval = 25ms;
+    Counter arrived;
+    Counter told;
+    std::atomic<bool> late_answer_taken{true};
+    std::atomic<bool> running_inside{false};
+    std::atomic<Listener*> listener{nullptr};
+    auto server = run(options, [&](Request, Responder responder) {
+        // The callback holds a copy, so the request stays open until the disconnect.
+        responder.on_disconnect([&, responder] {
+            late_answer_taken = responder.complete(neomcp::http::make_response(200));
+            running_inside = listener.load()->running();  // takes a lock of the listener: none may be held here
+            told.add();
+        });
+        arrived.add();
+    });
+    listener = &server->listener;
+    {
+        StreamingClient client(server->port);
+        ASSERT_TRUE(arrived.wait_for_at_least(1));
+        client.disconnect();
+        ASSERT_TRUE(told.wait_for_at_least(1, promptly));
+    }
+    EXPECT_FALSE(late_answer_taken.load());
+    EXPECT_TRUE(running_inside.load());
+}
+
+TEST(HttpListener, ARequestAnsweredBeforeTheClientLeavesIsNotReportedAsADisconnect) {
+    ListenerOptions options = defaults();
+    options.disconnect_poll_interval = 25ms;
+    Counter told;
+    auto server = run(options, [&](Request, Responder responder) {
+        responder.on_disconnect([&] { told.add(); });
+        responder.complete(neomcp::http::make_response(200, "application/json", "{}"));
+    });
+    auto result = make_client(server->port)->Post("/", "{}", "application/json");
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->status, 200);
+    // Nothing should happen; a window of many poll intervals shows it does not.
+    EXPECT_FALSE(told.wait_for_at_least(1, 250ms));
+}
+
+TEST(HttpListener, AClientThatWaitsIsNotTakenForGoneAndGetsTheAnswer) {
+    ListenerOptions options = defaults();
+    options.disconnect_poll_interval = 10ms;
+    Mailbox<Responder> kept;
+    Counter told;
+    auto server = run(options, [&](Request, Responder responder) {
+        responder.on_disconnect([&] { told.add(); });
+        kept.push(responder);
+    });
+    auto answer = std::async(std::launch::async, [&] {
+        return make_client(server->port)->Post("/", "{\"a\":1}", "application/json");
+    });
+    auto responder = kept.pop();
+    ASSERT_TRUE(responder.has_value());
+    // The worker looks at the connection about 25 times in this window; the client is still there each time.
+    EXPECT_FALSE(told.wait_for_at_least(1, 250ms));
+    EXPECT_TRUE(responder->complete(neomcp::http::make_response(200, "application/json", "{\"ok\":true}")));
+    auto result = answer.get();
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->status, 200);
+    EXPECT_EQ(result->body, "{\"ok\":true}");
+    EXPECT_EQ(told.value(), 0);
+}
+
 TEST(HttpListener, AHeadRequestToAStreamAnswersWithoutABodyAndClosesTheStream) {
     StreamHost host;
     auto server = run(defaults(), host.handler());
