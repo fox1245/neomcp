@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "neomcp/http/body_stream.h"
+#include "neomcp/http/media_type.h"
 #include "neomcp/http/message.h"
 #include "neomcp/http/sse.h"
 
@@ -460,6 +461,60 @@ TEST(HttpSse, EventStreamContentTypeIsRecognisedByItsMediaType) {
     EXPECT_FALSE(is_event_stream_content_type("text/event-stream2"));
     EXPECT_FALSE(is_event_stream_content_type("application/json; x=text/event-stream"));
     EXPECT_FALSE(is_event_stream_content_type(""));
+}
+
+// ---- The media type parser -------------------------------------------------------------------------------------------
+
+TEST(HttpMediaType, ReadsTypeSubtypeAndParameters) {
+    const auto media = neomcp::http::parse_media_type("Application/JSON ; charset=\"utf-8\";q=x");
+    ASSERT_TRUE(media.has_value());
+    EXPECT_EQ(media->type, "application");
+    EXPECT_EQ(media->subtype, "json");
+    ASSERT_EQ(media->parameters.size(), 2U);
+    EXPECT_EQ(media->parameters[0].first, "charset");
+    EXPECT_EQ(media->parameters[0].second, "utf-8");
+    EXPECT_TRUE(neomcp::http::is_media_type("application/json;charset=utf-8", "application", "json"));
+    EXPECT_FALSE(neomcp::http::is_media_type("application/jsonx", "application", "json"));
+    EXPECT_FALSE(neomcp::http::is_media_type("text/json", "application", "json"));
+}
+
+TEST(HttpMediaType, RefusesWhatTheGrammarDoesNotAllow) {
+    for (const char* bad : {"", "application", "application/", "/json", "application/json;", "application/json; x",
+                            "application/json; x=", "application/json; x=\"open", "application/json garbage",
+                            "appli cation/json", "application/json; x=a b"}) {
+        if (std::string(bad) == "application/json;") {
+            EXPECT_TRUE(neomcp::http::parse_media_type(bad).has_value()) << "an empty parameter is allowed";
+            continue;
+        }
+        EXPECT_FALSE(neomcp::http::parse_media_type(bad).has_value()) << bad;
+    }
+}
+
+TEST(HttpMediaType, AcceptRangesAndWeights) {
+    using neomcp::http::accepts;
+    const auto ranges = neomcp::http::parse_accept("text/event-stream, application/json;q=0.5,,*/*;q=0");
+    ASSERT_TRUE(ranges.has_value());
+    ASSERT_EQ(ranges->size(), 3U);
+    EXPECT_EQ((*ranges)[1].weight, 500);
+    EXPECT_TRUE(accepts(*ranges, "text", "event-stream"));
+    EXPECT_TRUE(accepts(*ranges, "application", "json"));
+    EXPECT_FALSE(accepts(*ranges, "text", "html")) << "only */* matches, and its weight is 0";
+
+    const auto refused = neomcp::http::parse_accept("application/json;q=0, */*");
+    ASSERT_TRUE(refused.has_value());
+    EXPECT_FALSE(accepts(*refused, "application", "json")) << "the most specific range decides";
+    EXPECT_TRUE(accepts(*refused, "text", "event-stream"));
+
+    const auto any = neomcp::http::parse_accept("application/*");
+    ASSERT_TRUE(any.has_value());
+    EXPECT_TRUE(accepts(*any, "application", "json"));
+    EXPECT_FALSE(accepts(*any, "text", "event-stream"));
+
+    EXPECT_TRUE(neomcp::http::parse_accept("")->empty());
+    for (const char* bad : {"*/json", "text", "text/html;q=2", "text/html;q=0.1234", "text/html;q=\"1\"",
+                            "text/html;q=1;q=1", "text/html;q=1.001", "text/html text/plain"}) {
+        EXPECT_FALSE(neomcp::http::parse_accept(bad).has_value()) << bad;
+    }
 }
 
 }  // namespace
