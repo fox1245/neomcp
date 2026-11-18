@@ -48,8 +48,11 @@ void Timer::run() {
             continue;
         }
         const auto first = jobs_.begin();
-        if (Clock::now() < first->first.first) {
-            changed_.wait_until(lock, first->first.first);
+        // A copy: the wait releases the lock, cancel() may erase the job meanwhile, and the wait reads the time again
+        // when it wakes.
+        const Clock::time_point due = first->first.first;
+        if (Clock::now() < due) {
+            changed_.wait_until(lock, due);
             continue;
         }
         std::function<void()> job = std::move(first->second);
