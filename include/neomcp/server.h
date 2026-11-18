@@ -314,6 +314,10 @@ public:
     // threads. The first call ends registration. The session's options come from the server's. `on_idle`, when given,
     // is told whenever the session becomes idle (see IdleCallback in neomcp/session.h).
     std::variant<std::unique_ptr<Session>, CreateError> connect(Sink sink, IdleCallback on_idle = {});
+    // The same for a transport that feeds input units (see Session::receive): the session serves `transport` and
+    // writes every output whole, tagged with the unit it belongs to, through `sink`.
+    std::variant<std::unique_ptr<Session>, CreateError> connect_tagged(profile::Transport transport, OutputSink sink,
+                                                                       IdleCallback on_idle = {});
 
     // ToolHost. The first use ends registration.
     std::span<const ToolDefinition> tools() const override;

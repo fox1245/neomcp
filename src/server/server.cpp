@@ -203,6 +203,9 @@ public:
     // Stops and joins everything; idempotent.
     void shutdown();
 
+    // The options of a session on this server for the transport.
+    SessionOptions session_options(profile::Transport transport, IdleCallback on_idle);
+
     std::size_t add(ToolDefinition definition, Body body);
     void edit(std::size_t index, const std::function<void(ToolDefinition&)>& change);
     const ToolDefinition& definition(std::size_t index) const { return definitions_.at(index); }
@@ -224,6 +227,8 @@ public:
     void add_template_completer(std::size_t index, std::string variable, FeatureBody<CompletionResult> body);
 
     std::variant<std::unique_ptr<Session>, CreateError> connect(Sink sink, IdleCallback on_idle);
+    std::variant<std::unique_ptr<Session>, CreateError> connect_tagged(profile::Transport transport, OutputSink sink,
+                                                                       IdleCallback on_idle);
     std::span<const ToolDefinition> tools() const override;
     void call(const CallRequest& request, CallControl control, Completion done) override;
     ResourceHost* resource_host() noexcept override;
@@ -617,8 +622,18 @@ void ServerCore::set_template_cache(std::size_t index, CacheHints hints) {
 // Serving
 
 std::variant<std::unique_ptr<Session>, CreateError> ServerCore::connect(Sink sink, IdleCallback on_idle) {
+    return Session::create(session_options(profile::Transport::stdio, std::move(on_idle)), *this, std::move(sink));
+}
+
+std::variant<std::unique_ptr<Session>, CreateError> ServerCore::connect_tagged(profile::Transport transport,
+                                                                             OutputSink sink, IdleCallback on_idle) {
+    return Session::create_tagged(session_options(transport, std::move(on_idle)), *this, std::move(sink));
+}
+
+SessionOptions ServerCore::session_options(profile::Transport transport, IdleCallback on_idle) {
     serving_.store(true);
     SessionOptions session;
+    session.transport = transport;
     session.profiles = options_.profiles;
     session.server_info.name = options_.name;
     session.server_info.version = options_.version;
@@ -641,7 +656,7 @@ std::variant<std::unique_ptr<Session>, CreateError> ServerCore::connect(Sink sin
     session.check_arguments = [core = shared_from_this()](const ToolDefinition& tool, const json& arguments) {
         return core->check(tool, arguments);
     };
-    return Session::create(std::move(session), *this, std::move(sink));
+    return session;
 }
 
 std::span<const ToolDefinition> ServerCore::tools() const {
@@ -1257,6 +1272,11 @@ ToolHandle Server::add(ToolDefinition definition, detail::Body body) {
 
 std::variant<std::unique_ptr<Session>, CreateError> Server::connect(Sink sink, IdleCallback on_idle) {
     return core_->connect(std::move(sink), std::move(on_idle));
+}
+
+std::variant<std::unique_ptr<Session>, CreateError> Server::connect_tagged(profile::Transport transport,
+                                                                           OutputSink sink, IdleCallback on_idle) {
+    return core_->connect_tagged(transport, std::move(sink), std::move(on_idle));
 }
 
 std::span<const ToolDefinition> Server::tools() const { return core_->tools(); }
