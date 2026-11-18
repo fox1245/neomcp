@@ -4,6 +4,8 @@ name: CI
 # UndefinedBehaviorSanitizer, and on Linux arm64 without them. macOS (arm64 and x64) and Windows (x64 and arm64) run on pushes to main and on
 # demand, and on every event once the repository is public. One more job runs the stdio and HTTP servers against the
 # official Python SDK's client, and one runs the official conformance suite against the HTTP server, once per revision.
+# The README's two programs are built as a user builds them (the repository added as a subdirectory of another
+# project) and run once: on Linux with Clang, and on Windows with MSVC, where the HTTP server's SIGTERM check is left out.
 
 on:
   push:
@@ -146,3 +148,49 @@ jobs:
           echo "--- fixture log"
           cat "$RUNNER_TEMP/fixture.log" || true
           python3 -I tests/conformance/summarize_checks.py "$RUNNER_TEMP/results-2026-07-28" "$RUNNER_TEMP/results-2025-11-25"
+
+  consumer:
+    name: consumer-linux-clang
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The README's programs are the files that are compiled
+        run: python3 -I tests/consumer/check_readme.py
+      - name: Configure the consumer project against this checkout (Release)
+        run: cmake -S tests/consumer -B consumer-build -DCMAKE_BUILD_TYPE=Release "-DNEOMCP_SOURCE_DIR=$GITHUB_WORKSPACE"
+      - name: Show the compilers and flags the build uses
+        run: grep -E '^CMAKE_(C|CXX)_(COMPILER|FLAGS):' consumer-build/CMakeCache.txt
+      - name: Build
+        run: cmake --build consumer-build --parallel
+      - name: Run the stdio server on an initialize and a tool call
+        run: python3 -I tests/consumer/check_stdio.py consumer-build/calc
+      - name: Run the HTTP server on a tool call and stop it with SIGTERM
+        run: python3 -I tests/consumer/check_http.py consumer-build/calc_http
+
+  consumer-windows:
+    name: consumer-windows-msvc
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event.repository.private == false
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Configure the consumer project against this checkout
+        shell: bash
+        run: cmake -S tests/consumer -B consumer-build "-DNEOMCP_SOURCE_DIR=${GITHUB_WORKSPACE//\\//}"
+      - name: Build (Release)
+        run: cmake --build consumer-build --config Release --parallel
+      - name: Run the stdio server on an initialize and a tool call
+        run: python -I tests/consumer/check_stdio.py consumer-build/Release/calc.exe
+      # Not run here: check_http.py ends the server with SIGTERM, which Python cannot send to a process on Windows
+      # (terminate() there kills it without letting it exit by itself). The HTTP server is compiled and linked above,
+      # and the listener's own tests run in the windows jobs of the main build.
