@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <map>
@@ -70,6 +71,28 @@ private:
     std::mutex mutex_;
     std::condition_variable changed_;
     int value_ = 0;
+};
+
+// Two threads meet: each arrive() returns once the other thread arrived as often.
+class Meeting {
+public:
+    void arrive() {
+        std::unique_lock lock(mutex_);
+        const std::uint64_t round = round_;
+        if (++waiting_ == 2) {
+            waiting_ = 0;
+            ++round_;
+            met_.notify_all();
+            return;
+        }
+        met_.wait(lock, [&] { return round_ != round; });
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable met_;
+    int waiting_ = 0;
+    std::uint64_t round_ = 0;
 };
 
 neomcp::ToolResult text_result(std::string text) {
@@ -157,7 +180,12 @@ public:
     neomcp::PromptHost* prompt_host() noexcept override { return this; }
     std::span<const neomcp::ToolDefinition> tools() const override { return tools_; }
     bool tool_enabled(std::size_t index) const override { return tool_on_.at(index).load(); }
-    void call(const neomcp::CallRequest& request, neomcp::CallControl, neomcp::Completion done) override {
+    void call(const neomcp::CallRequest& request, neomcp::CallControl control, neomcp::Completion done) override {
+        // gamma reports progress and logs before it answers: notifications of the call, never of a subscription.
+        if (request.name == "gamma") {
+            control.progress(1, 2);
+            control.log(neomcp::LogLevel::error, "gamma ran");
+        }
         done(text_result("ran " + request.name));
     }
     neomcp::ChangeSupport change_support() const override { return support_; }
@@ -535,7 +563,7 @@ TEST(ConnectionFeed, AChangeRacingCloseIsNeverWrittenAfterIt) {
         std::thread reporter([&] {
             while (!stop.load()) host.report(neomcp::ChangeKind::tools_list);
         });
-        ASSERT_TRUE(written.wait_for_at_least(2));  // the handshake's answer and one notification
+        EXPECT_TRUE(written.wait_for_at_least(2));  // the handshake's answer and one notification
         if (round % 2 == 0) {
             session->close();
             closed = true;
@@ -543,6 +571,375 @@ TEST(ConnectionFeed, AChangeRacingCloseIsNeverWrittenAfterIt) {
             session.reset();  // destroying closes too, and the reporter may hold the listener meanwhile
             closed = true;
         }
+        EXPECT_EQ(host.watchers(), 0u);
+        stop = true;
+        reporter.join();
+        EXPECT_EQ(late.load(), 0) << "round " << round;
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// subscriptions_listen (2026-07-28): subscriptions
+
+constexpr const char* subscription_key = "io.modelcontextprotocol/subscriptionId";
+
+json listen_params(json filter) { return json{{"notifications", std::move(filter)}}; }
+
+json tagged(const char* method, const json& id, json params = json::object()) {
+    params["_meta"] = json{{subscription_key, id}};
+    return json{{"jsonrpc", "2.0"}, {"method", method}, {"params", std::move(params)}};
+}
+
+json acknowledged(const json& id, json filter) {
+    return tagged("notifications/subscriptions/acknowledged", id, json{{"notifications", std::move(filter)}});
+}
+
+// A session of the modern revision whose outputs are tagged with the unit they belong to, as the HTTP transport gets
+// them. Each unit is numbered by the test.
+class Tagged {
+public:
+    explicit Tagged(FeedHost& host, neomcp::SessionOptions options = options_for(modern_revision))
+        : profile_(builtin(modern_revision)) {
+        auto made = neomcp::Session::create_tagged(std::move(options), host,
+                                                   [this](neomcp::Output output) { push(std::move(output)); });
+        if (!std::holds_alternative<std::unique_ptr<neomcp::Session>>(made)) {
+            throw std::runtime_error(std::get<neomcp::CreateError>(made).message);
+        }
+        session_ = std::get<std::unique_ptr<neomcp::Session>>(std::move(made));
+    }
+
+    bool send(neomcp::UnitId unit, const neomcp::RequestId& id, const std::string& method, json params) {
+        return session_->receive(unit, Peer::make_request(*profile_, id, method, std::move(params)).dump());
+    }
+
+    // The next output of the unit; empty after the timeout.
+    std::optional<neomcp::Output> next(neomcp::UnitId unit) {
+        std::unique_lock lock(mutex_);
+        std::size_t& read = read_[unit];
+        if (!arrived_.wait_for(lock, patience, [&] { return outputs_[unit].size() > read; })) return std::nullopt;
+        return outputs_[unit][read++];
+    }
+    std::optional<json> next_message(neomcp::UnitId unit) {
+        auto output = next(unit);
+        if (!output || output->kind == neomcp::OutputKind::end) return std::nullopt;
+        return json::parse(output->line);
+    }
+    std::vector<neomcp::Output> of(neomcp::UnitId unit) {
+        std::lock_guard lock(mutex_);
+        return outputs_[unit];
+    }
+
+    neomcp::Session& session() { return *session_; }
+
+private:
+    void push(neomcp::Output output) {
+        {
+            std::lock_guard lock(mutex_);
+            outputs_[output.unit ? *output.unit : 0].push_back(std::move(output));
+        }
+        arrived_.notify_all();
+    }
+
+    profile::ProfilePtr profile_;
+    std::mutex mutex_;
+    std::condition_variable arrived_;
+    std::map<neomcp::UnitId, std::vector<neomcp::Output>> outputs_;  // 0: the connection
+    std::map<neomcp::UnitId, std::size_t> read_;
+    std::unique_ptr<neomcp::Session> session_;
+};
+
+TEST(SubscriptionFeed, TheAcknowledgementComesFirstAndNamesWhatIsHonoured) {
+    FeedHost host;
+    Client client(host, modern_revision);
+    client.peer.notify(Peer::make_request(
+        *client.profile, 7, "subscriptions/listen",
+        listen_params({{"toolsListChanged", true},
+                       {"promptsListChanged", false},
+                       {"resourceSubscriptions", {"test://one", "test://missing", "test://item/3", "test://one"}}})));
+    // Of the resources, those the host offers; of the lists, those asked for.
+    EXPECT_EQ(client.peer.next_notification(patience),
+              acknowledged(7, {{"toolsListChanged", true},
+                               {"resourceSubscriptions", {"test://one", "test://item/3"}}}));
+    EXPECT_EQ(host.watchers(), 1u);
+    host.report(neomcp::ChangeKind::tools_list);
+    EXPECT_EQ(client.peer.next_notification(patience), tagged("notifications/tools/list_changed", 7));
+    host.report(neomcp::ChangeKind::resource_updated, "test://item/3");
+    EXPECT_EQ(client.peer.next_notification(patience),
+              tagged("notifications/resources/updated", 7, {{"uri", "test://item/3"}}));
+}
+
+TEST(SubscriptionFeed, OnlyWhatTheFilterNamesIsSent) {
+    FeedHost host;
+    Client client(host, modern_revision);
+    client.peer.notify(Peer::make_request(*client.profile, "narrow", "subscriptions/listen",
+                                          listen_params({{"promptsListChanged", true}})));
+    EXPECT_EQ(client.peer.next_notification(patience), acknowledged("narrow", {{"promptsListChanged", true}}));
+    host.report(neomcp::ChangeKind::tools_list);
+    host.report(neomcp::ChangeKind::resources_list);
+    host.report(neomcp::ChangeKind::resource_updated, "test://one");
+    host.report(neomcp::ChangeKind::prompts_list);
+    EXPECT_EQ(client.peer.next_notification(patience), tagged("notifications/prompts/list_changed", "narrow"))
+        << "the tools, resources and update came before it and were not sent";
+}
+
+TEST(SubscriptionFeed, AKindTheHostDoesNotReportIsNotAcknowledged) {
+    FeedHost host(neomcp::ChangeSupport{true, false, false, false});
+    Client client(host, modern_revision);
+    client.peer.notify(Peer::make_request(
+        *client.profile, 1, "subscriptions/listen",
+        listen_params(
+            {{"toolsListChanged", true}, {"promptsListChanged", true}, {"resourceSubscriptions", {"test://one"}}})));
+    EXPECT_EQ(client.peer.next_notification(patience), acknowledged(1, {{"toolsListChanged", true}}));
+    host.report(neomcp::ChangeKind::prompts_list);
+    host.report(neomcp::ChangeKind::tools_list);
+    EXPECT_EQ(client.peer.next_notification(patience), tagged("notifications/tools/list_changed", 1));
+}
+
+TEST(SubscriptionFeed, ServerWithNoChangesOffersNoSubscription) {
+    FeedHost host(neomcp::ChangeSupport{});
+    Client client(host, modern_revision);
+    const json refused = client.request("subscriptions/listen", listen_params({{"toolsListChanged", true}}));
+    ASSERT_TRUE(refused.contains("error")) << refused.dump();
+    EXPECT_EQ(refused.at("error").at("code"), neomcp::error_code::method_not_found);
+}
+
+TEST(SubscriptionFeed, AMalformedFilterIsInvalidParams) {
+    FeedHost host;
+    Client client(host, modern_revision);
+    for (const json& params : {json::object(), json{{"notifications", true}},
+                               listen_params({{"toolsListChanged", "yes"}}),
+                               listen_params({{"resourceSubscriptions", "test://one"}}),
+                               listen_params({{"resourceSubscriptions", {1}}})}) {
+        const json refused = client.request("subscriptions/listen", params);
+        ASSERT_TRUE(refused.contains("error")) << params.dump() << " " << refused.dump();
+        EXPECT_EQ(refused.at("error").at("code"), neomcp::error_code::invalid_params) << params.dump();
+    }
+    EXPECT_EQ(host.watchers(), 0u) << "a refused subscription registers nothing";
+}
+
+TEST(SubscriptionFeed, SubscriptionsOfOneSessionAreToldApartByTheirIds) {
+    FeedHost host;
+    Client client(host, modern_revision);
+    client.peer.notify(Peer::make_request(*client.profile, "tools", "subscriptions/listen",
+                                          listen_params({{"toolsListChanged", true}})));
+    EXPECT_EQ(client.peer.next_notification(patience), acknowledged("tools", {{"toolsListChanged", true}}));
+    client.peer.notify(Peer::make_request(*client.profile, 2, "subscriptions/listen",
+                                          listen_params({{"toolsListChanged", true}, {"promptsListChanged", true}})));
+    EXPECT_EQ(client.peer.next_notification(patience),
+              acknowledged(2, {{"toolsListChanged", true}, {"promptsListChanged", true}}));
+    EXPECT_EQ(host.registrations(), 1u) << "one registration serves every subscription of the session";
+    host.report(neomcp::ChangeKind::tools_list);
+    host.report(neomcp::ChangeKind::prompts_list);
+    std::vector<json> heard;
+    for (int i = 0; i < 3; ++i) {
+        auto message = client.peer.next_notification(patience);
+        ASSERT_TRUE(message);
+        heard.push_back(*message);
+    }
+    const auto count = [&](const json& expected) { return std::count(heard.begin(), heard.end(), expected); };
+    EXPECT_EQ(count(tagged("notifications/tools/list_changed", "tools")), 1);
+    EXPECT_EQ(count(tagged("notifications/tools/list_changed", 2)), 1);
+    EXPECT_EQ(count(tagged("notifications/prompts/list_changed", 2)), 1);
+    // A second subscription under an id still open is refused.
+    client.peer.notify(Peer::make_request(*client.profile, 2, "subscriptions/listen", listen_params({})));
+    EXPECT_EQ(client.peer.await_response(2, patience).value_or(json()).at("error").at("code"),
+              neomcp::error_code::invalid_request);
+}
+
+TEST(SubscriptionFeed, AClientCancelsASubscriptionAndHearsNothingMoreOnIt) {
+    FeedHost host;
+    Client client(host, modern_revision);
+    client.peer.notify(Peer::make_request(*client.profile, 1, "subscriptions/listen",
+                                          listen_params({{"toolsListChanged", true}})));
+    client.peer.notify(Peer::make_request(*client.profile, 2, "subscriptions/listen",
+                                          listen_params({{"toolsListChanged", true}})));
+    ASSERT_TRUE(client.peer.next_notification(patience));
+    ASSERT_TRUE(client.peer.next_notification(patience));
+    client.peer.notify(json{{"jsonrpc", "2.0"}, {"method", "notifications/cancelled"}, {"params", {{"requestId", 1}}}});
+    host.report(neomcp::ChangeKind::tools_list);
+    EXPECT_EQ(client.peer.next_notification(patience), tagged("notifications/tools/list_changed", 2));
+    // No answer comes for the subscription the client cancelled.
+    EXPECT_EQ(client.result("tools/list").at("tools").size(), 3u);
+    const auto transcript = client.peer.transcript();
+    EXPECT_TRUE(std::none_of(transcript.begin(), transcript.end(), [](const json& message) {
+        return message.contains("id") && message.at("id") == 1;
+    }));
+}
+
+TEST(SubscriptionFeed, ClosingTheSessionEndsEverySubscriptionGracefully) {
+    FeedHost host;
+    std::vector<json> written;
+    std::mutex mutex;
+    const auto profile = builtin(modern_revision);
+    auto made = neomcp::Session::create(options_for(modern_revision), host, [&](std::string line) {
+        std::lock_guard lock(mutex);
+        written.push_back(json::parse(line));
+    });
+    auto session = std::get<std::unique_ptr<neomcp::Session>>(std::move(made));
+    const json listen =
+        Peer::make_request(*profile, 5, "subscriptions/listen", listen_params({{"toolsListChanged", true}}));
+    session->receive(listen.dump());
+    EXPECT_TRUE(session->idle()) << "an open subscription does not keep the session busy";
+    session->close();
+    EXPECT_EQ(host.watchers(), 0u);
+    ASSERT_EQ(written.size(), 3u);
+    EXPECT_EQ(written[0], acknowledged(5, {{"toolsListChanged", true}}));
+    EXPECT_EQ(written[1], tagged("notifications/cancelled", 5,
+                                 {{"requestId", 5}, {"reason", "The server ended the subscription"}}));
+    const json& end = written[2];
+    EXPECT_EQ(end.at("id"), 5);
+    EXPECT_EQ(end.at("result").at("resultType"), "complete");
+    EXPECT_EQ(end.at("result").at("_meta").at(subscription_key), 5);
+}
+
+TEST(SubscriptionFeed, AHostThatStopsEndsTheSubscriptionsGracefullyAndTheSessionServesOn) {
+    FeedHost host;
+    Client client(host, modern_revision);
+    client.peer.notify(Peer::make_request(*client.profile, 9, "subscriptions/listen",
+                                          listen_params({{"toolsListChanged", true}})));
+    ASSERT_TRUE(client.peer.next_notification(patience));
+    host.end_feed();
+    EXPECT_EQ(client.peer.next_notification(patience), tagged("notifications/cancelled", 9,
+                                                              {{"requestId", 9},
+                                                               {"reason", "The server ended the subscription"}}));
+    const auto end = client.peer.await_response(9, patience);
+    ASSERT_TRUE(end);
+    EXPECT_EQ(end->at("result").at("resultType"), "complete");
+    EXPECT_EQ(client.result("tools/list").at("tools").size(), 3u);
+    const json refused = client.request("subscriptions/listen", listen_params({{"toolsListChanged", true}}));
+    ASSERT_TRUE(refused.contains("error")) << "a host that stopped takes no subscription";
+}
+
+TEST(SubscriptionFeed, TheBoundsOfASessionAreKept) {
+    FeedHost host;
+    neomcp::SessionOptions options = options_for(modern_revision);
+    options.max_subscriptions = 2;
+    options.max_watched_resources = 2;
+    Client client(host, modern_revision, std::move(options));
+    const json too_many = client.request(
+        "subscriptions/listen",
+        listen_params({{"resourceSubscriptions", {"test://one", "test://two", "test://item/1"}}}));
+    ASSERT_TRUE(too_many.contains("error")) << too_many.dump();
+    EXPECT_EQ(too_many.at("error").at("code"), neomcp::error_code::invalid_params);
+    for (int id : {1, 2}) {
+        client.peer.notify(Peer::make_request(*client.profile, id, "subscriptions/listen",
+                                              listen_params({{"toolsListChanged", true}})));
+        ASSERT_TRUE(client.peer.next_notification(patience));
+    }
+    const json third = client.request("subscriptions/listen", listen_params({{"toolsListChanged", true}}));
+    ASSERT_TRUE(third.contains("error")) << third.dump();
+    EXPECT_EQ(third.at("error").at("code"), neomcp::error_code::internal_error);
+    EXPECT_EQ(third.at("error").at("data"), (json{{"reason", "limit"}}));
+    client.peer.notify(json{{"jsonrpc", "2.0"}, {"method", "notifications/cancelled"}, {"params", {{"requestId", 1}}}});
+    client.peer.notify(Peer::make_request(*client.profile, 3, "subscriptions/listen",
+                                          listen_params({{"toolsListChanged", true}})));
+    EXPECT_EQ(client.peer.next_notification(patience), acknowledged(3, {{"toolsListChanged", true}}));
+}
+
+TEST(SubscriptionFeed, TheNotificationsOfACallNeverGoToASubscription) {
+    FeedHost host;
+    neomcp::SessionOptions options = options_for(modern_revision);
+    options.protocol_logging = true;
+    Tagged session(host, std::move(options));
+    EXPECT_TRUE(session.send(1, 1, "subscriptions/listen",
+                             listen_params({{"toolsListChanged", true}, {"promptsListChanged", true}})));
+    const auto ack = session.next(1);
+    ASSERT_TRUE(ack);
+    EXPECT_FALSE(ack->last);
+    EXPECT_TRUE(ack->long_lived);
+    json params = json{{"name", "gamma"}};
+    params["_meta"] = json{{"progressToken", "p"}, {"io.modelcontextprotocol/logLevel", "debug"}};
+    EXPECT_TRUE(session.send(2, 2, "tools/call", params));
+    host.report(neomcp::ChangeKind::prompts_list);
+    // The call's progress and log came on its own unit, before its answer.
+    const auto calls = session.of(2);
+    ASSERT_GE(calls.size(), 3u);
+    EXPECT_EQ(json::parse(calls[0].line).at("method"), "notifications/progress");
+    EXPECT_EQ(json::parse(calls[1].line).at("method"), "notifications/message");
+    EXPECT_FALSE(calls[0].long_lived);
+    const auto next = session.next_message(1);
+    EXPECT_EQ(next, tagged("notifications/prompts/list_changed", 1)) << "nothing of the call came before it";
+}
+
+TEST(SubscriptionFeed, AnAbandonedSubscriptionEndsWithoutAWord) {
+    FeedHost host;
+    Tagged session(host);
+    EXPECT_TRUE(session.send(1, "s", "subscriptions/listen", listen_params({{"toolsListChanged", true}})));
+    EXPECT_TRUE(session.send(2, "t", "subscriptions/listen", listen_params({{"toolsListChanged", true}})));
+    ASSERT_TRUE(session.next(1));
+    ASSERT_TRUE(session.next(2));
+    session.session().abandon(1);
+    host.report(neomcp::ChangeKind::tools_list);
+    EXPECT_EQ(session.next_message(2), tagged("notifications/tools/list_changed", "t"));
+    session.session().close();
+    EXPECT_EQ(session.of(1).size(), 1u) << "after its abandonment nothing of the unit is written, its end included";
+    // The other one ended gracefully: the notice, then the result as the unit's last output.
+    const auto ended = session.of(2);
+    ASSERT_EQ(ended.size(), 4u);
+    EXPECT_EQ(json::parse(ended[2].line).at("method"), "notifications/cancelled");
+    EXPECT_EQ(ended[3].kind, neomcp::OutputKind::response);
+    EXPECT_TRUE(ended[3].last);
+    EXPECT_TRUE(ended[3].long_lived);
+    EXPECT_EQ(host.watchers(), 0u);
+}
+
+// The acknowledgement is the first message of a subscription even while a change is reported on another thread as
+// the subscription opens: before each listen request the two threads meet, then race.
+TEST(SubscriptionFeed, TheAcknowledgementIsFirstWhileChangesRace) {
+    constexpr neomcp::UnitId count = 200;
+    FeedHost host;
+    neomcp::SessionOptions options = options_for(modern_revision);
+    options.max_subscriptions = count;
+    Tagged session(host, std::move(options));
+    Meeting meeting;
+    std::thread reporter([&] {
+        for (neomcp::UnitId unit = 1; unit <= count; ++unit) {
+            meeting.arrive();
+            host.report(neomcp::ChangeKind::tools_list);
+        }
+    });
+    for (neomcp::UnitId unit = 1; unit <= count; ++unit) {
+        meeting.arrive();
+        session.send(unit, unit, "subscriptions/listen", listen_params({{"toolsListChanged", true}}));
+    }
+    reporter.join();
+    for (neomcp::UnitId unit = 1; unit <= count; ++unit) {
+        const auto first = session.next_message(unit);
+        ASSERT_TRUE(first) << "unit " << unit;
+        EXPECT_EQ(first->value("method", std::string()), "notifications/subscriptions/acknowledged")
+            << "unit " << unit << ": " << first->dump();
+    }
+}
+
+// A change racing the close of a session with open subscriptions: nothing after close() returned, no registration.
+TEST(SubscriptionFeed, AChangeRacingCloseIsNeverWrittenAfterIt) {
+    const auto profile = builtin(modern_revision);
+    for (int round = 0; round < 200; ++round) {
+        FeedHost host;
+        std::atomic<bool> closed{false};
+        Counter written;
+        std::atomic<int> late{0};
+        auto created = neomcp::Session::create(options_for(modern_revision), host, [&](std::string) {
+            if (closed.load()) ++late;
+            written.add();
+        });
+        ASSERT_TRUE(std::holds_alternative<std::unique_ptr<neomcp::Session>>(created));
+        auto session = std::get<std::unique_ptr<neomcp::Session>>(std::move(created));
+        const json listen =
+            Peer::make_request(*profile, 1, "subscriptions/listen", listen_params({{"toolsListChanged", true}}));
+        session->receive(listen.dump());
+        ASSERT_EQ(host.watchers(), 1u);
+        std::atomic<bool> stop{false};
+        std::thread reporter([&] {
+            while (!stop.load()) host.report(neomcp::ChangeKind::tools_list);
+        });
+        EXPECT_TRUE(written.wait_for_at_least(2));  // the acknowledgement and one notification
+        if (round % 2 == 0) {
+            session->close();
+        } else {
+            session.reset();
+        }
+        closed = true;
         EXPECT_EQ(host.watchers(), 0u);
         stop = true;
         reporter.join();

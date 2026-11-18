@@ -27,6 +27,23 @@
 // Before anything is put in a result or sent, every request is checked against the capabilities the client declared
 // (in the handshake, or in the request): a request it cannot take ends the call with the revision's error for a
 // missing client capability (Output::refusal says so), or where the revision has none as a failure of the call's kind.
+//
+// Change notifications. A host that reports changes (ToolHost::change_support) gets the session's listener the first
+// time the session needs it, and lets it go when the session closes. The profile's `change_feed` mechanism says where a
+// change goes:
+// - connection_notifications: to the connection a handshake opened, as outputs that belong to the connection, once
+//   the client sent notifications/initialized; list changes of every kind declared, and the updates of the resources
+//   the connection watches (resources/subscribe adds a URI the host offers, resources/unsubscribe removes one).
+// - subscriptions_listen: to the subscriptions the client opened. subscriptions/listen opens one; its unit stays open
+//   and every output of it is long-lived (Output::long_lived). Its first output is the acknowledgement, which names
+//   what of the request's filter is honoured (the kinds the host reports, and the resources it offers now); every
+//   message of it carries the listen request's id in `_meta`; only what it asked for is sent on it, and never a
+//   notification of a call. It ends when the client cancels it (a cancellation of the listen request), when its unit
+//   is abandoned, and when the session closes or the host stops reporting: then the session ends it gracefully, with
+//   a notifications/cancelled that names the listen request and then the listen request's result, the unit's last
+//   output.
+// A change notification is dropped, as a progress notification is, while the output queue is full. Open subscriptions
+// do not keep the session from being idle.
 #pragma once
 
 #include <chrono>
@@ -109,6 +126,9 @@ struct Output {
     // The profile that governs it: the one the input was served under or, for a refusal, the one whose `errors`
     // gave its code; null when none is known.
     profile::ProfilePtr profile;
+    // Set on every output of a subscription (see Session): its unit stays open until the subscription ends, so its
+    // messages need a stream; a transport that cannot give the unit one refuses it and abandons the unit.
+    bool long_lived = false;
 };
 
 // Receives each output, with the same guarantees as a Sink: one thread at a time, never re-entrantly, never under a
@@ -216,8 +236,12 @@ struct SessionOptions {
     // ---- Change notifications (ToolHost::change_support)
 
     // Under the mechanism that tells the connection (connection_notifications): the resources a connection may watch
-    // at once; one more is refused. Zero is an error. Default 256.
+    // at once; one more is refused. Under the mechanism of subscriptions (subscriptions_listen): the resources one
+    // subscription may name; a request that names more is refused. Zero is an error. Default 256.
     std::size_t max_watched_resources = 256;
+    // Under the mechanism of subscriptions: the subscriptions a session keeps open at once; one more is refused. Zero
+    // is an error. Default 16.
+    std::size_t max_subscriptions = 16;
 
     // Runs before every tools/call; empty: arguments are not checked.
     ArgumentCheck check_arguments;

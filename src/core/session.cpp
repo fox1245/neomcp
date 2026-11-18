@@ -236,7 +236,13 @@ struct Place {
 };
 
 // What a call in flight is for; it decides which outcomes may complete it.
-enum class CallKind { tool, resource_read, prompt_get, completion };
+enum class CallKind {
+    tool,
+    resource_read,
+    prompt_get,
+    completion,
+    subscription  // an open subscription of the change feed: it is answered when it ends
+};
 
 // What a call asks its host, kept to ask it again when answers arrive.
 using HostRequest = std::variant<std::monostate, CallRequest, ReadRequest, PromptRequest>;
@@ -276,6 +282,9 @@ struct CallState {
     std::optional<double> last_progress;
     std::size_t rounds = 0;            // rounds of requests sent to the client
     std::shared_ptr<WaitState> wait;   // the round that waits for its answers; null when none
+
+    // A subscription: what of its request is honoured. Written before the call is in flight.
+    ChangeFilter filter;
 
     explicit CallState(RequestId request_id) : id(std::move(request_id)) {}
 };
@@ -356,6 +365,8 @@ private:
         Output output;                     // its unit number is filled in from `unit` when it is queued
         std::shared_ptr<CallState> owner;  // the call the output belongs to; null for others
         Unit unit;                         // the unit it belongs to; null when it belongs to the connection
+        // An acknowledgement or a graceful end of a subscription: never dropped for a full queue, and kept by close().
+        bool essential = false;
     };
 
     struct Connection {
@@ -411,6 +422,10 @@ private:
     std::optional<Answer> on_feed(Message& request, const Served& served, Origin& origin, const Place& place);
     std::optional<Answer> on_watch(const Message& request, const FeedRequest& asked, const Served& served,
                                    const Origin& origin);
+    std::optional<Answer> on_listen(const Message& request, const FeedRequest& asked, const Served& served,
+                                    Origin& origin, const Place& place);
+    // The outputs that end a subscription the server tears down, in order; with mutex_ held.
+    void ending_outputs(const std::shared_ptr<CallState>& call, std::vector<Queued>& out) const;
     // Registers the session for the host's changes, once; false when the host takes no registration.
     bool watch_host();
     // The line of a notification of the feed under `served`; empty when the profile has no such notification.
@@ -540,6 +555,7 @@ private:
     std::uint64_t next_outgoing_ = 0;
     Watch watch_ = Watch::none;
     ChangeRegistration registration_;  // reset without the lock held
+    std::size_t listening_ = 0;        // the calls in flight that are open subscriptions
 };
 
 // The listener a session registers with its host: it holds the session weakly, so that a registration the host keeps
@@ -619,6 +635,7 @@ std::variant<std::shared_ptr<SessionCore>, CreateError> SessionCore::create(Sess
     if (options.max_queued_notifications == 0) problem("max_queued_notifications is zero");
     if (options.max_input_rounds == 0) problem("max_input_rounds is zero");
     if (options.max_watched_resources == 0) problem("max_watched_resources is zero");
+    if (options.max_subscriptions == 0) problem("max_subscriptions is zero");
     if (options.request_state_ttl <= std::chrono::seconds::zero()) problem("request_state_ttl is not positive");
     for (const auto& key : options.request_state_keys) {
         if (key.size() < min_state_key_size) {
@@ -1681,7 +1698,8 @@ std::optional<Answer> SessionCore::on_set_level(Message& request, const Served& 
 // ---------------------------------------------------------------------------------------------------------------
 // The change feed
 
-std::optional<Answer> SessionCore::on_feed(Message& request, const Served& served, Origin& origin, const Place&) {
+std::optional<Answer> SessionCore::on_feed(Message& request, const Served& served, Origin& origin,
+                                           const Place& place) {
     auto read = served.feed->read(request);
     if (const auto* error = std::get_if<RequestError>(&read)) {
         return served_answer(make_error(*request.id, error->code, error->message, error->data), served);
@@ -1690,7 +1708,7 @@ std::optional<Answer> SessionCore::on_feed(Message& request, const Served& serve
     switch (asked.action) {
         case FeedRequest::Action::watch:
         case FeedRequest::Action::unwatch: return on_watch(request, asked, served, origin);
-        case FeedRequest::Action::listen: break;
+        case FeedRequest::Action::listen: return on_listen(request, asked, served, origin, place);
     }
     return method_not_found(request, served);
 }
@@ -1748,6 +1766,115 @@ std::optional<Answer> SessionCore::on_watch(const Message& request, const FeedRe
     json body = json::object();
     finish_result(body, "EmptyResult", *served.profile);
     return served_answer(make_result(id, std::move(body)), served);
+}
+
+std::optional<Answer> SessionCore::on_listen(const Message& request, const FeedRequest& asked, const Served& served,
+                                             Origin& origin, const Place& place) {
+    const RequestId& id = *request.id;
+    const ChangeSupport reported = this->reported();
+    // A server that reports no kind of change offers no subscription.
+    if (served.feed->delivery() != FeedDelivery::subscription ||
+        !(reported.tools_list || reported.prompts_list || reported.resources_list || reported.resource_updates)) {
+        return method_not_found(request, served);
+    }
+    // Its answer comes only when it ends, which a batch's answer cannot wait for.
+    if (place.batch) {
+        return served_answer(make_error(id, error_code::invalid_request,
+                                        "Invalid Request: " + request.method + " must not be part of a batch"),
+                             served, RefusalReason::invalid_request);
+    }
+    if (asked.filter.resources.size() > options_.max_watched_resources) {
+        return served_answer(make_error(id, error_code::invalid_params,
+                                        "Invalid params: a subscription names at most " +
+                                            std::to_string(options_.max_watched_resources) + " resources"),
+                             served);
+    }
+    // What is honoured: the kinds of change the server reports and the revision has a notification for, and of the
+    // resources asked for those the host offers now. The rest is left out of the acknowledgement and never sent.
+    const auto has = [&](ChangeKind kind) {
+        const profile::Message* entry =
+            served.profile->notification(served.feed->notification(Change{kind, {}}).method);
+        return entry != nullptr && entry->from_server;
+    };
+    ChangeFilter honoured;
+    honoured.tools_list = asked.filter.tools_list && reported.tools_list && has(ChangeKind::tools_list);
+    honoured.prompts_list = asked.filter.prompts_list && reported.prompts_list && has(ChangeKind::prompts_list);
+    honoured.resources_list =
+        asked.filter.resources_list && reported.resources_list && has(ChangeKind::resources_list);
+    if (reported.resource_updates && has(ChangeKind::resource_updated)) {
+        ResourceHost* resources = host_.resource_host();
+        try {
+            for (const auto& uri : asked.filter.resources) {
+                if (resources->offers(uri)) honoured.resources.push_back(uri);
+            }
+        } catch (...) {
+            return served_answer(make_error(id, error_code::internal_error,
+                                            "Internal error: the resources could not be found"),
+                                 served);
+        }
+    }
+    if (!watch_host()) {
+        return served_answer(
+            make_error(id, error_code::internal_error, "Internal error: the server reports no changes now"), served);
+    }
+    FeedMessage acknowledgement = served.feed->acknowledgement(honoured);
+    served.feed->tag(acknowledgement.params, id);
+    auto line = feed_line(served, std::move(acknowledgement));
+    if (!line) {
+        return served_answer(
+            make_error(id, error_code::internal_error, "Internal error: the subscription cannot be acknowledged"),
+            served);
+    }
+
+    auto call = std::make_shared<CallState>(id);
+    call->core = weak_from_this();
+    call->kind = CallKind::subscription;
+    call->profile = served.profile;
+    call->served = &served;
+    call->client = std::move(origin.client);
+    call->unit = place.unit;
+    call->filter = std::move(honoured);
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (closed_) return std::nullopt;
+    // A unit abandoned while it was read has nobody to read the subscription.
+    if (place.unit && place.unit->abandoned) return std::nullopt;
+    if (listening_ >= options_.max_subscriptions) {
+        lock.unlock();
+        return limit_refusal(id,
+                             "Internal error: the session has " + std::to_string(options_.max_subscriptions) +
+                                 " subscriptions open, the most it may",
+                             served);
+    }
+    // In flight and acknowledged under one hold of the lock: no change reaches the subscription before its
+    // acknowledgement is queued, and every one reported after that is queued after it.
+    in_flight_.emplace(id, call);
+    ++listening_;
+    if (place.unit) place.unit->profile = served.profile;
+    Output output = make_output(std::move(*line), OutputKind::notification, false, RefusalReason::none, served.profile);
+    output.long_lived = true;
+    enqueue(Queued{std::move(output), call, place.unit, true});
+    drain(lock, Writer::reader);
+    return std::nullopt;
+}
+
+void SessionCore::ending_outputs(const std::shared_ptr<CallState>& call, std::vector<Queued>& out) const {
+    const Served& served = *call->served;
+    if (auto notice = served.feed->ending_notice(call->id)) {
+        served.feed->tag(notice->params, call->id);
+        if (auto line = feed_line(served, std::move(*notice))) {
+            Output output =
+                make_output(std::move(*line), OutputKind::notification, false, RefusalReason::none, call->profile);
+            output.long_lived = true;
+            out.push_back(Queued{std::move(output), nullptr, call->unit, true});
+        }
+    }
+    json body = served.feed->ending_result();
+    served.feed->tag(body, call->id);
+    finish_result(body, served.feed->ending_result_type(), *call->profile);
+    Output output = make_output(serialize(make_result(call->id, std::move(body))), OutputKind::response,
+                                call->unit != nullptr, RefusalReason::none, call->profile);
+    output.long_lived = true;
+    out.push_back(Queued{std::move(output), nullptr, call->unit, true});
 }
 
 Answer SessionCore::limit_refusal(const RequestId& id, std::string message, const Served& served) const {
@@ -1821,18 +1948,55 @@ void SessionCore::on_change(const Change& change) {
                                     nullptr, nullptr});
         }
     }
+    // Every open subscription that asked for it, tagged with its id.
+    for (const auto& entry : in_flight_) {
+        const std::shared_ptr<CallState>& call = entry.second;
+        if (call->kind != CallKind::subscription || !call->active || !call->filter.wants(change)) continue;
+        if (queue_.size() >= options_.max_queued_notifications) break;
+        const Served& served = *call->served;
+        FeedMessage message = served.feed->notification(change);
+        served.feed->tag(message.params, call->id);
+        if (auto line = feed_line(served, std::move(message))) {
+            Output output =
+                make_output(std::move(*line), OutputKind::notification, false, RefusalReason::none, call->profile);
+            output.long_lived = true;
+            queued = enqueue(Queued{std::move(output), call, call->unit}) || queued;
+        }
+    }
     if (queued) drain(lock, Writer::host);
 }
 
 void SessionCore::on_feed_end() {
     ChangeRegistration registration;
+    bool now_idle = false;
     {
-        const std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         watch_ = Watch::ended;
         registration = std::move(registration_);
+        // The host stops: it tears down every open subscription, which ends gracefully.
+        std::vector<Queued> ending;
+        for (auto it = in_flight_.begin(); it != in_flight_.end();) {
+            const std::shared_ptr<CallState> call = it->second;
+            if (call->kind != CallKind::subscription) {
+                ++it;
+                continue;
+            }
+            it = in_flight_.erase(it);
+            --listening_;
+            call->active = false;
+            if (!closed_) ending_outputs(call, ending);
+        }
+        bool queued = false;
+        for (auto& output : ending) queued = enqueue(std::move(output)) || queued;
+        if (queued) {
+            drain(lock, Writer::host);
+        } else {
+            now_idle = !closed_ && idle_locked();
+        }
     }
     // The host has let the listener go already; releasing the registration again changes nothing there.
     registration.reset();
+    if (now_idle) signal_idle();
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -2435,6 +2599,7 @@ void SessionCore::cancel(const RequestId& id, const CancelMechanism& mechanism, 
         if (entry == nullptr || !entry->from_client) return;
         call = candidate;
         in_flight_.erase(found);
+        if (call->kind == CallKind::subscription) --listening_;
         call->active = false;
         call->cancelled = true;
         wait = call->wait;
@@ -2644,7 +2809,9 @@ void SessionCore::drain(std::unique_lock<std::mutex>& lock, Writer writer) {
 bool SessionCore::idle_locked() const {
     // A queued line implies a drainer, so the queue is checked only for the sake of the invariant. A closed session
     // has nothing left to wait for.
-    return closed_ || (in_flight_.empty() && queue_.empty() && !draining_ && pending_batches_ == 0);
+    // An open subscription waits for nothing the client sends; it does not keep the session busy.
+    return closed_ ||
+           (in_flight_.size() == listening_ && queue_.empty() && !draining_ && pending_batches_ == 0);
 }
 
 bool SessionCore::idle() const {
@@ -2680,14 +2847,18 @@ void SessionCore::abandon(UnitId number) {
         // A call whose cancellation mechanism takes a closed stream for a cancellation stops; the others run on.
         // A call that waits for answers ends too: its requests went out on the stream that is gone, and nothing more
         // is sent for it.
+        // A subscription of the unit ends whatever the mechanism says: the stream it is written on is gone.
         for (auto it = in_flight_.begin(); it != in_flight_.end();) {
             const std::shared_ptr<CallState> call = it->second;
             const bool waiting = call->wait != nullptr;
-            if (call->unit != unit || (!waiting && !call->served->cancel->stops_on_stream_close())) {
+            const bool subscription = call->kind == CallKind::subscription;
+            if (call->unit != unit ||
+                (!waiting && !subscription && !call->served->cancel->stops_on_stream_close())) {
                 ++it;
                 continue;
             }
             it = in_flight_.erase(it);
+            if (subscription) --listening_;
             call->active = false;
             call->cancelled = true;
             if (waiting) {
@@ -2720,7 +2891,17 @@ void SessionCore::close() {
     if (!closed_) {
         closed_ = true;
         registration = std::move(registration_);
-        queue_.clear();
+        const bool writable = !inside_sink && !broken_;
+        // What is queued is dropped, but for the graceful ends of subscriptions queued before (a host that stopped).
+        std::deque<Queued> kept;
+        if (writable) {
+            for (auto& queued : queue_) {
+                if (queued.essential) kept.push_back(std::move(queued));
+            }
+        }
+        queue_ = std::move(kept);
+        // The session tears down its subscriptions: each ends gracefully.
+        std::vector<Queued> ending;
         for (auto& entry : in_flight_) {
             entry.second->active = false;
             calls.push_back(entry.second);
@@ -2728,14 +2909,29 @@ void SessionCore::close() {
                 waits.push_back(entry.second->wait);
                 close_wait(entry.second->wait);
             }
+            if (writable && entry.second->kind == CallKind::subscription) ending_outputs(entry.second, ending);
         }
         in_flight_.clear();
+        listening_ = 0;
         outgoing_.clear();
-        // The queue no longer holds the last outputs of the units still open, so each gets an end marker; none when
-        // the sink cannot be called again, from inside it or after it failed.
-        if (!inside_sink && !broken_) {
+        for (auto& output : ending) {
+            if (output.unit) {
+                if (output.unit->finished || output.unit->abandoned) continue;
+                output.output.unit = output.unit->id;
+                if (output.output.last) output.unit->finished = true;
+            }
+            queue_.push_back(std::move(output));
+        }
+        // The units still open whose last output is not queued get an end marker; none when the sink cannot be
+        // called again, from inside it or after it failed.
+        if (writable) {
+            std::set<const UnitState*> ended;
+            for (const auto& queued : queue_) {
+                if (queued.unit && queued.output.last) ended.insert(queued.unit.get());
+            }
             for (const auto& entry : units_) {
                 const Unit& unit = entry.second;
+                if (ended.find(unit.get()) != ended.end()) continue;
                 unit->finished = true;
                 Queued marker{make_output({}, OutputKind::end, true, RefusalReason::none, unit->profile), nullptr, unit};
                 marker.output.unit = unit->id;
