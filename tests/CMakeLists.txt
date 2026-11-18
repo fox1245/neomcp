@@ -44,3 +44,9 @@ target_compile_definitions(neomcp_json_schema_suite_test PRIVATE
     "NEOMCP_JSON_SCHEMA_SKIPS_FILE=\"${CMAKE_CURRENT_SOURCE_DIR}/data/json_schema_suite_skips.json\"")
 neomcp_configure_target(neomcp_json_schema_suite_test)
 gtest_discover_tests(neomcp_json_schema_suite_test DISCOVERY_TIMEOUT 120)
+
+# Large values must compare in linear time: a quadratic comparison does not finish within the timeout.
+add_executable(neomcp_json_schema_scale_test json_schema_scale_test.cpp)
+target_link_libraries(neomcp_json_schema_scale_test PRIVATE neomcp::schema neojson::neojson GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_json_schema_scale_test)
+gtest_discover_tests(neomcp_json_schema_scale_test DISCOVERY_TIMEOUT 120 PROPERTIES TIMEOUT 2)

@@ -6,6 +6,8 @@
 #include <limits>
 #include <numeric>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 
 namespace neomcp::json_schema::detail {
 
@@ -214,10 +216,24 @@ Equality equal_at(const json& a, const json& b, std::size_t depth, std::size_t m
             const auto& right = *b.get_ptr<const json::object_t*>();
             if (left.size() != right.size()) return Equality::different;
             if (depth >= max_depth) return Equality::too_deep;
+            // Equal objects usually list their members in the same order: then the members are compared in pairs.
+            // Otherwise one object is indexed once, because looking each key up in an object is a linear scan.
+            bool same_order = true;
+            for (std::size_t i = 0; i < left.size() && same_order; ++i) same_order = left[i].first == right[i].first;
+            if (same_order) {
+                for (std::size_t i = 0; i < left.size(); ++i) {
+                    const Equality item = equal_at(left[i].second, right[i].second, depth + 1, max_depth);
+                    if (item != Equality::equal) return item;
+                }
+                return Equality::equal;
+            }
+            std::unordered_map<std::string_view, const json*> index;
+            index.reserve(right.size());
+            for (const auto& member : right) index.emplace(std::string_view(member.first), &member.second);
             for (const auto& member : left) {
-                const auto other = right.find(std::string_view(member.first));
-                if (other == right.end()) return Equality::different;
-                const Equality item = equal_at(member.second, other->second, depth + 1, max_depth);
+                const auto other = index.find(std::string_view(member.first));
+                if (other == index.end()) return Equality::different;
+                const Equality item = equal_at(member.second, *other->second, depth + 1, max_depth);
                 if (item != Equality::equal) return item;
             }
             return Equality::equal;
