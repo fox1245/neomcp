@@ -180,7 +180,7 @@ Outcome<std::uint16_t> Listener::Impl::start() {
     candidate->set_tcp_nodelay(true);
     // The library's default shares a port between listeners (SO_REUSEPORT where it exists); a port in use must be an
     // error here.
-    candidate->set_socket_options([](socket_t sock) {
+    candidate->set_socket_options([](auto sock) {
 #ifdef _WIN32
         httplib::set_socket_opt(sock, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1);
 #else

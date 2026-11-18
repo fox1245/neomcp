@@ -409,7 +409,9 @@ TEST(HttpListener, ABodyOverTheBoundGets413AndTheHandlerIsNotCalled) {
             return true;
         },
         "text/plain");
-    if (chunked) EXPECT_EQ(chunked->status, 413);  // the connection may also be cut before the answer is read
+    if (chunked) {  // the connection may also be cut before the answer is read
+        EXPECT_EQ(chunked->status, 413);
+    }
     EXPECT_EQ(calls, 1);
 }
 
