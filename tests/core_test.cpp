@@ -1520,6 +1520,74 @@ TEST(Input, DeepNestingIsRefusedAtTheDefaultLimit) {
     EXPECT_EQ(error_code_of(*answer), -32600);
 }
 
+// The nesting of a line is counted over arrays and objects alike, so a line of objects, or of both, that is far deeper
+// than the limit is refused as the line of brackets above is, and one at the limit is not refused for its depth.
+// What the session does with either must neither recurse once per level nor take time that grows faster than the
+// line; the bound on the wait for the answer is what shows it.
+TEST(Input, ObjectsAndMixedNestingBeyondTheLimitAreRefusedAtAnyDepth) {
+    Conversation legacy("2025-06-18");
+    const std::size_t limit = neomcp::SessionOptions{}.max_nesting_depth;
+    const auto objects = [](std::size_t depth) {
+        std::string line;
+        for (std::size_t level = 0; level < depth; ++level) line += "{\"a\":";
+        line += "0";
+        line.append(depth, '}');
+        return line;
+    };
+    const auto mixed = [](std::size_t depth) {
+        std::string line;
+        for (std::size_t level = 0; level < depth; ++level) line += level % 2 == 0 ? "{\"a\":" : "[";
+        line += "0";
+        for (std::size_t level = depth; level > 0; --level) line += (level - 1) % 2 == 0 ? '}' : ']';
+        return line;
+    };
+    for (const std::size_t depth : {limit + 1, std::size_t{1000}, std::size_t{200000}}) {
+        for (const std::string& line : {objects(depth), mixed(depth)}) {
+            SCOPED_TRACE(depth);
+            legacy.peer.send(line);
+            const auto answer = legacy.peer.next_other(patience);
+            ASSERT_TRUE(answer);
+            EXPECT_EQ(error_code_of(*answer), -32600);
+            EXPECT_TRUE(answer->at("id").is_null()) << "refused before the line was read as a message";
+        }
+    }
+    EXPECT_EQ(result_of(legacy.ask("ping")), json::object()) << "the connection continues";
+
+    // A request that reaches exactly the limit (the message is the first level and `params` brings the others) is
+    // read, and answered to its id.
+    std::string at_the_limit = R"({"jsonrpc":"2.0","id":"deep","method":"ping","params":)";
+    at_the_limit += objects(limit - 1);
+    at_the_limit += "}";
+    legacy.peer.send(at_the_limit);
+    const auto answer = legacy.peer.await_response("deep", patience);
+    ASSERT_TRUE(answer) << "a line at the limit is not refused for its depth";
+    EXPECT_NE(error_code_of(*answer), -32600) << answer->dump().substr(0, 200);
+}
+
+// One object of very many members, repeated keys among them, as the whole line and as the parameters of a request.
+TEST(Input, AnObjectOfTwoHundredThousandMembersIsAnsweredWithoutCrashingOrWaitingLong) {
+    Conversation legacy("2025-06-18");
+    std::string members;
+    for (int index = 0; index < 200000; ++index) {
+        if (index > 0) members += ',';
+        // Every other key is the same one, the rest are distinct.
+        members += index % 2 == 0 ? std::string("\"same\":") : "\"key" + std::to_string(index) + "\":";
+        members += std::to_string(index);
+    }
+
+    legacy.peer.send("{" + members + "}");
+    const auto not_a_message = legacy.peer.next_other(patience);
+    ASSERT_TRUE(not_a_message);
+    EXPECT_EQ(error_code_of(*not_a_message), -32600);
+
+    legacy.peer.send(R"({"jsonrpc":"2.0","id":"wide","method":"ping","params":{)" + members + "}}");
+    const auto answer = legacy.peer.await_response("wide", patience);
+    ASSERT_TRUE(answer);
+    EXPECT_TRUE(answer->contains("result") || answer->contains("error")) << answer->dump().substr(0, 200);
+
+    EXPECT_EQ(result_of(legacy.ask("ping")), json::object()) << "the connection continues";
+}
+
 TEST(Input, RequestIdsAreEchoedExactly) {
     FakeHost host;
     Peer peer(host, test_options());
