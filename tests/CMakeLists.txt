@@ -103,3 +103,8 @@ add_executable(neomcp_http_model_test http_model_test.cpp)
 target_link_libraries(neomcp_http_model_test PRIVATE neomcp::http GTest::gtest_main Threads::Threads)
 neomcp_configure_target(neomcp_http_model_test)
 gtest_discover_tests(neomcp_http_model_test DISCOVERY_TIMEOUT 120)
+
+add_executable(neomcp_http_policy_test http_policy_test.cpp)
+target_link_libraries(neomcp_http_policy_test PRIVATE neomcp::http GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_http_policy_test)
+gtest_discover_tests(neomcp_http_policy_test DISCOVERY_TIMEOUT 120)

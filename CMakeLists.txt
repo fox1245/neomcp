@@ -187,7 +187,9 @@ include(cmake/NeomcpHttplib.cmake)
 add_library(neomcp_http
     src/http/message.cpp
     src/http/body_stream.cpp
-    src/http/sse.cpp)
+    src/http/sse.cpp
+    src/http/authority.cpp
+    src/http/policy.cpp)
 add_library(neomcp::http ALIAS neomcp_http)
 target_include_directories(neomcp_http
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
