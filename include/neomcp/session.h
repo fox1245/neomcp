@@ -160,6 +160,20 @@ using StateClock = std::function<std::chrono::system_clock::time_point()>;
 // The fewest bytes a key that seals request state has: the output size of SHA-256, as RFC 2104 recommends for HMAC.
 inline constexpr std::size_t min_request_state_key_size = 32;
 
+// The defaults of SessionOptions that ServerOptions repeats. They are constants and not read from a SessionOptions
+// object in a default member initializer: that builds a whole SessionOptions each time an options object is
+// initialized as an aggregate, and the Microsoft compiler 19.44 stops with an internal failure when a named object
+// of such a type is initialized with braces (`ServerOptions options{.name = "x"};` is the usual form).
+struct SessionDefaults {
+    static constexpr LogLevel log_level = LogLevel::info;
+    static constexpr bool include_server_info = true;
+    static constexpr std::size_t max_message_bytes = std::size_t{8} * 1024 * 1024;
+    static constexpr std::size_t max_nesting_depth = 128;
+    static constexpr std::size_t max_queued_notifications = 1024;
+    static constexpr std::size_t max_input_rounds = 10;
+    static constexpr std::chrono::seconds request_state_ttl{600};
+};
+
 struct SessionOptions {
     // The revisions served; empty: every built-in profile. Two profiles of the same revision are an error.
     std::vector<profile::ProfilePtr> profiles;
@@ -181,19 +195,19 @@ struct SessionOptions {
     // and drops every log message.
     bool protocol_logging = false;
     // The level in force on a connection before the client sets one.
-    LogLevel default_log_level = LogLevel::info;
+    LogLevel default_log_level = SessionDefaults::log_level;
 
     // Whether results carry the server's Implementation in `_meta`, when the revision defines that key.
-    bool include_server_info = true;
+    bool include_server_info = SessionDefaults::include_server_info;
 
     // A longer input line is answered with Invalid Request and not parsed. Default 8 MiB.
-    std::size_t max_message_bytes = std::size_t{8} * 1024 * 1024;
+    std::size_t max_message_bytes = SessionDefaults::max_message_bytes;
     // A line whose arrays and objects nest deeper is answered with Invalid Request and not parsed. Default 128.
-    std::size_t max_nesting_depth = 128;
+    std::size_t max_nesting_depth = SessionDefaults::max_nesting_depth;
     // When this many lines already wait to be written, a new progress or log notification is dropped (responses
     // and errors never are), so that a tool reporting faster than the client reads cannot grow the queue without
     // limit. Zero is an error. Default 1024.
-    std::size_t max_queued_notifications = 1024;
+    std::size_t max_queued_notifications = SessionDefaults::max_queued_notifications;
 
     // Whether the internal error that answers a HostFailure carries the host's message. Off: the message is fixed,
     // so that nothing about the server's internals reaches the client.
@@ -213,7 +227,7 @@ struct SessionOptions {
 
     // Under the mechanism that sends a call's requests to the client and waits (server_request): the most rounds of
     // requests one call may send. The call fails when its host asks once more. Zero is an error. Default 10.
-    std::size_t max_input_rounds = 10;
+    std::size_t max_input_rounds = SessionDefaults::max_input_rounds;
     // Under the mechanism whose result asks and whose retried call answers (input_required_result): the keys that seal
     // the state a call's result carries, each at least 32 bytes. The first seals; every one verifies, so a key can be
     // replaced by putting the new one first and dropping the old one once its states have expired. Empty: one key of
@@ -222,7 +236,7 @@ struct SessionOptions {
     // reaches another process is refused.
     std::vector<std::string> request_state_keys;
     // How long a sealed state is accepted after it was issued. Zero is an error. Default 600 s.
-    std::chrono::seconds request_state_ttl{600};
+    std::chrono::seconds request_state_ttl = SessionDefaults::request_state_ttl;
     // The clock of that expiry; empty: std::chrono::system_clock::now.
     StateClock clock;
     // Told why a state was refused; empty: nobody is told. The client gets only "Invalid or expired requestState".

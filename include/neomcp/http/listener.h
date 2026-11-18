@@ -34,10 +34,25 @@
 
 namespace neomcp::http {
 
+// The defaults of ListenerOptions that HttpServerOptions repeats. They are constants and not read from a
+// ListenerOptions object in a default member initializer, for the reason given at SessionDefaults (neomcp/session.h).
+struct ListenerDefaults {
+    static constexpr const char* bind_address = "127.0.0.1";
+    static constexpr std::size_t worker_threads = 8;
+    static constexpr std::size_t max_worker_threads = 32;
+    static constexpr std::chrono::seconds worker_idle_timeout{3};
+    static constexpr std::size_t max_queued_connections = 64;
+    static constexpr std::chrono::milliseconds read_timeout{5000};
+    static constexpr std::chrono::milliseconds write_timeout{5000};
+    static constexpr std::chrono::seconds idle_connection_timeout{5};
+    static constexpr std::chrono::milliseconds keep_alive_interval{15000};
+    static constexpr std::chrono::milliseconds disconnect_poll_interval{250};
+};
+
 struct ListenerOptions {
     // The address to bind: an IP address or a name the system resolves. Loopback by default: a listener is reachable
     // from other machines only when the caller asks for it.
-    std::string bind_address = "127.0.0.1";
+    std::string bind_address = ListenerDefaults::bind_address;
 
     // The port to bind. 0: any free port; start() reports the one chosen. A port that is in use is an error: the
     // listener does not share addresses.
@@ -54,28 +69,28 @@ struct ListenerOptions {
 
     // Worker threads: `worker_threads` always exist; up to `max_worker_threads` (at least that many) exist while
     // connections are waiting, and the extra ones leave after `worker_idle_timeout` without work.
-    std::size_t worker_threads = 8;
-    std::size_t max_worker_threads = 32;
-    std::chrono::seconds worker_idle_timeout{3};
+    std::size_t worker_threads = ListenerDefaults::worker_threads;
+    std::size_t max_worker_threads = ListenerDefaults::max_worker_threads;
+    std::chrono::seconds worker_idle_timeout = ListenerDefaults::worker_idle_timeout;
 
     // Connections kept waiting for a worker while every worker is busy; at least 1.
-    std::size_t max_queued_connections = 64;
+    std::size_t max_queued_connections = ListenerDefaults::max_queued_connections;
 
     // How long the listener waits for the next bytes of a request, and for the peer to accept bytes it writes. A
     // stream whose reader stops reading ends after the write timeout.
-    std::chrono::milliseconds read_timeout{5000};
-    std::chrono::milliseconds write_timeout{5000};
+    std::chrono::milliseconds read_timeout = ListenerDefaults::read_timeout;
+    std::chrono::milliseconds write_timeout = ListenerDefaults::write_timeout;
 
     // How long an idle connection is kept for another request (whole seconds, at least 1).
-    std::chrono::seconds idle_connection_timeout{5};
+    std::chrono::seconds idle_connection_timeout = ListenerDefaults::idle_connection_timeout;
 
     // On an event stream (Content-Type text/event-stream) that has been idle this long the listener writes a
     // keep-alive comment. Other streams get none. Must be positive.
-    std::chrono::milliseconds keep_alive_interval{15000};
+    std::chrono::milliseconds keep_alive_interval = ListenerDefaults::keep_alive_interval;
 
     // How often the listener looks for a disconnected peer while a stream is idle, and while a request waits for its
     // Responder to be completed. Must be positive.
-    std::chrono::milliseconds disconnect_poll_interval{250};
+    std::chrono::milliseconds disconnect_poll_interval = ListenerDefaults::disconnect_poll_interval;
 };
 
 class Listener {

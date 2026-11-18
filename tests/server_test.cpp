@@ -1316,4 +1316,20 @@ TEST(Sessions, AHandlerThatOutlivesItsSessionCompletesWithoutWriting) {
     EXPECT_EQ(lines.size(), written);
 }
 
+// The defaults of the options come from constants, so that a named object initialized with braces keeps them.
+// Reading them from SessionOptions objects made the Microsoft compiler 19.44 stop with an internal failure on such an
+// object.
+TEST(ServerOptionsDefaults, ANamedObjectBuiltWithDesignatedInitializersKeepsTheSessionDefaults) {
+    neomcp::ServerOptions options{.name = "calc", .version = "1.0.0"};
+    const neomcp::SessionOptions session;
+    EXPECT_EQ(options.name, "calc");
+    EXPECT_EQ(options.default_log_level, session.default_log_level);
+    EXPECT_EQ(options.include_server_info, session.include_server_info);
+    EXPECT_EQ(options.max_message_bytes, session.max_message_bytes);
+    EXPECT_EQ(options.max_nesting_depth, session.max_nesting_depth);
+    EXPECT_EQ(options.max_queued_notifications, session.max_queued_notifications);
+    EXPECT_EQ(options.max_input_rounds, session.max_input_rounds);
+    EXPECT_EQ(options.request_state_ttl, session.request_state_ttl);
+}
+
 }  // namespace

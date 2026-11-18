@@ -1268,4 +1268,22 @@ TEST(HttpEndpointHandler, CreateRefusesOptionsOutOfRange) {
     }
 }
 
+// The defaults of the options come from constants, so that a named object initialized with braces keeps them (see
+// ServerOptionsDefaults in server_test.cpp).
+TEST(HttpServerOptionsDefaults, ANamedObjectBuiltWithDesignatedInitializersKeepsTheListenerDefaults) {
+    neomcp::HttpServerOptions options{.port = 8080, .path = "/rpc"};
+    const neomcp::http::ListenerOptions listener;
+    EXPECT_EQ(options.port, 8080);
+    EXPECT_EQ(options.bind_address, listener.bind_address);
+    EXPECT_EQ(options.worker_threads, listener.worker_threads);
+    EXPECT_EQ(options.max_worker_threads, listener.max_worker_threads);
+    EXPECT_EQ(options.worker_idle_timeout, listener.worker_idle_timeout);
+    EXPECT_EQ(options.max_queued_connections, listener.max_queued_connections);
+    EXPECT_EQ(options.read_timeout, listener.read_timeout);
+    EXPECT_EQ(options.write_timeout, listener.write_timeout);
+    EXPECT_EQ(options.idle_connection_timeout, listener.idle_connection_timeout);
+    EXPECT_EQ(options.keep_alive_interval, listener.keep_alive_interval);
+    EXPECT_EQ(options.disconnect_poll_interval, listener.disconnect_poll_interval);
+}
+
 }  // namespace

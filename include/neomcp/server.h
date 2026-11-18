@@ -180,9 +180,9 @@ struct ServerOptions {
     // Log messages through the protocol (Context::log). Off by default: the server declares no logging capability.
     bool protocol_logging = false;
     // The level in force on a connection before the client sets one.
-    LogLevel default_log_level = SessionOptions{}.default_log_level;
+    LogLevel default_log_level = SessionDefaults::log_level;
     // Whether results carry the server's Implementation in `_meta`, where the revision defines that key.
-    bool include_server_info = SessionOptions{}.include_server_info;
+    bool include_server_info = SessionDefaults::include_server_info;
     // Caching hints on tools/list and server/discover, where the revision has them. Default: stale at once, private.
     CacheHints tools_cache{};
     // Tools per tools/list page; empty: one page with every tool. Zero is an error.
@@ -202,9 +202,9 @@ struct ServerOptions {
     std::optional<std::size_t> prompts_page_size{};
     // Input bounds of a session (see SessionOptions): 8 MiB per line, 128 levels of nesting, and 1024 lines waiting
     // to be written before progress and log notifications are dropped.
-    std::size_t max_message_bytes = SessionOptions{}.max_message_bytes;
-    std::size_t max_nesting_depth = SessionOptions{}.max_nesting_depth;
-    std::size_t max_queued_notifications = SessionOptions{}.max_queued_notifications;
+    std::size_t max_message_bytes = SessionDefaults::max_message_bytes;
+    std::size_t max_nesting_depth = SessionDefaults::max_nesting_depth;
+    std::size_t max_queued_notifications = SessionDefaults::max_queued_notifications;
 
     // The bounds of the JSON Schema validator that checks arguments and structured results.
     json_schema::Limits schema_limits{};
@@ -213,12 +213,12 @@ struct ServerOptions {
     // Where the server sends requests and waits: the longest wait for a round's answers, after which the call fails,
     // and the most rounds one call may ask. Both must be positive. Defaults 10 minutes and 10.
     std::chrono::milliseconds input_timeout = std::chrono::minutes(10);
-    std::size_t max_input_rounds = SessionOptions{}.max_input_rounds;
+    std::size_t max_input_rounds = SessionDefaults::max_input_rounds;
     // Where the state travels sealed: the keys (each at least min_request_state_key_size bytes; the first seals,
     // every one verifies) and how long a state is accepted. Empty keys: 32 bytes from the operating system's random
     // source, once per process; processes that serve the same clients must share a key given here.
     std::vector<std::string> request_state_keys{};
-    std::chrono::seconds request_state_ttl = SessionOptions{}.request_state_ttl;
+    std::chrono::seconds request_state_ttl = SessionDefaults::request_state_ttl;
     // The clock of that expiry; empty: the system clock.
     StateClock clock{};
     // Told why a state was refused, for the server's log; the client only learns that it was.

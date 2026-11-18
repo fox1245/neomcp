@@ -37,7 +37,7 @@ namespace neomcp {
 
 struct HttpServerOptions {
     // Where to listen. The loopback address by default: the server is reachable from other machines only when asked.
-    std::string bind_address = http::ListenerOptions{}.bind_address;
+    std::string bind_address = http::ListenerDefaults::bind_address;
     // 0: any free port; start() reports the one chosen.
     std::uint16_t port = 0;
     // The one path served, as for http::ListenerOptions::path.
@@ -54,15 +54,15 @@ struct HttpServerOptions {
     http::EndpointOptions endpoint{};
 
     // The listener (see http::ListenerOptions). The body bound is the server's max_message_bytes.
-    std::size_t worker_threads = http::ListenerOptions{}.worker_threads;
-    std::size_t max_worker_threads = http::ListenerOptions{}.max_worker_threads;
-    std::chrono::seconds worker_idle_timeout = http::ListenerOptions{}.worker_idle_timeout;
-    std::size_t max_queued_connections = http::ListenerOptions{}.max_queued_connections;
-    std::chrono::milliseconds read_timeout = http::ListenerOptions{}.read_timeout;
-    std::chrono::milliseconds write_timeout = http::ListenerOptions{}.write_timeout;
-    std::chrono::seconds idle_connection_timeout = http::ListenerOptions{}.idle_connection_timeout;
-    std::chrono::milliseconds keep_alive_interval = http::ListenerOptions{}.keep_alive_interval;
-    std::chrono::milliseconds disconnect_poll_interval = http::ListenerOptions{}.disconnect_poll_interval;
+    std::size_t worker_threads = http::ListenerDefaults::worker_threads;
+    std::size_t max_worker_threads = http::ListenerDefaults::max_worker_threads;
+    std::chrono::seconds worker_idle_timeout = http::ListenerDefaults::worker_idle_timeout;
+    std::size_t max_queued_connections = http::ListenerDefaults::max_queued_connections;
+    std::chrono::milliseconds read_timeout = http::ListenerDefaults::read_timeout;
+    std::chrono::milliseconds write_timeout = http::ListenerDefaults::write_timeout;
+    std::chrono::seconds idle_connection_timeout = http::ListenerDefaults::idle_connection_timeout;
+    std::chrono::milliseconds keep_alive_interval = http::ListenerDefaults::keep_alive_interval;
+    std::chrono::milliseconds disconnect_poll_interval = http::ListenerDefaults::disconnect_poll_interval;
 
     // run_http only: write the library's diagnostics to standard error (where it listens, why it could not start).
     bool diagnostics = true;
