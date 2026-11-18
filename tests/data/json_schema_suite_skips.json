@@ -1,0 +1,220 @@
+{
+  "minimum_executed_tests": 1226,
+  "skips": [
+    {
+      "file": "anchor.json",
+      "group": "anchor within remote ref",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "anchor.json",
+      "group": "Location-independent identifier in remote ref",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "anchor.json",
+      "group": "$ref to $ref finds detached $anchor",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "A $dynamicRef to a $dynamicAnchor in the same schema resource behaves like a normal $ref to an $anchor (2020)",
+      "reason": "The schema uses $dynamicRef, which is not supported; the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "A $dynamicRef resolves to the first $dynamicAnchor still in scope that is encountered when the schema is evaluated (2020)",
+      "reason": "The schema uses $dynamicRef, which is not supported; the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "A $dynamicRef with intermediate scopes that don't include a matching $dynamicAnchor does not affect dynamic scope resolution (2020)",
+      "reason": "The schema uses $dynamicRef, which is not supported; the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "An $anchor with the same name as a $dynamicAnchor is not used for dynamic scope resolution (2020)",
+      "reason": "The schema uses $dynamicRef, which is not supported; the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "after leaving a dynamic scope, it is not used by a $dynamicRef (2020)",
+      "reason": "The schema uses $dynamicRef, which is not supported; the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "strict-tree schema, guards against misspelled properties (2020)",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "tests for implementation dynamic anchor and reference link (2020)",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "$ref and $dynamicAnchor are independent of order - $defs first (2020)",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "$ref and $dynamicAnchor are independent of order - $ref first (2020)",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "$ref to $dynamicRef finds detached $dynamicAnchor (2020)",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "$dynamicRef skips over intermediate resources - direct reference (2020)",
+      "reason": "The schema uses $dynamicRef, which is not supported; the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "$dynamicRef avoids the root of each schema, but scopes are still registered (2020)",
+      "reason": "The schema uses $dynamicRef, which is not supported; the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "A $dynamicRef to an $anchor in the same schema resource behaves like a normal $ref to an $anchor",
+      "reason": "The schema uses $dynamicRef, which is not supported; the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "A $dynamicRef without anchor in fragment behaves identical to $ref",
+      "reason": "The schema uses $dynamicRef, which is not supported; the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "A $dynamicRef without a matching $dynamicAnchor in the same schema resource behaves like a normal $ref to $anchor",
+      "reason": "The schema uses $dynamicRef, which is not supported; the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "A $dynamicRef with a non-matching $dynamicAnchor in the same schema resource behaves like a normal $ref to $anchor",
+      "reason": "The schema uses $dynamicRef, which is not supported; the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "A $dynamicRef that initially resolves to a schema with a matching $dynamicAnchor resolves to the first $dynamicAnchor in the dynamic scope",
+      "reason": "The schema uses $dynamicRef, which is not supported; the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "A $dynamicRef that initially resolves to a schema without a matching $dynamicAnchor behaves like a normal $ref to $anchor",
+      "reason": "The schema uses $dynamicRef, which is not supported; the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "multiple dynamic paths to the $dynamicRef keyword (2020)",
+      "reason": "The schema uses $dynamicRef, which is not supported; the schema is refused at compile."
+    },
+    {
+      "file": "dynamicRef.json",
+      "group": "$dynamicRef points to a boolean schema",
+      "reason": "The schema uses $dynamicRef, which is not supported; the schema is refused at compile."
+    },
+    {
+      "file": "id.json",
+      "group": "base URI change",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "id.json",
+      "group": "base URI change - change folder",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "id.json",
+      "group": "base URI change - change folder in subschema",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "id.json",
+      "group": "retrieved nested refs resolve relative to their URI not $id",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "id.json",
+      "group": "remote HTTP ref with different $id",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "id.json",
+      "group": "remote HTTP ref with different URN $id",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "id.json",
+      "group": "remote HTTP ref with nested absolute ref",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "pattern.json",
+      "group": "pattern with Unicode property escape requires unicode mode",
+      "reason": "The pattern uses a Unicode property escape, which the ECMAScript grammar of std::regex does not have; a pattern the engine cannot compile is refused at compile."
+    },
+    {
+      "file": "pattern.json",
+      "group": "pattern with Unicode property escape",
+      "reason": "The pattern uses a Unicode property escape, which the ECMAScript grammar of std::regex does not have; a pattern the engine cannot compile is refused at compile."
+    },
+    {
+      "file": "patternProperties.json",
+      "group": "patternProperties with Unicode property escape",
+      "reason": "The pattern uses a Unicode property escape, which the ECMAScript grammar of std::regex does not have; a pattern the engine cannot compile is refused at compile."
+    },
+    {
+      "file": "ref.json",
+      "group": "Recursive references between schemas",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "ref.json",
+      "group": "remote ref",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "ref.json",
+      "group": "fragment within remote ref",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "ref.json",
+      "group": "ref within remote ref",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "ref.json",
+      "group": "root ref in remote ref",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "ref.json",
+      "group": "remote ref with ref to defs",
+      "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
+    },
+    {
+      "file": "unevaluatedItems.json",
+      "group": "unevaluatedItems with $dynamicRef (2020-12)",
+      "reason": "The schema uses $dynamicRef, which is not supported; the schema is refused at compile."
+    },
+    {
+      "file": "unevaluatedProperties.json",
+      "group": "unevaluatedProperties with $dynamicRef (2020)",
+      "reason": "The schema uses $dynamicRef, which is not supported; the schema is refused at compile."
+    },
+    {
+      "file": "vocabulary.json",
+      "group": "schema that uses custom metaschema with no validation vocabulary",
+      "reason": "The schema names a custom metaschema in $schema, which is another dialect and another document; the schema is refused at compile."
+    },
+    {
+      "file": "vocabulary.json",
+      "group": "ignore unrecognized optional vocabulary (dynamic anchor)",
+      "reason": "The schema names a custom metaschema in $schema, which is another dialect and another document; the schema is refused at compile."
+    }
+  ]
+}

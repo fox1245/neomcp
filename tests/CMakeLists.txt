@@ -21,3 +21,26 @@ add_executable(neomcp_describe_test describe_test.cpp)
 target_link_libraries(neomcp_describe_test PRIVATE neomcp::describe neojson::neojson GTest::gtest_main Threads::Threads)
 neomcp_configure_target(neomcp_describe_test)
 gtest_discover_tests(neomcp_describe_test DISCOVERY_TIMEOUT 120)
+
+# ---- JSON Schema validator -------------------------------------------------------------------------------------------
+
+# The official JSON Schema test suite, used as data only: the tests parse its JSON files and nothing of it is built.
+include(FetchContent)
+FetchContent_Declare(json_schema_test_suite
+    GIT_REPOSITORY https://github.com/json-schema-org/JSON-Schema-Test-Suite.git
+    GIT_TAG e2a68a15cd490750fd6b95e604e4054d7d978d1f
+    SOURCE_SUBDIR no-cmake-project-here)
+FetchContent_MakeAvailable(json_schema_test_suite)
+
+add_executable(neomcp_json_schema_test json_schema_test.cpp)
+target_link_libraries(neomcp_json_schema_test PRIVATE neomcp::schema neojson::neojson GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_json_schema_test)
+gtest_discover_tests(neomcp_json_schema_test DISCOVERY_TIMEOUT 120)
+
+add_executable(neomcp_json_schema_suite_test json_schema_suite_test.cpp)
+target_link_libraries(neomcp_json_schema_suite_test PRIVATE neomcp::schema neojson::neojson GTest::gtest_main Threads::Threads)
+target_compile_definitions(neomcp_json_schema_suite_test PRIVATE
+    "NEOMCP_JSON_SCHEMA_SUITE_DIR=\"${json_schema_test_suite_SOURCE_DIR}/validation/tests\""
+    "NEOMCP_JSON_SCHEMA_SKIPS_FILE=\"${CMAKE_CURRENT_SOURCE_DIR}/data/json_schema_suite_skips.json\"")
+neomcp_configure_target(neomcp_json_schema_suite_test)
+gtest_discover_tests(neomcp_json_schema_suite_test DISCOVERY_TIMEOUT 120)
