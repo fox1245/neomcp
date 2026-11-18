@@ -80,6 +80,40 @@
 // named, and answers with an empty list when there is none; a reference to a prompt or template the server lacks is
 // answered with Invalid params. At most neomcp::max_completion_values values are sent.
 //
+// Asking the client. A tool, resource, template or prompt handler that needs something only the client can give (a
+// form the user fills in, a completion from the client's model, the client's roots; neomcp/input.h) returns
+// neomcp::InputRequired instead of its result. Its return type is then std::variant<R, neomcp::InputRequired> for one
+// of the results above (or neomcp::InputRequired alone), and the same for a coroutine handler:
+//
+//   server.tool<DeleteArgs>("delete_folder", "Delete a folder",
+//       [](const DeleteArgs& a, neomcp::Context& ctx) -> std::variant<std::string, neomcp::InputRequired> {
+//           const auto answer = ctx.input_responses().find("confirm");
+//           if (answer == ctx.input_responses().end()) {
+//               neomcp::InputRequired ask;
+//               ask.requests.emplace("confirm", neomcp::ElicitationForm{"Delete " + a.path + "?", confirm_schema});
+//               return ask;
+//           }
+//           const auto* confirm = std::get_if<neomcp::ElicitationAnswer>(&answer->second);
+//           if (confirm == nullptr || confirm->action != neomcp::ElicitationAction::accept) return "Kept " + a.path;
+//           remove_folder(a.path);
+//           return "Deleted " + a.path;
+//       });
+//
+// The handler is entered again, from its start, with the answers by the keys it chose (Context::input_responses) and
+// the state it gave (Context::request_state). It is not resumed: no frame, thread or coroutine of it is kept while
+// the client answers. Whatever it did before it asked happens again on every entry unless it guards that with its
+// state, so a handler asks before it acts, and decides from the answers and its state what is still missing. Only
+// the last round's answers come back; earlier ones a handler keeps in its state. Progress values a handler reports
+// are compared across the rounds of one call when the session keeps the call open (a value not above the last one
+// sent is dropped).
+//
+// How the client is asked follows the revision the call is served under. Where the result asks (2026-07-28), the
+// client retries the call with the answers, and the state travels sealed: signed with
+// ServerOptions::request_state_keys and bound to the call (not encrypted, so it must hold no secret). Where the server
+// sends requests (2025-11-25 and earlier), the session sends them on the call's stream and waits at most
+// ServerOptions::input_timeout per round and max_input_rounds rounds. Before asking, Context::client_supports tells
+// whether the client can take a request; asking for one it cannot take fails the call as the revision prescribes.
+//
 // Threads. Plain-function handlers run on a pool of worker threads the server owns, bounded by
 // ServerOptions::max_concurrent_calls and max_pending_calls. Coroutine handlers run on one thread the server owns,
 // which drives an asio::io_context, and are bounded by max_coroutine_calls; a coroutine handler must not block, or
@@ -87,6 +121,7 @@
 // a Context (see context.h).
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -98,6 +133,7 @@
 
 #include "neomcp/describe.h"
 #include "neomcp/feature_host.h"
+#include "neomcp/input.h"
 #include "neomcp/json.h"
 #include "neomcp/json_schema.h"
 #include "neomcp/model.h"
@@ -172,6 +208,21 @@ struct ServerOptions {
 
     // The bounds of the JSON Schema validator that checks arguments and structured results.
     json_schema::Limits schema_limits{};
+
+    // ---- Asking the client (a handler that returns neomcp::InputRequired)
+    // Where the server sends requests and waits: the longest wait for a round's answers, after which the call fails,
+    // and the most rounds one call may ask. Both must be positive. Defaults 10 minutes and 10.
+    std::chrono::milliseconds input_timeout = std::chrono::minutes(10);
+    std::size_t max_input_rounds = SessionOptions{}.max_input_rounds;
+    // Where the state travels sealed: the keys (each at least min_request_state_key_size bytes; the first seals,
+    // every one verifies) and how long a state is accepted. Empty keys: 32 bytes from the operating system's random
+    // source, once per process; processes that serve the same clients must share a key given here.
+    std::vector<std::string> request_state_keys{};
+    std::chrono::seconds request_state_ttl = SessionOptions{}.request_state_ttl;
+    // The clock of that expiry; empty: the system clock.
+    StateClock clock{};
+    // Told why a state was refused, for the server's log; the client only learns that it was.
+    RequestStateDiagnostic on_request_state_rejected{};
 };
 
 class Server;

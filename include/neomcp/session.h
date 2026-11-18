@@ -157,6 +157,9 @@ using RequestStateDiagnostic = std::function<void(const RequestStateRejection& r
 // The time the expiry of request state is measured in. A wall clock, so that processes sharing a key agree.
 using StateClock = std::function<std::chrono::system_clock::time_point()>;
 
+// The fewest bytes a key that seals request state has: the output size of SHA-256, as RFC 2104 recommends for HMAC.
+inline constexpr std::size_t min_request_state_key_size = 32;
+
 struct SessionOptions {
     // The revisions served; empty: every built-in profile. Two profiles of the same revision are an error.
     std::vector<profile::ProfilePtr> profiles;

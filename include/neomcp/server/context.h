@@ -1,4 +1,4 @@
-// What a tool handler sees of its call: cancellation, progress, logging, and who asked.
+// What a tool handler sees of its call: cancellation, progress, logging, who asked, and the answers to what it asked.
 #pragma once
 
 #include <optional>
@@ -6,6 +6,7 @@
 #include <stop_token>
 #include <string>
 
+#include "neomcp/input.h"
 #include "neomcp/json.h"
 #include "neomcp/model.h"
 #include "neomcp/profile.h"
@@ -72,14 +73,26 @@ public:
     const json& client_info() const noexcept;
     const json& client_capabilities() const noexcept;
 
+    // When the handler asked for input before (it returned neomcp::InputRequired): the answers of the last round,
+    // by the keys it chose, and the state it gave with its requests. Both empty on the first entry. Only the last
+    // round's answers come back; a handler that needs earlier ones keeps them in its state.
+    const InputResponses& input_responses() const noexcept { return responses_; }
+    const std::optional<std::string>& request_state() const noexcept { return state_; }
+    // Whether the client can take `request` now: the revision carries it and the client declared what it needs. A
+    // handler that can do without asks something else when it cannot (asking anyway fails the call).
+    bool client_supports(const InputRequest& request) const;
+
 private:
     friend class detail::ServerCore;
-    Context(const CallControl& control, const json& meta, std::stop_token stop)
-        : control_(control), meta_(meta), stop_(std::move(stop)) {}
+    Context(const CallControl& control, const json& meta, std::stop_token stop, const InputResponses& responses,
+            const std::optional<std::string>& state)
+        : control_(control), meta_(meta), stop_(std::move(stop)), responses_(responses), state_(state) {}
 
     const CallControl& control_;
     const json& meta_;
     std::stop_token stop_;
+    const InputResponses& responses_;
+    const std::optional<std::string>& state_;
 };
 
 }  // namespace neomcp

@@ -35,8 +35,8 @@ struct StateClaims {
     std::optional<std::string> state;          // the host's own state
 };
 
-// The shortest key that seals (bytes): the output size of the hash, as RFC 2104 recommends.
-inline constexpr std::size_t min_state_key_size = 32;
+// The shortest key that seals (bytes).
+inline constexpr std::size_t min_state_key_size = min_request_state_key_size;
 
 // The process's default key: 32 bytes from the operating system's random source, made on first use. Empty when the
 // source failed.

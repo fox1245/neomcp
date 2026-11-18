@@ -14,6 +14,10 @@
 //
 // The arguments may be taken as `const Args&` or as `Args` in either kind. Anything else fails to compile with a
 // static_assert that says what is expected.
+//
+// A handler that may ask its client for input returns std::variant<R, neomcp::InputRequired> (or InputRequired
+// alone), where R is one of the results below; a ToolDefinition handler then returns
+// std::variant<neomcp::ToolResult, neomcp::InputRequired>.
 #pragma once
 
 #include <cstddef>
@@ -31,6 +35,7 @@
 #include <asio/awaitable.hpp>
 
 #include "neomcp/describe.h"
+#include "neomcp/input.h"
 #include "neomcp/json.h"
 #include "neomcp/jsonrpc.h"
 #include "neomcp/model.h"
@@ -140,6 +145,33 @@ struct Shape {
 // ---------------------------------------------------------------------------------------------------------------
 // Results
 
+// A result that may ask for input instead: InputRequired alone, or std::variant<R, InputRequired>; `result` is R.
+template <class R>
+struct AskingResult {
+    static constexpr bool asks = false;
+    static constexpr bool only = false;  // InputRequired alone
+    using result = R;
+};
+template <>
+struct AskingResult<InputRequired> {
+    static constexpr bool asks = true;
+    static constexpr bool only = true;
+    using result = void;
+};
+template <class R>
+struct AskingResult<std::variant<R, InputRequired>> {
+    static constexpr bool asks = true;
+    static constexpr bool only = false;
+    using result = R;
+};
+
+// The result type behind one that may ask.
+template <class R>
+using plain_result_t = typename AskingResult<R>::result;
+
+// What a tool body produces: the tool's result, or a request for input.
+using ToolOutcome = std::variant<ToolResult, InputRequired>;
+
 // The member that holds a value that is not an object in structured content (`{"result": value}`).
 inline constexpr std::string_view wrapped_result_member = "result";
 
@@ -158,7 +190,7 @@ constexpr bool is_wrapped_result() {
 }
 
 template <class R>
-constexpr bool is_tool_result_type() {
+constexpr bool is_plain_tool_result_type() {
     if constexpr (std::is_void_v<R>) {
         return true;
     } else if constexpr (std::is_same_v<R, std::string> || std::is_same_v<R, json> || std::is_same_v<R, ToolResult>) {
@@ -167,6 +199,18 @@ constexpr bool is_tool_result_type() {
         return true;
     } else {
         return is_wrapped_result<R>();
+    }
+}
+
+template <class R>
+constexpr bool is_tool_result_type() {
+    if constexpr (AskingResult<R>::only) {
+        return true;
+    } else if constexpr (AskingResult<R>::asks) {
+        using T = plain_result_t<R>;
+        return !std::is_void_v<T> && !std::is_same_v<T, InputRequired> && is_plain_tool_result_type<T>();
+    } else {
+        return is_plain_tool_result_type<R>();
     }
 }
 
@@ -179,8 +223,12 @@ inline ContentBlock text_block(std::string text) {
 // The output schema a result type declares; empty for results whose shape the type does not fix.
 template <class R>
 std::optional<json> output_schema_of() {
-    if constexpr (std::is_void_v<R> || std::is_same_v<R, std::string> || std::is_same_v<R, json> ||
-                  std::is_same_v<R, ToolResult>) {
+    if constexpr (AskingResult<R>::only) {
+        return std::nullopt;
+    } else if constexpr (AskingResult<R>::asks) {
+        return output_schema_of<plain_result_t<R>>();
+    } else if constexpr (std::is_void_v<R> || std::is_same_v<R, std::string> || std::is_same_v<R, json> ||
+                         std::is_same_v<R, ToolResult>) {
         return std::nullopt;
     } else if constexpr (described<R>) {
         return schema_of<R>();
@@ -226,6 +274,19 @@ ToolResult to_tool_result(R value) {
         wrapped[std::string(wrapped_result_member)] = std::move(encoded);
         result.structured_content = std::move(wrapped);
         return result;
+    }
+}
+
+// The outcome of a value a handler returned: its tool result, or the request for input it made.
+template <class R>
+ToolOutcome to_tool_outcome(R value) {
+    if constexpr (AskingResult<R>::only) {
+        return ToolOutcome(std::in_place_index<1>, std::move(value));
+    } else if constexpr (AskingResult<R>::asks) {
+        if (auto* asked = std::get_if<InputRequired>(&value)) return ToolOutcome(std::in_place_index<1>, std::move(*asked));
+        return ToolOutcome(std::in_place_index<0>, to_tool_result<plain_result_t<R>>(std::get<0>(std::move(value))));
+    } else {
+        return ToolOutcome(std::in_place_index<0>, to_tool_result<R>(std::move(value)));
     }
 }
 
@@ -279,10 +340,11 @@ constexpr bool check_handler() {
             static_assert(dependent_false<F>,
                           "neomcp: a coroutine handler returns asio::awaitable<R> with the default executor");
             return false;
-        } else if constexpr (in == Input::untyped && !std::is_same_v<R, ToolResult>) {
+        } else if constexpr (in == Input::untyped && !std::is_same_v<R, ToolResult> &&
+                             !std::is_same_v<R, std::variant<ToolResult, InputRequired>>) {
             static_assert(dependent_false<F>,
                           "neomcp: a handler registered with a ToolDefinition returns neomcp::ToolResult or "
-                          "asio::awaitable<neomcp::ToolResult>");
+                          "std::variant<neomcp::ToolResult, neomcp::InputRequired>, or an asio::awaitable of one of them");
             return false;
         } else if constexpr (is_c_string_v<R>) {
             static_assert(dependent_false<F>, "neomcp: a tool handler returns std::string, not a C string");
@@ -291,7 +353,8 @@ constexpr bool check_handler() {
             static_assert(dependent_false<F>,
                           "neomcp: a tool handler returns std::string, a described struct, bool, a number, "
                           "std::vector<T>, std::map<std::string, T>, a described enum, neomcp::json, "
-                          "neomcp::ToolResult or void, or an asio::awaitable of one of them");
+                          "neomcp::ToolResult or void, std::variant<R, neomcp::InputRequired> of one of them but void, "
+                          "or neomcp::InputRequired, or an asio::awaitable of one of them");
             return false;
         } else {
             return true;
@@ -310,14 +373,14 @@ using handler_value_t = typename Shape<in, F>::value;
 class PlainBody {
 public:
     virtual ~PlainBody() = default;
-    virtual ToolResult run(const json& arguments, Context& context) = 0;
+    virtual ToolOutcome run(const json& arguments, Context& context) = 0;
 };
 
 // Runs on the server's coroutine thread; the arguments and the context outlive the coroutine.
 class CoroutineBody {
 public:
     virtual ~CoroutineBody() = default;
-    virtual asio::awaitable<ToolResult> run(const json& arguments, Context& context) = 0;
+    virtual asio::awaitable<ToolOutcome> run(const json& arguments, Context& context) = 0;
 };
 
 using Body = std::variant<std::unique_ptr<PlainBody>, std::unique_ptr<CoroutineBody>>;
@@ -375,14 +438,14 @@ public:
     template <class H>
     explicit PlainBodyOf(H&& handler) : handler_(std::forward<H>(handler)) {}
 
-    ToolResult run(const json& arguments, Context& context) override {
+    ToolOutcome run(const json& arguments, Context& context) override {
         using R = handler_value_t<in, F>;
         Args args = decode_arguments<Args>(arguments);
         if constexpr (std::is_void_v<R>) {
             invoke_handler<in>(handler_, args, context);
-            return ToolResult{};
+            return ToolOutcome(std::in_place_index<0>, ToolResult{});
         } else {
-            return to_tool_result<R>(invoke_handler<in>(handler_, args, context));
+            return to_tool_outcome<R>(invoke_handler<in>(handler_, args, context));
         }
     }
 
@@ -396,17 +459,17 @@ public:
     template <class H>
     explicit CoroutineBodyOf(H&& handler) : handler_(std::forward<H>(handler)) {}
 
-    asio::awaitable<ToolResult> run(const json& arguments, Context& context) override {
+    asio::awaitable<ToolOutcome> run(const json& arguments, Context& context) override {
         using R = handler_value_t<in, F>;
         // The arguments live in this frame, which outlives the handler's coroutine: a reference parameter is safe.
         Args args = decode_arguments<Args>(arguments);
         auto started = invoke_handler<in>(handler_, args, context);
         if constexpr (std::is_void_v<R>) {
             co_await std::move(started);
-            co_return ToolResult{};
+            co_return ToolOutcome(std::in_place_index<0>, ToolResult{});
         } else {
             R value = co_await std::move(started);
-            co_return to_tool_result<R>(std::move(value));
+            co_return to_tool_outcome<R>(std::move(value));
         }
     }
 

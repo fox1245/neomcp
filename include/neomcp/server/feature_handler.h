@@ -32,6 +32,9 @@
 //   neomcp::PromptMessage             one message, as built
 //   std::vector<PromptMessage>        the messages, as built
 //   neomcp::PromptResult              as built (the description of the prompt's result too)
+//
+// A resource, template or prompt handler that may ask its client for input returns std::variant<R, InputRequired>
+// (or InputRequired alone) for one of the results R above. A completer never asks.
 #pragma once
 
 #include <cstddef>
@@ -70,19 +73,52 @@ struct Invocation {
     const std::optional<std::string>& mime;  // the MIME type of the resource or template read
 };
 
+// What a body produces: its kind's result, or a request for input.
+template <class Out>
+using Produced = std::variant<Out, InputRequired>;
+
 template <class Out>
 class FeaturePlainBody {
 public:
     virtual ~FeaturePlainBody() = default;
-    virtual Out run(const Invocation& invocation, Context& context) = 0;
+    virtual Produced<Out> run(const Invocation& invocation, Context& context) = 0;
 };
 
 template <class Out>
 class FeatureCoroutineBody {
 public:
     virtual ~FeatureCoroutineBody() = default;
-    virtual asio::awaitable<Out> run(const Invocation& invocation, Context& context) = 0;
+    virtual asio::awaitable<Produced<Out>> run(const Invocation& invocation, Context& context) = 0;
 };
+
+// Whether a kind takes R as a handler's result: one of its results, or, for a kind that may ask, InputRequired or
+// std::variant of one of its results and InputRequired.
+template <class Kind, class R>
+constexpr bool kind_accepts() {
+    if constexpr (AskingResult<R>::only) {
+        return Kind::may_ask;
+    } else if constexpr (AskingResult<R>::asks) {
+        using T = plain_result_t<R>;
+        return Kind::may_ask && !std::is_void_v<T> && !std::is_same_v<T, InputRequired> &&
+               Kind::template valid_result<T>();
+    } else {
+        return Kind::template valid_result<R>();
+    }
+}
+
+// The outcome of a value a handler returned: its kind's result, or the request for input it made.
+template <class Kind, class R>
+Produced<typename Kind::Out> produce(R value, const Invocation& invocation) {
+    using P = Produced<typename Kind::Out>;
+    if constexpr (AskingResult<R>::only) {
+        return P(std::in_place_index<1>, std::move(value));
+    } else if constexpr (AskingResult<R>::asks) {
+        if (auto* asked = std::get_if<InputRequired>(&value)) return P(std::in_place_index<1>, std::move(*asked));
+        return P(std::in_place_index<0>, Kind::convert(std::get<0>(std::move(value)), invocation));
+    } else {
+        return P(std::in_place_index<0>, Kind::convert(std::move(value), invocation));
+    }
+}
 
 template <class Out>
 using FeatureBody = std::variant<std::unique_ptr<FeaturePlainBody<Out>>, std::unique_ptr<FeatureCoroutineBody<Out>>>;
@@ -217,12 +253,13 @@ constexpr bool check_feature_handler() {
         } else if constexpr (is_c_string_v<R>) {
             static_assert(dependent_false<F>, "neomcp: a handler returns std::string, not a C string");
             return false;
-        } else if constexpr (std::is_reference_v<R> || !Kind::template valid_result<R>()) {
+        } else if constexpr (std::is_reference_v<R> || !kind_accepts<Kind, R>()) {
             if constexpr (Kind::id == KindId::prompt || Kind::id == KindId::prompt_no_arguments) {
                 static_assert(dependent_false<F>,
                               "neomcp: a prompt handler returns std::string, neomcp::PromptMessage, "
-                              "std::vector<neomcp::PromptMessage> or neomcp::PromptResult, or an asio::awaitable of "
-                              "one of them");
+                              "std::vector<neomcp::PromptMessage> or neomcp::PromptResult, std::variant<R, "
+                              "neomcp::InputRequired> of one of them, or neomcp::InputRequired, or an asio::awaitable "
+                              "of one of them");
             } else if constexpr (Kind::id == KindId::completer) {
                 static_assert(dependent_false<F>,
                               "neomcp: a completion handler returns std::vector<std::string> or "
@@ -231,7 +268,8 @@ constexpr bool check_feature_handler() {
                 static_assert(dependent_false<F>,
                               "neomcp: a resource handler returns std::string, neomcp::Bytes, a described struct, "
                               "neomcp::json, neomcp::ResourceContents, std::vector<neomcp::ResourceContents> or "
-                              "neomcp::ReadResult, or an asio::awaitable of one of them");
+                              "neomcp::ReadResult, std::variant<R, neomcp::InputRequired> of one of them, or "
+                              "neomcp::InputRequired, or an asio::awaitable of one of them");
             }
             return false;
         } else {
@@ -258,10 +296,10 @@ public:
     template <class H>
     explicit PlainFeatureBodyOf(H&& handler) : handler_(std::forward<H>(handler)) {}
 
-    typename Kind::Out run(const Invocation& invocation, Context& context) override {
+    Produced<typename Kind::Out> run(const Invocation& invocation, Context& context) override {
         Inputs<A> inputs = Kind::template decode<A>(invocation);
         using Sig = CallSignature<F>;
-        return Kind::convert(
+        return produce<Kind>(
             call_with_inputs<Kind, A, F>(handler_, inputs, context, std::make_index_sequence<Sig::arity>{}), invocation);
     }
 
@@ -275,14 +313,14 @@ public:
     template <class H>
     explicit CoroutineFeatureBodyOf(H&& handler) : handler_(std::forward<H>(handler)) {}
 
-    asio::awaitable<typename Kind::Out> run(const Invocation& invocation, Context& context) override {
+    asio::awaitable<Produced<typename Kind::Out>> run(const Invocation& invocation, Context& context) override {
         // The inputs live in this frame, which outlives the handler's coroutine: a reference parameter is safe.
         Inputs<A> inputs = Kind::template decode<A>(invocation);
         using Sig = CallSignature<F>;
         auto started = call_with_inputs<Kind, A, F>(handler_, inputs, context, std::make_index_sequence<Sig::arity>{});
         using R = typename AwaitableTraits<std::remove_cv_t<typename Sig::result>>::value_type;
         R value = co_await std::move(started);
-        co_return Kind::convert(std::move(value), invocation);
+        co_return produce<Kind>(std::move(value), invocation);
     }
 
 private:
@@ -370,6 +408,7 @@ struct ResourceKind {
     using Args = NoArguments;
     static constexpr KindId id = KindId::resource;
     static constexpr bool takes_args = false;
+    static constexpr bool may_ask = true;
     template <class P>
     static constexpr int input_slot() {
         return 0;
@@ -396,6 +435,7 @@ struct TemplateKind {
     using Args = Params;
     static constexpr KindId id = KindId::resource_template;
     static constexpr bool takes_args = true;
+    static constexpr bool may_ask = true;
     template <class P>
     static constexpr int input_slot() {
         return is_arguments_param_v<P, Params> ? 1 : 0;
@@ -464,6 +504,7 @@ struct PromptKind {
     using Args = Parameters;
     static constexpr KindId id = KindId::prompt;
     static constexpr bool takes_args = true;
+    static constexpr bool may_ask = true;
     template <class P>
     static constexpr int input_slot() {
         return is_arguments_param_v<P, Parameters> ? 1 : 0;
@@ -493,6 +534,7 @@ struct PromptNoArgumentsKind {
     using Args = NoArguments;
     static constexpr KindId id = KindId::prompt_no_arguments;
     static constexpr bool takes_args = false;
+    static constexpr bool may_ask = true;
     template <class P>
     static constexpr int input_slot() {
         return 0;
@@ -575,6 +617,7 @@ struct CompleterKind {
     using Args = CompleterInput;
     static constexpr KindId id = KindId::completer;
     static constexpr bool takes_args = true;
+    static constexpr bool may_ask = false;
 
     template <class P>
     static constexpr int input_slot() {

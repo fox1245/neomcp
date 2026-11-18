@@ -15,9 +15,14 @@
 //   and the destructor requests it directly. For a coroutine handler a second callback posts a terminal
 //   cancellation to the io thread, which cancels the asynchronous operation the coroutine awaits.
 // - The destructor sets the stopping flag (so nothing new is admitted), answers the calls still queued, requests
-//   stop on every call in flight while holding no lock, joins the workers, lets the io_context run out of work and
-//   joins its thread. It cannot deadlock on a handler that waits for its stop token: the stop is requested before
-//   any join, from a thread that holds nothing a handler or a stop callback needs.
+//   stop on every call in flight while holding no lock, joins the workers, cancels the input timers, lets the
+//   io_context run out of work and joins its thread. It cannot deadlock on a handler that waits for its stop token:
+//   the stop is requested before any join, from a thread that holds nothing a handler or a stop callback needs.
+// - A call that asked for input is entered again as a new call of the same thing; nothing of the earlier run is
+//   kept. While a session waits for a client's answers (InputWait), one asio::steady_timer per waiting call runs on
+//   the io thread: when it fires first the wait expires, and when the wait ends first a stop callback on the wait's
+//   token posts the timer's cancellation. The timers are found through timers_ (io_mutex_), which shutdown() uses to
+//   cancel them all, so that the io_context runs out of work.
 #include "neomcp/server.h"
 
 #include "neomcp/feature_host.h"
@@ -44,6 +49,7 @@
 #include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
 #include <asio/post.hpp>
+#include <asio/steady_timer.hpp>
 #include <asio/use_awaitable.hpp>
 
 namespace neomcp {
@@ -93,8 +99,29 @@ struct CancelPoster {
 struct CallRecord;
 
 // What a call produced: any outcome a host can complete a call with.
-using JobOutcome =
-    std::variant<ToolResult, ReadResult, PromptResult, CompletionResult, NotFound, InvalidRequest, Refusal, HostFailure>;
+using JobOutcome = std::variant<ToolResult, ReadResult, PromptResult, CompletionResult, NotFound, InvalidRequest,
+                                Refusal, HostFailure, InputRequired>;
+
+// The answers and the state a call of a thing that asked for input comes back with.
+struct Answers {
+    InputResponses responses;
+    std::optional<std::string> state;
+};
+
+// The time-out of one wait for a client's answers.
+struct InputTimer;
+struct TimerCancel {
+    ServerCore* core;
+    std::weak_ptr<InputTimer> timer;
+    void operator()() const noexcept;
+};
+struct InputTimer {
+    InputTimer(asio::io_context& io, InputWait input_wait) : timer(io), wait(std::move(input_wait)) {}
+    asio::steady_timer timer;
+    InputWait wait;
+    std::uint64_t serial = 0;
+    std::optional<std::stop_callback<TimerCancel>> on_end;  // destroyed with the timer, on the io thread
+};
 
 // Something a call can run: a registered tool, resource or resource template. A call runs it on a worker (plain) or on the coroutine thread, and the
 // run never throws: what the handler throws becomes an outcome.
@@ -173,6 +200,7 @@ struct CallRecord {
     Completion done;
     json arguments;
     json meta;
+    Answers answers;                     // of the round before, when the thing asked for input
     std::string subject;                 // what a read names: the uri
     std::optional<std::string> mime;      // the MIME type of the resource or template read
     std::optional<CacheHints> cache;     // the caching hints of the resource read, when it has its own
@@ -249,6 +277,11 @@ public:
     void post_cancel(const std::weak_ptr<CallRecord>& record);
     void finish(const std::shared_ptr<CallRecord>& record, JobOutcome outcome);
 
+    // A call waits for its client's answers: its time-out starts.
+    void awaiting_input(InputWait wait) override;
+    void cancel_timer(const std::weak_ptr<InputTimer>& timer);
+    void cancel_timer_locked(const std::weak_ptr<InputTimer>& timer);  // with io_mutex_ held
+
 private:
     // The completion of a spawned coroutine, on the io thread; it answers the call only when the coroutine failed
     // to.
@@ -264,9 +297,10 @@ private:
     };
 
     // Queues or spawns one call of a registered thing, or refuses it.
-    void admit(Callable& callable, json arguments, json meta, CallControl control, Completion done,
+    void admit(Callable& callable, json arguments, json meta, CallControl control, Completion done, Answers answers,
                std::string subject = {}, std::optional<std::string> mime = std::nullopt,
                std::optional<CacheHints> cache = std::nullopt);
+    void on_timer(const std::shared_ptr<InputTimer>& timer, const std::error_code& error);
 
     json_schema::Validator compile(const std::string& tool, std::string_view which, const json& schema) const;
     void ensure_registering(const std::string& label, std::string_view action) const;
@@ -330,11 +364,16 @@ private:
     asio::io_context io_;
     std::optional<asio::executor_work_guard<asio::io_context::executor_type>> io_work_;
     std::thread io_thread_;
-    std::mutex io_mutex_;  // guards io_open_
+    std::mutex io_mutex_;  // guards io_open_, timers_open_, timers_ and next_timer_
     bool io_open_ = true;  // cancellations may still be posted
+    bool timers_open_ = true;  // input timers may still be started
+    std::map<std::uint64_t, std::weak_ptr<InputTimer>> timers_;
+    std::uint64_t next_timer_ = 0;
 };
 
 void CancelPoster::operator()() const noexcept { core->post_cancel(record); }
+
+void TimerCancel::operator()() const noexcept { core->cancel_timer(timer); }
 
 // ---------------------------------------------------------------------------------------------------------------
 // Lifetime
@@ -351,6 +390,19 @@ ServerCore::ServerCore(ServerOptions options) : options_(std::move(options)) {
     }
     if (options_.prompts_page_size && *options_.prompts_page_size == 0) {
         throw std::invalid_argument("neomcp: ServerOptions::prompts_page_size is zero");
+    }
+    if (options_.max_input_rounds == 0) throw std::invalid_argument("neomcp: ServerOptions::max_input_rounds is zero");
+    if (options_.input_timeout <= std::chrono::milliseconds::zero()) {
+        throw std::invalid_argument("neomcp: ServerOptions::input_timeout is not positive");
+    }
+    if (options_.request_state_ttl <= std::chrono::seconds::zero()) {
+        throw std::invalid_argument("neomcp: ServerOptions::request_state_ttl is not positive");
+    }
+    for (const auto& key : options_.request_state_keys) {
+        if (key.size() < min_request_state_key_size) {
+            throw std::invalid_argument("neomcp: a key of ServerOptions::request_state_keys has fewer than " +
+                                        std::to_string(min_request_state_key_size) + " bytes");
+        }
     }
     io_work_.emplace(asio::make_work_guard(io_));
     try {
@@ -382,6 +434,12 @@ void ServerCore::shutdown() {
     }
     for (auto& worker : workers_) {
         if (worker.joinable()) worker.join();
+    }
+    // A pending input timer is work of the io_context: every one is cancelled, and none starts from now on.
+    {
+        const std::lock_guard<std::mutex> lock(io_mutex_);
+        timers_open_ = false;
+        for (const auto& entry : timers_) cancel_timer_locked(entry.second);
     }
     // call() spawns no coroutine once stopping_ is set, so the io_context runs out of work when the coroutines in
     // flight have finished.
@@ -651,6 +709,11 @@ SessionOptions ServerCore::session_options(profile::Transport transport, IdleCal
     session.max_nesting_depth = options_.max_nesting_depth;
     session.max_queued_notifications = options_.max_queued_notifications;
     session.expose_error_details = options_.expose_error_details;
+    session.max_input_rounds = options_.max_input_rounds;
+    session.request_state_keys = options_.request_state_keys;
+    session.request_state_ttl = options_.request_state_ttl;
+    session.clock = options_.clock;
+    session.on_request_state_rejected = options_.on_request_state_rejected;
     session.on_idle = std::move(on_idle);
     // The session keeps this, and with it the core: the core outlives every session it serves.
     session.check_arguments = [core = shared_from_this()](const ToolDefinition& tool, const json& arguments) {
@@ -684,13 +747,16 @@ void ServerCore::call(const CallRequest& request, CallControl control, Completio
         done(HostFailure{"the server has no tool named '" + request.name + "'"});
         return;
     }
-    admit(*entries_[found->second], request.arguments, request.meta, std::move(control), std::move(done));
+    admit(*entries_[found->second], request.arguments, request.meta, std::move(control), std::move(done),
+          Answers{request.input_responses, request.request_state});
 }
 
 void ServerCore::admit(Callable& callable, json arguments, json meta, CallControl control, Completion done,
-                       std::string subject, std::optional<std::string> mime, std::optional<CacheHints> cache) {
+                       Answers answers, std::string subject, std::optional<std::string> mime,
+                       std::optional<CacheHints> cache) {
     auto record = std::make_shared<CallRecord>(callable, std::move(control), std::move(done), std::move(arguments),
                                                std::move(meta));
+    record->answers = std::move(answers);
     record->subject = std::move(subject);
     record->mime = std::move(mime);
     record->cache = cache;
@@ -765,8 +831,9 @@ void ServerCore::read(const ReadRequest& request, CallControl control, Completio
     // A resource registered at the URI wins over every template; among templates the first registered that matches.
     if (const auto found = resource_by_uri_.find(request.uri); found != resource_by_uri_.end()) {
         const std::size_t index = found->second;
-        admit(*resource_slots_[index].entry, json(nullptr), request.meta, std::move(control), std::move(done), request.uri,
-              resource_defs_[index].mime_type, resource_slots_[index].cache);
+        admit(*resource_slots_[index].entry, json(nullptr), request.meta, std::move(control), std::move(done),
+              Answers{request.input_responses, request.request_state}, request.uri, resource_defs_[index].mime_type,
+              resource_slots_[index].cache);
         return;
     }
     for (std::size_t index = 0; index < template_slots_.size(); ++index) {
@@ -787,8 +854,9 @@ void ServerCore::read(const ReadRequest& request, CallControl control, Completio
         }
         // A match whose variables are not of the member's kind, or that lacks one the struct requires, is no match.
         if (!decodable || !slot.check(arguments)) continue;
-        admit(*slot.entry, std::move(arguments), request.meta, std::move(control), std::move(done), request.uri,
-              template_defs_[index].mime_type, slot.cache);
+        admit(*slot.entry, std::move(arguments), request.meta, std::move(control), std::move(done),
+              Answers{request.input_responses, request.request_state}, request.uri, template_defs_[index].mime_type,
+              slot.cache);
         return;
     }
     done(FeatureOutcome(NotFound{request.uri}));
@@ -821,7 +889,7 @@ void ServerCore::get(const PromptRequest& request, CallControl control, Completi
     json arguments = json::object();
     for (const auto& [name, value] : request.arguments) arguments[name] = value;
     admit(*prompt_entries_[found->second], std::move(arguments), request.meta, std::move(control), std::move(done),
-          request.name);
+          Answers{request.input_responses, request.request_state}, request.name);
 }
 
 CompletionHost* ServerCore::completion_host() noexcept {
@@ -862,7 +930,7 @@ void ServerCore::complete(const CompletionRequest& request, CallControl control,
     json resolved = json::object();
     for (const auto& [name, value] : request.resolved) resolved[name] = value;
     arguments["arguments"] = std::move(resolved);
-    admit(*(*completer)->second, std::move(arguments), request.meta, std::move(control), std::move(done),
+    admit(*(*completer)->second, std::move(arguments), request.meta, std::move(control), std::move(done), Answers{},
           request.reference);
 }
 
@@ -889,7 +957,8 @@ void ServerCore::finish(const std::shared_ptr<CallRecord>& record, JobOutcome ou
     std::visit(
         [&](auto&& value) {
             using T = std::decay_t<decltype(value)>;
-            if constexpr (std::is_same_v<T, ToolResult> || std::is_same_v<T, Refusal> || std::is_same_v<T, HostFailure>) {
+            if constexpr (std::is_same_v<T, ToolResult> || std::is_same_v<T, Refusal> || std::is_same_v<T, HostFailure> ||
+                          std::is_same_v<T, InputRequired>) {
                 record->done(CallOutcome(std::move(value)));
             } else {
                 record->done(FeatureOutcome(std::move(value)));
@@ -952,25 +1021,31 @@ JobOutcome ToolEntry::settle(ToolResult result) const {
 }
 
 JobOutcome ToolEntry::do_plain(const CallRecord& record, Context& context) {
-    return settle(std::get<std::unique_ptr<PlainBody>>(body)->run(record.arguments, context));
+    ToolOutcome outcome = std::get<std::unique_ptr<PlainBody>>(body)->run(record.arguments, context);
+    if (auto* asked = std::get_if<InputRequired>(&outcome)) return JobOutcome(std::move(*asked));
+    return settle(std::get<ToolResult>(std::move(outcome)));
 }
 
 asio::awaitable<JobOutcome> ToolEntry::do_async(const CallRecord& record, Context& context) {
-    ToolResult result = co_await std::get<std::unique_ptr<CoroutineBody>>(body)->run(record.arguments, context);
-    co_return settle(std::move(result));
+    ToolOutcome outcome = co_await std::get<std::unique_ptr<CoroutineBody>>(body)->run(record.arguments, context);
+    if (auto* asked = std::get_if<InputRequired>(&outcome)) co_return JobOutcome(std::move(*asked));
+    co_return settle(std::get<ToolResult>(std::move(outcome)));
 }
 
 template <class Out>
 JobOutcome FeatureEntry<Out>::do_plain(const CallRecord& record, Context& context) {
     const Invocation invocation{record.arguments, record.subject, record.mime};
-    return std::get<std::unique_ptr<FeaturePlainBody<Out>>>(body)->run(invocation, context);
+    Produced<Out> produced = std::get<std::unique_ptr<FeaturePlainBody<Out>>>(body)->run(invocation, context);
+    if (auto* asked = std::get_if<InputRequired>(&produced)) return JobOutcome(std::move(*asked));
+    return JobOutcome(std::get<Out>(std::move(produced)));
 }
 
 template <class Out>
 asio::awaitable<JobOutcome> FeatureEntry<Out>::do_async(const CallRecord& record, Context& context) {
     const Invocation invocation{record.arguments, record.subject, record.mime};
-    Out result = co_await std::get<std::unique_ptr<FeatureCoroutineBody<Out>>>(body)->run(invocation, context);
-    co_return JobOutcome(std::move(result));
+    Produced<Out> produced = co_await std::get<std::unique_ptr<FeatureCoroutineBody<Out>>>(body)->run(invocation, context);
+    if (auto* asked = std::get_if<InputRequired>(&produced)) co_return JobOutcome(std::move(*asked));
+    co_return JobOutcome(std::get<Out>(std::move(produced)));
 }
 
 template <class Out>
@@ -984,6 +1059,42 @@ JobOutcome FeatureEntry<Out>::failure(const CallRecord& record, const std::excep
     } catch (...) {
         return HostFailure{name_label + " failed with an exception that is not a std::exception"};
     }
+}
+
+void ServerCore::awaiting_input(InputWait wait) {
+    auto timer = std::make_shared<InputTimer>(io_, std::move(wait));
+    {
+        const std::lock_guard<std::mutex> lock(io_mutex_);
+        if (!io_open_ || !timers_open_) return;
+        timer->serial = next_timer_++;
+        // Armed here, before anything can cancel it: a cancellation is posted to the io thread, after this.
+        timer->timer.expires_after(options_.input_timeout);
+        timer->timer.async_wait([this, timer](const std::error_code& error) { on_timer(timer, error); });
+        timers_.emplace(timer->serial, timer);
+    }
+    // Runs at once when the wait has ended already.
+    timer->on_end.emplace(timer->wait.ended(), TimerCancel{this, timer});
+}
+
+void ServerCore::on_timer(const std::shared_ptr<InputTimer>& timer, const std::error_code& error) {
+    {
+        const std::lock_guard<std::mutex> lock(io_mutex_);
+        timers_.erase(timer->serial);
+    }
+    // A wait that ended meanwhile ignores expire(); cancelled timers do not call it at all.
+    if (!error) timer->wait.expire();
+}
+
+void ServerCore::cancel_timer(const std::weak_ptr<InputTimer>& timer) {
+    const std::lock_guard<std::mutex> lock(io_mutex_);
+    cancel_timer_locked(timer);
+}
+
+void ServerCore::cancel_timer_locked(const std::weak_ptr<InputTimer>& timer) {
+    if (!io_open_) return;
+    asio::post(io_, [timer] {
+        if (const auto held = timer.lock()) held->timer.cancel();
+    });
 }
 
 void ServerCore::work() {
@@ -1013,7 +1124,8 @@ void ServerCore::run_plain(const std::shared_ptr<CallRecord>& record) {
     }
     JobOutcome outcome = HostFailure{};
     {
-        Context context(record->control, record->meta, record->stop.get_token());
+        Context context(record->control, record->meta, record->stop.get_token(), record->answers.responses,
+                        record->answers.state);
         outcome = record->callable->run_plain(*record, context);
     }
     finish(record, std::move(outcome));
@@ -1026,7 +1138,8 @@ asio::awaitable<void> ServerCore::drive(std::shared_ptr<CallRecord> record) {
         // nothing of the call may run inside call().
         co_await asio::post(io_, asio::use_awaitable);
         if (!record->stop.stop_requested()) {
-            Context context(record->control, record->meta, record->stop.get_token());
+            Context context(record->control, record->meta, record->stop.get_token(), record->answers.responses,
+                            record->answers.state);
             outcome = co_await record->callable->run_async(*record, context);
         }
     } catch (...) {
@@ -1071,6 +1184,7 @@ const std::string& Context::revision() const noexcept { return control_.profile(
 profile::Era Context::era() const noexcept { return control_.profile().era(); }
 const json& Context::client_info() const noexcept { return control_.client_info(); }
 const json& Context::client_capabilities() const noexcept { return control_.client_capabilities(); }
+bool Context::client_supports(const InputRequest& request) const { return control_.client_supports(request); }
 
 // ---------------------------------------------------------------------------------------------------------------
 // ToolHandle

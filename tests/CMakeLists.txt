@@ -93,6 +93,11 @@ target_link_libraries(neomcp_server_features_test PRIVATE neomcp::server GTest::
 neomcp_configure_target(neomcp_server_features_test)
 gtest_discover_tests(neomcp_server_features_test DISCOVERY_TIMEOUT 120)
 
+add_executable(neomcp_server_input_test server_input_test.cpp)
+target_link_libraries(neomcp_server_input_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_server_input_test)
+gtest_discover_tests(neomcp_server_input_test DISCOVERY_TIMEOUT 120)
+
 # ---- The stdio transport ---------------------------------------------------------------------------------------------
 
 add_executable(neomcp_stdio_test stdio_test.cpp)
