@@ -217,6 +217,10 @@ TEST(HttpLoopback, IsDecidedByParsingTheAddress) {
     EXPECT_FALSE(is_loopback_address("127.0.0.1.example.com"));
     EXPECT_FALSE(is_loopback_address("[::1]"));            // brackets are not part of an address
     EXPECT_FALSE(is_loopback_address("127.0.0.1 "));
+    EXPECT_FALSE(is_loopback_address("127.0.0.1:80"));     // a port is not part of an address
+    EXPECT_FALSE(is_loopback_address("127.1"));            // shortened forms are not read
+    EXPECT_FALSE(is_loopback_address("0127.0.0.1"));
+    EXPECT_FALSE(is_loopback_address("::1%lo"));           // a zone identifier is not accepted
 }
 
 // ---- HostPolicy ------------------------------------------------------------------------------------------------------

@@ -6,6 +6,8 @@
 
 #include "neomcp/http/policy.h"
 
+#include "ip_text.h"
+
 namespace neomcp::http {
 
 namespace {
@@ -79,7 +81,8 @@ std::optional<Authority> parse_authority(std::string_view text) {
         const std::size_t close = text.find(']');
         if (close == std::string_view::npos) return std::nullopt;
         const std::string_view inside = text.substr(1, close - 1);
-        if (inside.empty() || inside.find('%') != std::string_view::npos) return std::nullopt;
+        // Rejects an empty address and a zone identifier ('%') among everything that is not address text.
+        if (!detail::has_ipv6_characters(inside)) return std::nullopt;
         std::error_code error;
         const asio::ip::address_v6 address = asio::ip::make_address_v6(std::string(inside), error);
         if (error) return std::nullopt;
