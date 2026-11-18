@@ -136,6 +136,22 @@ if(NOT NEOMCP_HAS_STOP_TOKEN)
 endif()
 unset(CMAKE_REQUIRED_FLAGS)
 
+# Primitives for secrets: random bytes from the operating system, SHA-256 and HMAC-SHA-256. They depend on nothing
+# else of the project, so that both the protocol core and the HTTP building blocks can use them.
+add_library(neomcp_crypto
+    src/crypto/random.cpp
+    src/crypto/sha256.cpp
+    src/crypto/hmac.cpp)
+add_library(neomcp::crypto ALIAS neomcp_crypto)
+target_include_directories(neomcp_crypto
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(WIN32)
+    target_link_libraries(neomcp_crypto PRIVATE bcrypt)
+endif()
+target_compile_features(neomcp_crypto PUBLIC cxx_std_20)
+neomcp_configure_target(neomcp_crypto)
+
 add_library(neomcp_core
     src/core/base64.cpp
     src/core/headers.cpp
@@ -150,7 +166,7 @@ add_library(neomcp::core ALIAS neomcp_core)
 target_include_directories(neomcp_core
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(neomcp_core PUBLIC neomcp::profile neojson::neojson Threads::Threads)
+target_link_libraries(neomcp_core PUBLIC neomcp::profile neojson::neojson Threads::Threads PRIVATE neomcp::crypto)
 target_compile_features(neomcp_core PUBLIC cxx_std_20)
 target_compile_options(neomcp_core PUBLIC ${NEOMCP_STOP_TOKEN_OPTIONS})
 target_link_options(neomcp_core PUBLIC ${NEOMCP_STOP_TOKEN_OPTIONS})
@@ -193,7 +209,6 @@ add_library(neomcp_http
     src/http/media_type.cpp
     src/http/authority.cpp
     src/http/policy.cpp
-    src/http/random.cpp
     src/http/listener.cpp
     src/http/timer.cpp
     src/http/endpoint.cpp
@@ -202,9 +217,9 @@ add_library(neomcp::http ALIAS neomcp_http)
 target_include_directories(neomcp_http
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(neomcp_http PUBLIC neomcp::server Threads::Threads PRIVATE neomcp_httplib asio::asio)
+target_link_libraries(neomcp_http PUBLIC neomcp::server neomcp::crypto Threads::Threads PRIVATE neomcp_httplib asio::asio)
 if(WIN32)
-    target_link_libraries(neomcp_http PRIVATE ws2_32 bcrypt)
+    target_link_libraries(neomcp_http PRIVATE ws2_32)
 endif()
 target_compile_features(neomcp_http PUBLIC cxx_std_20)
 neomcp_configure_target(neomcp_http)

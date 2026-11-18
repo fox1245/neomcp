@@ -1,4 +1,4 @@
-#include "neomcp/http/random.h"
+#include "neomcp/random.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -21,7 +21,7 @@
 #include <algorithm>
 #include <limits>
 
-namespace neomcp::http {
+namespace neomcp {
 
 namespace {
 
@@ -79,4 +79,4 @@ std::optional<std::string> random_hex(std::size_t byte_count) {
     return hex_encode(*bytes);
 }
 
-}  // namespace neomcp::http
+}  // namespace neomcp

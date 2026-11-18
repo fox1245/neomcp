@@ -57,6 +57,13 @@ else()
     gtest_discover_tests(neomcp_json_schema_scale_test DISCOVERY_TIMEOUT 120)
 endif()
 
+# SHA-256, HMAC-SHA-256 and the random source; the test reaches the internal headers of the primitives.
+add_executable(neomcp_crypto_test crypto_test.cpp)
+target_link_libraries(neomcp_crypto_test PRIVATE neomcp::crypto GTest::gtest_main Threads::Threads)
+target_include_directories(neomcp_crypto_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+neomcp_configure_target(neomcp_crypto_test)
+gtest_discover_tests(neomcp_crypto_test DISCOVERY_TIMEOUT 120)
+
 add_executable(neomcp_core_test core_test.cpp)
 target_link_libraries(neomcp_core_test PRIVATE neomcp::core GTest::gtest_main Threads::Threads)
 # The test reaches internal pieces of the core (the Base64 decoder).

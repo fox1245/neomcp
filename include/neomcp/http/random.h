@@ -1,25 +1,13 @@
-// Random bytes from the operating system, and their hexadecimal text form. Used for identifiers an attacker must not
-// be able to guess, such as session ids.
-//
-// The bytes come from the operating system's random source (getentropy on Linux and macOS, BCryptGenRandom on
-// Windows) and from nothing else: a failure of the source is reported, never replaced by a library generator seeded
-// from the clock.
+// Random bytes from the operating system, and their hexadecimal text form, under the names of the HTTP building
+// blocks. The functions are those of neomcp/random.h, which the protocol core uses too.
 #pragma once
 
-#include <cstddef>
-#include <optional>
-#include <string>
-#include <string_view>
+#include "neomcp/random.h"
 
 namespace neomcp::http {
 
-// `count` random bytes, or nothing when the operating system's source failed.
-std::optional<std::string> random_bytes(std::size_t count);
-
-// The lower-case hexadecimal text of `bytes`: two characters per byte, digits and 'a' to 'f'.
-std::string hex_encode(std::string_view bytes);
-
-// `byte_count` random bytes as hexadecimal text (2 * byte_count characters), or nothing when the source failed.
-std::optional<std::string> random_hex(std::size_t byte_count);
+using neomcp::hex_encode;
+using neomcp::random_bytes;
+using neomcp::random_hex;
 
 }  // namespace neomcp::http
