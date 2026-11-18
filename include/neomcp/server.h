@@ -245,10 +245,10 @@ struct ServerOptions {
 
     // ---- Change notifications (see SessionOptions)
     // Where clients open subscriptions: the subscriptions one session keeps open at once. Zero is an error. Default 16.
-    std::size_t max_subscriptions = SessionOptions{}.max_subscriptions;
+    std::size_t max_subscriptions = FeedDefaults::max_subscriptions;
     // The resources a connection watches at once, and the resources one subscription names. Zero is an error.
     // Default 256.
-    std::size_t max_watched_resources = SessionOptions{}.max_watched_resources;
+    std::size_t max_watched_resources = FeedDefaults::max_watched_resources;
     // Told, with no lock held, after the number of sessions registered for the server's changes changed; read
     // Server::change_watchers() for it. For tests and diagnostics; it must not block.
     std::function<void()> on_change_watchers{};

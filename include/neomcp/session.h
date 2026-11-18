@@ -194,6 +194,12 @@ struct SessionDefaults {
     static constexpr std::chrono::seconds request_state_ttl{600};
 };
 
+// The defaults of the bounds of change notifications, which SessionOptions and ServerOptions both carry.
+struct FeedDefaults {
+    static constexpr std::size_t max_watched_resources = 256;
+    static constexpr std::size_t max_subscriptions = 16;
+};
+
 struct SessionOptions {
     // The revisions served; empty: every built-in profile. Two profiles of the same revision are an error.
     std::vector<profile::ProfilePtr> profiles;
@@ -238,10 +244,10 @@ struct SessionOptions {
     // Under the mechanism that tells the connection (connection_notifications): the resources a connection may watch
     // at once; one more is refused. Under the mechanism of subscriptions (subscriptions_listen): the resources one
     // subscription may name; a request that names more is refused. Zero is an error. Default 256.
-    std::size_t max_watched_resources = 256;
+    std::size_t max_watched_resources = FeedDefaults::max_watched_resources;
     // Under the mechanism of subscriptions: the subscriptions a session keeps open at once; one more is refused. Zero
     // is an error. Default 16.
-    std::size_t max_subscriptions = 16;
+    std::size_t max_subscriptions = FeedDefaults::max_subscriptions;
 
     // Runs before every tools/call; empty: arguments are not checked.
     ArgumentCheck check_arguments;
@@ -331,9 +337,11 @@ public:
     void abandon(UnitId unit);
 
     // Requests stop on every call in flight, ends every wait for a client's answers, and drops everything not yet
-    // written; each unit still open ends with an output of kind `end`, written before close() returns. When it returns, nothing is being written and nothing
-    // will be: it waits for a sink call in progress on another thread (but not for one on its own thread, when
-    // close() is called from inside the sink: then the open units get no end).
+    // written but the graceful ends of subscriptions; each open subscription ends gracefully (see above), and each
+    // other unit still open ends with an output of kind `end`, written before close() returns. When it returns,
+    // nothing is being written and nothing will be: it waits for a sink call in progress on another thread (but not for
+    // one on its own thread, when close() is called from inside the sink: then the open units get no end, and the
+    // subscriptions no graceful end).
     void close();
 
     // Whether the session is idle right now (see IdleCallback): true before the first message and after close().
