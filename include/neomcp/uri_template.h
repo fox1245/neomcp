@@ -11,9 +11,9 @@
 // Matching. Only some forms can be matched, and a template that uses another one parses but reports it through
 // unsupported() and matches nothing:
 //
-//   {var}  {a,b}   simple expansion: a value is any run of unreserved characters and percent-encoded octets
-//                  (RFC 3986), so it never holds `/`, `?`, `#`, `:` or any other reserved character
-//   {+var} {+a,b}  reserved expansion: a value may also hold reserved characters (`/` included)
+//   {var}  {a,b}   simple expansion: the raw text of a value is a run of unreserved characters and percent-encoded
+//                  octets (RFC 3986), so it holds no `/`, `?`, `#`, `:` or any other reserved character
+//   {+var} {+a,b}  reserved expansion: the raw text of a value may also hold reserved characters (`/` included)
 //   {?a,b}         form-style query: `?a=1&b=2`; allowed once, as the last element of the template
 //
 // The rules, stated so that one URI never matches one template in two ways:
@@ -26,6 +26,10 @@
 //  - A byte of a value must be allowed by the expression (see above) or be a byte above 0x7F; a `%` must begin a
 //    percent-encoded octet (two hexadecimal digits). Values are percent-decoded; a malformed escape makes the URI
 //    not match. The decoded bytes are not checked to be UTF-8.
+//  - What is said above about reserved characters is about the raw text. The DECODED value of every expression form
+//    may hold any byte except NUL: `{name}` against `a%2Fb` yields `a/b`, and against `%2E%2E` yields `..`. A URI whose
+//    decoded value would hold a NUL byte (`%00`) does not match, because no resource name holds one and a NUL ends a
+//    string in C interfaces. A user of a decoded value must not take it for a safe file name or path.
 //  - A template that ends in `{?a,b}`: the URI is split at its first `?`. The part before it is matched by the rest
 //    of the template, which must hold no literal `?`. What follows it is a list of `name=value` pairs joined by `&`,
 //    in any order, each name one of the template's, at most once; a pair that does not fit, an empty list after the
@@ -99,6 +103,7 @@ public:
 
 private:
     UriTemplate() = default;
+    std::optional<Bindings> match_without_nul_check(std::string_view uri) const;
     friend class UriTemplateParser;
 
     std::string text_;

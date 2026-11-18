@@ -577,6 +577,27 @@ TEST(Templates, DecodeVariablesAsTheMembersOfTheParameters) {
     EXPECT_EQ(text("file:///a/b"), "error -32602") << "{path} holds no '/'";
 }
 
+TEST(Templates, ADecodedValueMayHoldPathCharactersButNotNul) {
+    neomcp::Server server(named("res"));
+    server.resource_template<ft::FileParams>("file:///{path}", "n", [](const ft::FileParams& params) {
+        return params.path;
+    });
+    server.resource_template<ft::KindParams>("kind:///{kind}/{+name}", "n", [](const ft::KindParams& params) {
+        return params.kind + "|" + params.name;
+    });
+    Client client(server, modern_revision);
+    const auto text = [&](const std::string& uri) -> std::string {
+        const json answer = client.read(uri);
+        if (!answer.contains("result")) return "error " + std::to_string(error_code_of(answer));
+        return result_of(answer).at("contents").at(0).at("text").get<std::string>();
+    };
+    EXPECT_EQ(text("file:///a%2Fb"), "a/b");
+    EXPECT_EQ(text("file:///%2E%2E%2Fetc"), "../etc");
+    EXPECT_EQ(text("file:///a%00b"), "error -32602") << "NUL is refused: no template matches";
+    EXPECT_EQ(text("kind:///k/dir/%00"), "error -32602");
+    EXPECT_EQ(text("kind:///k/dir/ok"), "k|dir/ok");
+}
+
 TEST(Templates, TheTestSuitesCase) {
     neomcp::Server server(named("res"));
     server.resource_template<ft::FileParams>("test://template/{path}/data", "n", [](const ft::FileParams& params) {

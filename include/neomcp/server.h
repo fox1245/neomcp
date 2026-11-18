@@ -52,7 +52,9 @@
 // no member and a member with no variable, each by name. A read is served by the resource registered at exactly that
 // URI if there is one, else by the first registered template that matches the URI and whose variables decode as the
 // parameters (a text that is not a number for an integer member is no match). A URI nothing serves is answered as the
-// revision prescribes for a resource that does not exist.
+// revision prescribes for a resource that does not exist. A matched value comes from the client and may hold any text,
+// path separators and `..` included. A handler that uses it to reach a file or another store must check it against
+// what it is willing to serve.
 //
 // Prompts. A prompt is a template of messages that a client offers its user:
 //
@@ -327,7 +329,9 @@ public:
     // A family of resources whose URIs `uri_template` (RFC 6570) describes; Params is a described struct whose
     // members are the template's variables. Throws std::invalid_argument for an empty template or name, a template
     // registered already, one that cannot be parsed or matched, and a variable and a member that do not pair up;
-    // std::logic_error once the server serves. Each message names the template.
+    // std::logic_error once the server serves. Each message names the template. A matched value comes from the client
+    // and may hold any text, path separators and `..` included; a handler that uses it to reach a file or another
+    // store must check it against what it is willing to serve.
     template <class Params, class Handler>
     ResourceTemplateHandle resource_template(std::string uri_template, std::string name, Handler&& handler);
 

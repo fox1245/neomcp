@@ -27,7 +27,9 @@ What exists now:
 - Tools declared from C++ types: the input and output schemas are derived from the types, and arguments are checked
   against the schema before the handler runs.
 - Resources, resource templates (RFC 6570), prompts and argument completion declared from C++ types, served for
-  every revision with the members and the caching hints each revision defines.
+  every revision with the members and the caching hints each revision defines. A value matched by a resource template
+  comes from the client and may hold any text, path separators and `..` included; a handler that uses it to reach a
+  file or another store must check it against what it is willing to serve.
 - A stdio server that speaks both eras of the protocol, the handshake of the older revisions and the per-request form
   of 2026-07-28, to the same program.
 

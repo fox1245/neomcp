@@ -351,6 +351,16 @@ std::optional<UriTemplate::Bindings> match_items(std::string_view text, const st
 }  // namespace
 
 std::optional<UriTemplate::Bindings> UriTemplate::match(std::string_view uri) const {
+    auto bindings = match_without_nul_check(uri);
+    if (!bindings) return bindings;
+    // A NUL byte is refused in the decoded value of every expression form (see the header).
+    for (const auto& binding : *bindings) {
+        if (binding.second.find('\0') != std::string::npos) return std::nullopt;
+    }
+    return bindings;
+}
+
+std::optional<UriTemplate::Bindings> UriTemplate::match_without_nul_check(std::string_view uri) const {
     if (unsupported_) return std::nullopt;
     std::vector<Item> items;
     const Expression* query = nullptr;

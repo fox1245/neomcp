@@ -272,6 +272,27 @@ TEST(UriTemplateMatch, ValuesArePercentDecodedAndMalformedEscapesRefused) {
     });
 }
 
+// The raw text of a simple expansion holds no reserved character, but the decoded value may hold any byte except NUL.
+// This is a decision, not an accident: a user of a decoded value must not take it for a safe file name.
+TEST(UriTemplateMatch, ADecodedValueMayHoldASlashOrDotDotButNeverNul) {
+    expect_cases({
+        {"{name}", "a%2Fb", Bindings{{"name", "a/b"}}},
+        {"{name}", "%2E%2E", Bindings{{"name", ".."}}},
+        {"f/{name}", "f/..%2F..%2Fetc", Bindings{{"name", "../../etc"}}},
+        {"{+name}", "a%2Fb", Bindings{{"name", "a/b"}}},
+        {"{?name}", "?name=%2E%2E%2Fx", Bindings{{"name", "../x"}}},
+        {"{name}", "a%00b", std::nullopt},
+        {"{name}", "%00", std::nullopt},
+        {"{name}", "a%00", std::nullopt},
+        {"f/{name}/g", "f/a%00b/g", std::nullopt},
+        {"{+name}", "a%00b", std::nullopt},
+        {"{+name}", "a/%00", std::nullopt},
+        {"{a,b}", "x,y%00", std::nullopt},
+        {"{?name}", "?name=a%00b", std::nullopt},
+        {"s{?a,b}", "s?a=1&b=%00", std::nullopt},
+    });
+}
+
 TEST(UriTemplateMatch, QueryPairsAreUnorderedAndOptional) {
     expect_cases({
         {"search://items{?q,limit}", "search://items", Bindings{}},
