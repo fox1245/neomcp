@@ -25,6 +25,9 @@
 //   every unit still open, since the queue no longer holds their last outputs. It releases the mutex, requests stop
 //   on the calls, waits until no other thread is inside the sink and writes the end markers itself unless another
 //   drainer did. Called from inside the sink, or after the sink failed, it queues no end markers.
+// - The header fields of a unit are read once, in receive(), through the names the served profiles give the version
+//   header, and checked per request against the request headers of the profile the request is served under. Nothing
+//   about them is kept after receive() returns.
 // - The idle callback runs with no lock held, after the thread that did the work found the session idle under the
 //   mutex: at the end of a drain, after a cancellation, and when a batch was assembled. A batch counts as pending from
 //   the moment it is read until its answer was handed to the queue, so that the gap between the last call of the batch
@@ -42,6 +45,7 @@
 #include <condition_variable>
 #include <deque>
 #include <exception>
+#include <initializer_list>
 #include <map>
 #include <mutex>
 #include <stdexcept>
@@ -49,6 +53,7 @@
 #include <thread>
 #include <utility>
 
+#include "core/headers.h"
 #include "neomcp/jsonrpc.h"
 #include "neomcp/wire.h"
 
@@ -81,6 +86,7 @@ constexpr std::string_view progress_method = "notifications/progress";
 constexpr std::string_view log_method = "notifications/message";
 constexpr std::string_view set_level_method = "logging/setLevel";
 constexpr std::string_view unsupported_version_error = "unsupported_protocol_version";
+constexpr std::string_view header_mismatch_error = "header_mismatch";
 
 const json* member(const json& object, std::string_view name) {
     const auto* members = object.get_ptr<const json::object_t*>();
@@ -132,6 +138,18 @@ struct Served {
     const BatchMechanism* batch = nullptr;
     const CancelMechanism* cancel = nullptr;  // the one the profile names for the session's transport
     InvalidArguments invalid_arguments = InvalidArguments::invalid_params_error;
+    // What the profile's entry for the transport says about headers; views into the profile.
+    std::span<const profile::RequestHeader> request_headers;
+    const profile::EncodedHeaderValue* encoded = nullptr;
+};
+
+// What the header fields of an input unit claim, found through the served profiles' data.
+struct Claims {
+    std::span<const HeaderField> fields;
+    std::size_t versions = 0;        // fields that carry the version header
+    std::string_view version_name;   // the name of the version header, as a profile spells it
+    std::string_view version;        // the value of the first such field
+    const Served* named = nullptr;   // the served profile of the revision it names; null when it names none
 };
 
 // Where a request's client and log level come from.
@@ -170,6 +188,7 @@ struct Place {
     Unit unit;              // null when the input belongs to no unit
     Batch batch;            // null when the message came alone
     std::size_t index = 0;  // its place in the batch
+    const Claims* claims = nullptr;  // what the unit's headers claim; never null
 };
 
 struct CallState {
@@ -228,7 +247,7 @@ public:
                                                                           OutputSink sink);
 
     // `unit` empty: the input belongs to no unit.
-    bool receive(std::optional<UnitId> unit, std::string_view input);
+    bool receive(std::optional<UnitId> unit, std::string_view input, std::span<const HeaderField> headers);
     void abandon(UnitId unit);
     void close();
     bool idle() const;
@@ -262,8 +281,8 @@ private:
 
     // ---- input
     // Each returns whether the input awaits an answer.
-    bool read(std::string_view line, const Unit& unit);
-    bool receive_array(json value, const Unit& unit);
+    bool read(std::string_view line, const Unit& unit, const Claims& claims);
+    bool receive_array(json value, const Unit& unit, const Claims& claims);
     Handled handle(json value, const Place& place);
     void on_notification(const Message& notification);
     std::optional<Answer> on_request(Message request, const Place& place);
@@ -278,6 +297,20 @@ private:
     std::optional<Answer> on_discover(Message& request, const Served& served, Origin&, const Place&);
     std::optional<Answer> on_set_level(Message& request, const Served& served, Origin& origin, const Place&);
     static const std::map<std::string, Handler, std::less<>>& handlers();
+
+    // ---- headers
+    Claims claims_of(std::span<const HeaderField> fields) const;
+    // A refusal for what the version header claims about a unit as a whole: it is repeated, or names no revision
+    // served. Empty when it claims nothing wrong.
+    std::optional<Answer> version_refusal(const Claims& claims, const std::optional<RequestId>& id) const;
+    Answer unsupported_version_header(const Claims& claims, const std::optional<RequestId>& id) const;
+    Answer header_mismatch(const std::optional<RequestId>& id, std::string message,
+                           std::initializer_list<const Served*> preferred) const;
+    // The code of a named error: from the first of `preferred` whose profile defines it, else from the newest served
+    // profile that does, with that profile; else `fallback` with the first of `preferred`.
+    std::pair<int, profile::ProfilePtr> error_from(std::string_view name, std::initializer_list<const Served*> preferred,
+                                                   int fallback) const;
+    bool opens_connection(const Message& request) const;
 
     // ---- answers
     // The enabled revisions, newest first: those a request can name under `opener`, or every one when null.
@@ -309,6 +342,7 @@ private:
     OutputSink sink_;
     std::vector<profile::ProfilePtr> profiles_;  // the served ones, newest revision first
     std::vector<Served> served_;                 // in the order of profiles_
+    std::vector<std::string> version_headers_;   // the names the served profiles give the version header
     std::map<std::string, std::unique_ptr<OpenMechanism>, std::less<>> openers_;  // every registered one
     std::map<std::string, std::unique_ptr<StateMechanism>, std::less<>> states_;
     std::map<std::string, std::unique_ptr<BatchMechanism>, std::less<>> batches_;
@@ -421,6 +455,21 @@ std::variant<std::shared_ptr<SessionCore>, CreateError> SessionCore::create(Sess
         served.cancel = find_or_make(core->cancels_, *cancel,
                                      [&](std::string_view name) { return registry.make_cancel(name); });
         if (served.cancel == nullptr) missing(revision, MechanismSlot::cancel, *cancel);
+        if (transport == profile::Transport::streamable_http) {
+            const profile::StreamableHttpTransport& http = *profile->streamable_http();
+            served.request_headers = http.request_headers;
+            if (http.encoded_header_value) served.encoded = &*http.encoded_header_value;
+            std::vector<std::string_view> names;
+            if (http.version_header) names.push_back(http.version_header->name);
+            for (const auto& header : http.request_headers) {
+                if (header.value == profile::HeaderValue::protocol_version) names.push_back(header.name);
+            }
+            for (const auto name : names) {
+                const bool known = std::any_of(core->version_headers_.begin(), core->version_headers_.end(),
+                                               [&](const std::string& seen) { return same_header_name(seen, name); });
+                if (!known) core->version_headers_.emplace_back(name);
+            }
+        }
 
         const std::string_view invalid = profile->invalid_arguments();
         if (invalid == "error_result") {
@@ -457,7 +506,8 @@ std::variant<std::shared_ptr<SessionCore>, CreateError> SessionCore::create(Sess
 // ---------------------------------------------------------------------------------------------------------------
 // Input
 
-bool SessionCore::receive(std::optional<UnitId> number, std::string_view input) {
+bool SessionCore::receive(std::optional<UnitId> number, std::string_view input,
+                          std::span<const HeaderField> headers) {
     Unit unit;
     {
         const std::lock_guard<std::mutex> lock(mutex_);
@@ -474,7 +524,8 @@ bool SessionCore::receive(std::optional<UnitId> number, std::string_view input) 
     std::exception_ptr failure;
     bool awaits = false;
     try {
-        awaits = read(input, unit);
+        const Claims claims = claims_of(headers);
+        awaits = read(input, unit, claims);
         if (unit && !awaits) end_unit(unit, Writer::reader);
     } catch (...) {
         failure = std::current_exception();
@@ -489,7 +540,7 @@ bool SessionCore::receive(std::optional<UnitId> number, std::string_view input) 
     return awaits;
 }
 
-bool SessionCore::read(std::string_view line, const Unit& unit) {
+bool SessionCore::read(std::string_view line, const Unit& unit, const Claims& claims) {
     if (line.size() > options_.max_message_bytes) {
         emit_refusal(unit, error_code::invalid_request,
                      "Invalid Request: the message is longer than " + std::to_string(options_.max_message_bytes) +
@@ -509,8 +560,8 @@ bool SessionCore::read(std::string_view line, const Unit& unit) {
         emit_refusal(unit, error_code::parse_error, "Parse error", RefusalReason::parse_error);
         return true;
     }
-    if (value.is_array()) return receive_array(std::move(value), unit);
-    Handled handled = handle(std::move(value), Place{unit, nullptr, 0});
+    if (value.is_array()) return receive_array(std::move(value), unit, claims);
+    Handled handled = handle(std::move(value), Place{unit, nullptr, 0, &claims});
     if (handled.answer) {
         emit_answer(std::move(*handled.answer), unit, Writer::reader);
         return true;
@@ -518,7 +569,12 @@ bool SessionCore::read(std::string_view line, const Unit& unit) {
     return handled.later;
 }
 
-bool SessionCore::receive_array(json value, const Unit& unit) {
+bool SessionCore::receive_array(json value, const Unit& unit, const Claims& claims) {
+    // The headers belong to the whole batch.
+    if (auto refusal = version_refusal(claims, std::nullopt)) {
+        emit_answer(std::move(*refusal), unit, Writer::reader);
+        return true;
+    }
     const BatchMechanism* mechanism = nullptr;
     profile::ProfilePtr profile;
     {
@@ -551,7 +607,7 @@ bool SessionCore::receive_array(json value, const Unit& unit) {
     }
     bool awaits = false;
     for (std::size_t i = 0; i < items.size(); ++i) {
-        Handled handled = handle(std::move(items[i]), Place{unit, batch, i});
+        Handled handled = handle(std::move(items[i]), Place{unit, batch, i, &claims});
         if (handled.answer || handled.later) awaits = true;
         if (handled.answer) {
             const std::lock_guard<std::mutex> lock(mutex_);
@@ -576,7 +632,13 @@ Handled SessionCore::handle(json value, const Place& place) {
                                   RefusalReason::invalid_request, nullptr},
                            false};
         case MessageKind::response: return Handled{};  // this server sends no requests
-        case MessageKind::notification: on_notification(message); return Handled{};
+        case MessageKind::notification:
+            // A notification alone is refused for what its headers claim; in a batch the batch was.
+            if (!place.batch) {
+                if (auto refusal = version_refusal(*place.claims, std::nullopt)) return Handled{std::move(refusal), false};
+            }
+            on_notification(message);
+            return Handled{};
         case MessageKind::request: {
             auto answer = on_request(std::move(message), place);
             if (answer) return Handled{std::move(answer), false};
@@ -607,6 +669,14 @@ std::optional<Answer> SessionCore::on_request(Message request, const Place& plac
         }
     }
 
+    const Claims& claims = *place.claims;
+    if (claims.versions > 1) {
+        return header_mismatch(id,
+                               std::string(header_mismatch_prefix) + "the " + std::string(claims.version_name) +
+                                   " header appears more than once",
+                               {});
+    }
+
     // A request that names its revision is served under it, whatever the connection holds.
     for (const auto& entry : openers_) {
         auto named = entry.second->named_revision(request);
@@ -616,6 +686,19 @@ std::optional<Answer> SessionCore::on_request(Message request, const Place& plac
                           nullptr};
         }
         return serve_named(std::move(request), *entry.second, std::get<std::string>(*named), place);
+    }
+    // The body names no revision. A version header that names a revision whose requests must name it themselves
+    // finds a malformed request; one that names no revision served refuses it, unless it is a handshake (the header
+    // is defined for the requests after it). Otherwise the connection decides.
+    if (claims.versions == 1) {
+        if (claims.named != nullptr && claims.named->open->requests_name_revision()) {
+            json data = json::object();
+            data["supported"] = supported_versions(claims.named->open);
+            return Answer{make_error(id, error_code::invalid_params, "Invalid params: " + claims.named->open->missing_signal(),
+                                     std::move(data)),
+                          RefusalReason::invalid_request_meta, claims.named->profile};
+        }
+        if (claims.named == nullptr && !opens_connection(request)) return unsupported_version_header(claims, id);
     }
     // A handshake opens the connection.
     for (const auto& entry : openers_) {
@@ -667,6 +750,25 @@ std::optional<Answer> SessionCore::serve_named(Message request, const OpenMechan
         if (newest == nullptr) newest = &candidate;
         if (candidate.profile->revision() == revision) chosen = &candidate;
     }
+    // What the headers claim is checked first, a mismatch before the version: the header must name the revision the
+    // body names, and must be there when the rules of that revision (or, when it is not served, of the newest
+    // revision named this way) require it.
+    const Claims& claims = *place.claims;
+    if (claims.versions == 1 && claims.version != revision) {
+        return header_mismatch(id,
+                               std::string(header_mismatch_prefix) + std::string(claims.version_name) + " header value '" +
+                                   std::string(claims.version) + "' does not match body value '" + revision + "'",
+                               {claims.named, chosen});
+    }
+    const Served* rules = chosen != nullptr ? chosen : newest;
+    if (rules != nullptr && claims.versions == 0) {
+        if (const auto name = required_version_header(rules->request_headers, request.method)) {
+            return header_mismatch(id,
+                                   std::string(header_mismatch_prefix) + "the request lacks the " + std::string(*name) +
+                                       " header",
+                                   {chosen, newest});
+        }
+    }
     json data = json::object();
     if (newest == nullptr) {
         // No revision can be named this way; the list tells the reader what the server serves at all.
@@ -684,6 +786,10 @@ std::optional<Answer> SessionCore::serve_named(Message request, const OpenMechan
         return Answer{make_error(id, code.value_or(error_code::invalid_params), "Unsupported protocol version",
                                  std::move(data)),
                       RefusalReason::unsupported_version, newest->profile};
+    }
+    if (auto problem = check_request_headers(request, claims.fields, chosen->request_headers, chosen->encoded,
+                                             chosen->profile->revision())) {
+        return header_mismatch(id, std::move(*problem), {chosen});
     }
     auto scope = opener.scope(request, *chosen->profile, options_.protocol_logging);
     if (const auto* error = std::get_if<RequestError>(&scope)) {
@@ -972,6 +1078,86 @@ std::optional<Answer> SessionCore::on_set_level(Message& request, const Served& 
     json body = json::object();
     finish_result(body, "EmptyResult", *served.profile);
     return served_answer(make_result(id, std::move(body)), served);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Headers
+
+Claims SessionCore::claims_of(std::span<const HeaderField> fields) const {
+    Claims claims;
+    claims.fields = fields;
+    for (const HeaderField& field : fields) {
+        for (const std::string& name : version_headers_) {
+            if (!same_header_name(field.name, name)) continue;
+            if (claims.versions == 0) {
+                claims.version_name = name;
+                claims.version = field.value;
+            }
+            ++claims.versions;
+            break;
+        }
+    }
+    if (claims.versions == 1) {
+        for (const Served& served : served_) {
+            if (served.profile->revision() == claims.version) claims.named = &served;
+        }
+    }
+    return claims;
+}
+
+std::optional<Answer> SessionCore::version_refusal(const Claims& claims, const std::optional<RequestId>& id) const {
+    if (claims.versions > 1) {
+        return header_mismatch(id,
+                               std::string(header_mismatch_prefix) + "the " + std::string(claims.version_name) +
+                                   " header appears more than once",
+                               {});
+    }
+    if (claims.versions == 1 && claims.named == nullptr) return unsupported_version_header(claims, id);
+    return std::nullopt;
+}
+
+Answer SessionCore::unsupported_version_header(const Claims& claims, const std::optional<RequestId>& id) const {
+    const Served* connection = nullptr;
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        if (connection_) connection = connection_->served;
+    }
+    json data = json::object();
+    data["supported"] = supported_versions();
+    data["requested"] = std::string(claims.version);
+    auto [code, governing] = error_from(unsupported_version_error, {connection}, error_code::invalid_request);
+    return Answer{make_error(id, code,
+                             "Unsupported protocol version: the " + std::string(claims.version_name) +
+                                 " header names a revision this server does not serve",
+                             std::move(data)),
+                  RefusalReason::unsupported_version_header, std::move(governing)};
+}
+
+Answer SessionCore::header_mismatch(const std::optional<RequestId>& id, std::string message,
+                                    std::initializer_list<const Served*> preferred) const {
+    auto [code, governing] = error_from(header_mismatch_error, preferred, error_code::invalid_request);
+    return Answer{make_error(id, code, std::move(message)), RefusalReason::header_mismatch, std::move(governing)};
+}
+
+std::pair<int, profile::ProfilePtr> SessionCore::error_from(std::string_view name,
+                                                            std::initializer_list<const Served*> preferred,
+                                                            int fallback) const {
+    for (const Served* served : preferred) {
+        if (served == nullptr) continue;
+        if (const auto code = served->profile->error_code(name)) return {*code, served->profile};
+    }
+    for (const Served& served : served_) {  // newest first
+        if (const auto code = served.profile->error_code(name)) return {*code, served.profile};
+    }
+    for (const Served* served : preferred) {
+        if (served != nullptr) return {fallback, served->profile};
+    }
+    return {fallback, nullptr};
+}
+
+bool SessionCore::opens_connection(const Message& request) const {
+    return std::any_of(openers_.begin(), openers_.end(),
+                       [&](const auto& entry) { return entry.second->opens_connection(request); });
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1412,12 +1598,12 @@ Session::~Session() {
 
 void Session::receive(std::string_view line) {
     const auto core = core_;  // the sink may destroy the session while this runs
-    core->receive(std::nullopt, line);
+    core->receive(std::nullopt, line, {});
 }
 
-bool Session::receive(UnitId unit, std::string_view input) {
+bool Session::receive(UnitId unit, std::string_view input, std::span<const HeaderField> headers) {
     const auto core = core_;
-    return core->receive(unit, input);
+    return core->receive(unit, input, headers);
 }
 
 void Session::abandon(UnitId unit) {

@@ -8,8 +8,8 @@
 // profiles name, never by a revision string.
 //
 // A transport that answers each request on its own channel (as HTTP answers each POST) feeds the session input
-// units: what one request of the transport carries, numbered by the transport. Every output then says which unit
-// it belongs to, and every unit ends exactly once (see Output).
+// units: what one request of the transport carries, numbered by the transport, with the request's header fields.
+// Every output then says which unit it belongs to, and every unit ends exactly once (see Output).
 #pragma once
 
 #include <cstddef>
@@ -54,8 +54,8 @@ enum class OutputKind {
     end            // no message: the unit ends without an answer
 };
 
-// Why an input was refused before any method ran. Each name (to_string) is also a reason a revision's Streamable
-// HTTP status map can give a status for (profile::declared_status_reasons).
+// Why an input was refused before any method ran. The name of each reason but `none` (to_string) is also a reason a
+// revision's Streamable HTTP status map can give a status for (profile::declared_status_reasons).
 enum class RefusalReason {
     none,
     parse_error,                 // not JSON
@@ -94,6 +94,13 @@ struct Output {
 // Receives each output, with the same guarantees as a Sink: one thread at a time, never re-entrantly, never under a
 // lock of the session, and a sink that throws closes the session.
 using OutputSink = std::function<void(Output output)>;
+
+// One header field of the transport's request that carried an input unit: its name, and its value without the
+// whitespace around it, as the transport got them. Names compare without regard to ASCII case, values exactly.
+struct HeaderField {
+    std::string_view name;
+    std::string_view value;
+};
 
 // Called when the session becomes idle: no call it started waits for its answer (a call the client cancelled counts
 // as answered from the moment of the cancellation, though its tool may still run), nothing waits to be written or is
@@ -197,14 +204,20 @@ public:
     // was writing (the session is closed then).
     void receive(std::string_view line);
 
-    // One input unit, numbered by the caller. Called by one thread at a time, like the form above, and throws the
-    // same; feed a session one form only. A number may be used again once its unit ended; a number whose unit is
-    // still open throws std::invalid_argument.
+    // One input unit, numbered by the caller, with the header fields of the request that carried it (they are read
+    // during the call only). Called by one thread at a time, like the form above, and throws the same; feed a session
+    // one form only. A number may be used again once its unit ended; a number whose unit is still open throws
+    // std::invalid_argument.
+    //
+    // The headers are checked against the profiles' entries for the session's transport: the version header and the
+    // request headers a revision defines. A header that is missing, repeated, malformed or contradicts the body, and a
+    // version header naming a revision the session does not serve, refuse the input (Output::refusal). On a
+    // transport whose entries define no headers, such as stdio, headers change nothing.
     //
     // Returns whether the unit awaits an answer: true when it holds a request or was refused (the answer may have
     // been written already, and a request that is cancelled later ends the unit without one), false when it holds
     // only notifications and responses. After close() the input is ignored and false returned.
-    bool receive(UnitId unit, std::string_view input);
+    bool receive(UnitId unit, std::string_view input, std::span<const HeaderField> headers = {});
 
     // The transport lost the stream that carried the unit's outputs. The cancellation mechanism of the profile each
     // of the unit's calls is served under decides what happens to the call: it is stopped when the mechanism says a

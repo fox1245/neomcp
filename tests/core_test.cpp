@@ -2619,37 +2619,64 @@ TEST(Transport, ProfilesThatDoNotDefineItAreNotServed) {
     EXPECT_NE(error->message.find("streamable_http"), std::string::npos) << error->message;
 }
 
+// The header fields a client of 2026-07-28 sends with a request over Streamable HTTP
+// (basic/transports/streamable-http.mdx): the revision, the method and, for tools/call, the tool's name.
+using Fields = std::vector<std::pair<std::string, std::string>>;
+
+Fields modern_headers(const json& request) {
+    Fields fields{{"MCP-Protocol-Version", modern_revision}, {"Mcp-Method", request.at("method").get<std::string>()}};
+    if (request.at("method") == "tools/call") {
+        fields.emplace_back("Mcp-Name", request.at("params").at("name").get<std::string>());
+    }
+    return fields;
+}
+
+bool feed(neomcp::Session& session, neomcp::UnitId unit, const json& message, const Fields& fields) {
+    std::vector<neomcp::HeaderField> headers;
+    for (const auto& [name, value] : fields) headers.push_back(neomcp::HeaderField{name, value});
+    return session.receive(unit, line_of(message), headers);
+}
+
+bool feed_modern(neomcp::Session& session, neomcp::UnitId unit, const json& request) {
+    return feed(session, unit, request, modern_headers(request));
+}
+
 TEST(Transport, ItsEntryNamesTheCancellationMechanism) {
     FakeHost host;
+    Recorder recorder;
     neomcp::SessionOptions options = test_options();
     options.transport = profile::Transport::streamable_http;
-    Peer peer(host, options);
+    auto session = tagged_session(host, recorder, options);
     const auto modern = builtin(modern_revision);
     const auto legacy = builtin("2025-11-25");
-    ASSERT_TRUE(peer.initialize(*legacy, patience));
-    peer.notify(gated_call(*modern, "m"));
-    peer.notify(gated_call(*legacy, "l"));
+    ASSERT_TRUE(session->receive(1, line_of(Peer::initialize_request(*legacy, "init"))));
+    ASSERT_TRUE(feed_modern(*session, 2, gated_call(*modern, "m")));
+    ASSERT_TRUE(session->receive(3, line_of(gated_call(*legacy, "l"))));
     auto m = host.wait_parked(patience);
     auto l = host.wait_parked(patience);
     ASSERT_TRUE(m && l);
-    peer.notify(cancelled("m"));
-    peer.notify(cancelled("l"));
+    EXPECT_FALSE(session->receive(4, line_of(cancelled("m"))));
+    EXPECT_FALSE(session->receive(5, line_of(cancelled("l"))));
     EXPECT_FALSE(m->control.stop_token().stop_requested()) << "under 2026-07-28 a closed stream cancels, no message";
     EXPECT_TRUE(l->control.stop_token().stop_requested());
     m->done(text_result("m"));
-    EXPECT_TRUE(peer.await_response("m", patience));
+    ASSERT_TRUE(recorder.wait_end(2));
+    EXPECT_EQ(recorder.unit(2).outputs.back().kind, neomcp::OutputKind::response);
+    EXPECT_EQ(recorder.unit(3).outputs.back().kind, neomcp::OutputKind::end);
 }
 
 TEST(Connection, TheProfileAHandshakeOpenedIsKnown) {
     FakeHost host;
+    Recorder recorder;
     neomcp::SessionOptions options = test_options();
     options.transport = profile::Transport::streamable_http;
-    Peer peer(host, options);
-    EXPECT_FALSE(peer.session().connection_profile());
-    ASSERT_TRUE(peer.request(Peer::make_request(*builtin(modern_revision), 1, "server/discover"), patience));
-    EXPECT_FALSE(peer.session().connection_profile()) << "a request that names its revision opens nothing";
-    ASSERT_TRUE(peer.initialize(*builtin("2025-06-18"), patience));
-    const profile::ProfilePtr opened = peer.session().connection_profile();
+    auto session = tagged_session(host, recorder, options);
+    EXPECT_FALSE(session->connection_profile());
+    ASSERT_TRUE(feed_modern(*session, 1, Peer::make_request(*builtin(modern_revision), 1, "server/discover")));
+    ASSERT_TRUE(message_of(recorder.unit(1).outputs.at(0)).contains("result"));
+    EXPECT_FALSE(session->connection_profile()) << "a request that names its revision opens nothing";
+    ASSERT_TRUE(session->receive(2, line_of(Peer::initialize_request(*builtin("2025-06-18"), 2))));
+    const profile::ProfilePtr opened = session->connection_profile();
     ASSERT_TRUE(opened);
     EXPECT_EQ(opened->revision(), "2025-06-18");
     ASSERT_TRUE(opened->streamable_http());
@@ -2670,7 +2697,7 @@ TEST(Abandon, UnderCloseResponseStreamTheCallsStopAndNothingMoreIsWritten) {
     Recorder recorder;
     auto session = tagged_session(host, recorder, http_options());
     const auto modern = builtin(modern_revision);
-    ASSERT_TRUE(session->receive(1, line_of(gated_call(*modern, "c", "t"))));
+    ASSERT_TRUE(feed_modern(*session, 1, gated_call(*modern, "c", "t")));
     auto parked = host.wait_parked(patience);
     ASSERT_TRUE(parked);
     parked->control.progress(1);
@@ -2685,7 +2712,7 @@ TEST(Abandon, UnderCloseResponseStreamTheCallsStopAndNothingMoreIsWritten) {
     late.join();
     session->abandon(1);
     session->abandon(99);
-    ASSERT_TRUE(session->receive(2, line_of(Peer::make_request(*modern, "flush", "server/discover"))));
+    ASSERT_TRUE(feed_modern(*session, 2, Peer::make_request(*modern, "flush", "server/discover")));
     ASSERT_TRUE(recorder.wait_end(2));
     const auto written = recorder.unit(1);
     EXPECT_EQ(written.outputs.size(), 1u);
@@ -2758,7 +2785,7 @@ TEST(Abandon, WhileTheRequestIsStillBeingRead) {
     const auto legacy = builtin("2025-11-25");
 
     abandon_on_check = 1;
-    EXPECT_TRUE(session->receive(1, line_of(gated_call(*modern, "m"))));
+    EXPECT_TRUE(feed_modern(*session, 1, gated_call(*modern, "m")));
     EXPECT_FALSE(host.wait_parked(now)) << "a call whose stream is gone and whose closing cancels it does not start";
     EXPECT_TRUE(session->idle());
 
@@ -2785,7 +2812,7 @@ TEST(Abandon, FromInsideTheSinkForTheUnitBeingWritten) {
     });
     ASSERT_TRUE(std::holds_alternative<std::unique_ptr<neomcp::Session>>(made));
     session = std::move(std::get<std::unique_ptr<neomcp::Session>>(made));
-    ASSERT_TRUE(session->receive(1, line_of(gated_call(*builtin(modern_revision), "c", "t"))));
+    ASSERT_TRUE(feed_modern(*session, 1, gated_call(*builtin(modern_revision), "c", "t")));
     auto parked = host.wait_parked(patience);
     ASSERT_TRUE(parked);
     parked->control.progress(1);
@@ -2817,7 +2844,7 @@ TEST(Abandon, ReturnsOnlyAfterAWriteOfTheUnitOnAnotherThreadEnded) {
         });
         ASSERT_TRUE(std::holds_alternative<std::unique_ptr<neomcp::Session>>(made));
         auto session = std::move(std::get<std::unique_ptr<neomcp::Session>>(made));
-        ASSERT_TRUE(session->receive(1, line_of(gated_call(*modern, "c", "t"))));
+        ASSERT_TRUE(feed_modern(*session, 1, gated_call(*modern, "c", "t")));
         auto parked = host.wait_parked(patience);
         ASSERT_TRUE(parked);
         recorder.hold_on(1);
@@ -2839,7 +2866,7 @@ TEST(Abandon, ReturnsOnlyAfterAWriteOfTheUnitOnAnotherThreadEnded) {
         }
         parked->control.progress(2);
         parked->done(text_result("c"));
-        ASSERT_TRUE(session->receive(2, line_of(Peer::make_request(*modern, "flush", "server/discover"))));
+        ASSERT_TRUE(feed_modern(*session, 2, Peer::make_request(*modern, "flush", "server/discover")));
         ASSERT_EQ(recorder.unit(1).outputs.size(), 1u);
     }
 }
@@ -2851,7 +2878,7 @@ TEST(Abandon, NothingOfTheUnitIsWrittenAfterAbandonReturns) {
         FakeHost host;
         Recorder recorder;
         auto session = tagged_session(host, recorder, http_options());
-        ASSERT_TRUE(session->receive(1, line_of(gated_call(*modern, "c", "t"))));
+        ASSERT_TRUE(feed_modern(*session, 1, gated_call(*modern, "c", "t")));
         auto parked = host.wait_parked(patience);
         ASSERT_TRUE(parked);
         Gate gate;
@@ -2871,6 +2898,288 @@ TEST(Abandon, NothingOfTheUnitIsWrittenAfterAbandonReturns) {
         }
         ASSERT_EQ(recorder.outputs_after_an_end(), 0);
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// What the headers claim (Streamable HTTP)
+
+// The one output of a unit that was answered at once.
+neomcp::Output only_output(Recorder& recorder, neomcp::UnitId unit) {
+    const auto written = recorder.unit(unit);
+    if (written.outputs.size() != 1) throw std::runtime_error("unit " + std::to_string(unit) + " has " +
+                                                             std::to_string(written.outputs.size()) + " outputs");
+    return written.outputs[0];
+}
+
+// The status the governing profile prescribes for the refusal; 0 when it prescribes none.
+int prescribed_status(const neomcp::Output& output) {
+    if (!output.profile || !output.profile->streamable_http()) return 0;
+    return output.profile->streamable_http()->status_for(neomcp::to_string(output.refusal)).value_or(0);
+}
+
+json with_version(json request, const json& version) {
+    if (version.is_null()) {
+        request["params"]["_meta"].erase(version_key);
+    } else {
+        request["params"]["_meta"][version_key] = version;
+    }
+    return request;
+}
+
+Fields without(Fields fields, const std::string& name) {
+    fields.erase(std::remove_if(fields.begin(), fields.end(), [&](const auto& field) { return field.first == name; }),
+                 fields.end());
+    return fields;
+}
+
+Fields replaced(Fields fields, const std::string& name, const std::string& value) {
+    fields = without(std::move(fields), name);
+    fields.emplace_back(name, value);
+    return fields;
+}
+
+// The rows of the table of the version header H against the revision B the body names: basic/transports/
+// streamable-http.mdx and basic/versioning.mdx of 2026-07-28, and the version header of the legacy revisions.
+TEST(Headers, TheVersionHeaderAgainstTheBodysRevision) {
+    using neomcp::RefusalReason;
+    const auto modern = builtin(modern_revision);
+    const json list = Peer::make_request(*modern, "r", "tools/list");
+    struct Row {
+        std::string name;
+        json request;
+        Fields fields;
+        int code;  // 0: a result
+        RefusalReason reason;
+        int status;  // what 2026-07-28 prescribes for it; 0: none
+    };
+    const std::vector<Row> rows{
+        {"H and B agree", list, modern_headers(list), 0, RefusalReason::none, 0},
+        {"H and B differ, a mismatch before the version", with_version(list, "2099-01-01"), modern_headers(list),
+         -32020, RefusalReason::header_mismatch, 400},
+        {"H absent, B present", list, without(modern_headers(list), "MCP-Protocol-Version"), -32020,
+         RefusalReason::header_mismatch, 400},
+        {"H and B name a revision not served", with_version(list, "2099-01-01"),
+         replaced(modern_headers(list), "MCP-Protocol-Version", "2099-01-01"), -32022,
+         RefusalReason::unsupported_version, 400},
+        {"H names the modern revision, B absent", with_version(list, nullptr), modern_headers(list), -32602,
+         RefusalReason::invalid_request_meta, 400},
+        {"H names the modern revision, no _meta at all",
+         json{{"jsonrpc", "2.0"}, {"id", "r"}, {"method", "tools/list"}, {"params", json::object()}},
+         modern_headers(list), -32602, RefusalReason::invalid_request_meta, 400},
+        {"H names a legacy revision, B absent, no connection",
+         json{{"jsonrpc", "2.0"}, {"id", "r"}, {"method", "tools/list"}}, {{"MCP-Protocol-Version", "2025-11-25"}},
+         -32602, RefusalReason::missing_connection, 0},
+        {"H names no revision served, B absent", json{{"jsonrpc", "2.0"}, {"id", "r"}, {"method", "tools/list"}},
+         {{"MCP-Protocol-Version", "1999-01-01"}}, -32022, RefusalReason::unsupported_version_header, 0},
+    };
+    for (const auto& row : rows) {
+        SCOPED_TRACE(row.name);
+        FakeHost host;
+        Recorder recorder;
+        auto session = tagged_session(host, recorder, http_options());
+        EXPECT_TRUE(feed(*session, 1, row.request, row.fields));
+        const neomcp::Output output = only_output(recorder, 1);
+        const json answer = message_of(output);
+        EXPECT_EQ(answer.at("id"), "r") << "an error echoes the request's id";
+        if (row.code == 0) {
+            EXPECT_TRUE(answer.contains("result")) << answer.dump();
+            continue;
+        }
+        EXPECT_EQ(error_code_of(answer), row.code) << answer.dump();
+        EXPECT_EQ(output.refusal, row.reason) << neomcp::to_string(output.refusal);
+        EXPECT_EQ(prescribed_status(output), row.status);
+        if (row.reason == RefusalReason::unsupported_version) {
+            EXPECT_EQ(answer.at("error").at("data").at("supported"), strings({modern_revision}));
+            EXPECT_EQ(answer.at("error").at("data").at("requested"), "2099-01-01");
+        }
+        if (row.reason == RefusalReason::unsupported_version_header) {
+            EXPECT_EQ(answer.at("error").at("data").at("requested"), "1999-01-01");
+        }
+        if (row.reason == RefusalReason::header_mismatch) {
+            EXPECT_NE(error_message_of(answer).find("MCP-Protocol-Version"), std::string::npos) << answer.dump();
+        }
+    }
+}
+
+TEST(Headers, AHandshakeProceedsWhateverTheVersionHeaderNames) {
+    for (const std::string version : {"1999-01-01", "2025-11-25", "2025-06-18"}) {
+        SCOPED_TRACE(version);
+        FakeHost host;
+        Recorder recorder;
+        auto session = tagged_session(host, recorder, http_options());
+        EXPECT_TRUE(feed(*session, 1, Peer::initialize_request(*builtin("2025-11-25"), 1),
+                         {{"MCP-Protocol-Version", version}, {"Mcp-Method", "initialize"}}));
+        const json answer = message_of(only_output(recorder, 1));
+        ASSERT_TRUE(answer.contains("result")) << answer.dump();
+        EXPECT_EQ(answer.at("result").at("protocolVersion"), "2025-11-25");
+        ASSERT_TRUE(session->connection_profile());
+    }
+    // A header that names the modern revision is a modern request, whose body must say so.
+    FakeHost host;
+    Recorder recorder;
+    auto session = tagged_session(host, recorder, http_options());
+    EXPECT_TRUE(feed(*session, 1, Peer::initialize_request(*builtin("2025-11-25"), 1),
+                     {{"MCP-Protocol-Version", modern_revision}}));
+    EXPECT_EQ(only_output(recorder, 1).refusal, neomcp::RefusalReason::invalid_request_meta);
+    EXPECT_FALSE(session->connection_profile());
+}
+
+TEST(Headers, OnAnOpenedConnectionAnyServedRevisionIsAccepted) {
+    FakeHost host;
+    Recorder recorder;
+    auto session = tagged_session(host, recorder, http_options());
+    const auto legacy = builtin("2025-11-25");
+    ASSERT_TRUE(session->receive(1, line_of(Peer::initialize_request(*legacy, "init"))));
+    const json list = Peer::make_request(*legacy, "l", "tools/list");
+    for (const std::string version : {"2025-11-25", "2025-06-18", "2025-03-26"}) {
+        SCOPED_TRACE(version);
+        const neomcp::UnitId unit = recorder.written() + 10;
+        EXPECT_TRUE(feed(*session, unit, list, {{"MCP-Protocol-Version", version}}));
+        EXPECT_TRUE(message_of(only_output(recorder, unit)).contains("result"));
+    }
+    EXPECT_TRUE(feed(*session, 2, list, {{"MCP-Protocol-Version", "1999-01-01"}}));
+    const neomcp::Output refused = only_output(recorder, 2);
+    EXPECT_EQ(refused.refusal, neomcp::RefusalReason::unsupported_version_header);
+    EXPECT_EQ(error_code_of(message_of(refused)), -32022) << "the code of the newest revision that defines it";
+
+    // A notification alone is refused the same way, with an error that has no id; one the header allows is taken.
+    const json initialized = json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}};
+    EXPECT_TRUE(feed(*session, 3, initialized, {{"MCP-Protocol-Version", "1999-01-01"}}));
+    const neomcp::Output notification = only_output(recorder, 3);
+    EXPECT_EQ(notification.refusal, neomcp::RefusalReason::unsupported_version_header);
+    EXPECT_TRUE(message_of(notification).at("id").is_null());
+    EXPECT_FALSE(feed(*session, 4, initialized, {{"MCP-Protocol-Version", "2025-11-25"}}));
+    EXPECT_EQ(only_output(recorder, 4).kind, neomcp::OutputKind::end);
+}
+
+TEST(Headers, ABatchIsRefusedForItsVersionHeaderAsAWhole) {
+    FakeHost host;
+    Recorder recorder;
+    auto session = tagged_session(host, recorder, http_options());
+    const auto revision = builtin(batch_revision);
+    ASSERT_TRUE(session->receive(1, line_of(Peer::initialize_request(*revision, "init"))));
+    const json batch = json::array({Peer::make_request(*revision, "b1", "ping"), Peer::make_request(*revision, "b2", "ping")});
+    EXPECT_TRUE(feed(*session, 2, batch, {{"MCP-Protocol-Version", "1999-01-01"}}));
+    const neomcp::Output refused = only_output(recorder, 2);
+    EXPECT_EQ(refused.refusal, neomcp::RefusalReason::unsupported_version_header);
+    EXPECT_TRUE(message_of(refused).at("id").is_null());
+    EXPECT_TRUE(feed(*session, 3, batch, {{"MCP-Protocol-Version", batch_revision}}));
+    EXPECT_TRUE(message_of(only_output(recorder, 3)).is_array());
+}
+
+// The request headers of 2026-07-28 (basic/transports/streamable-http.mdx): Mcp-Method on every request, Mcp-Name on
+// tools/call with params.name; names without regard to case, values exactly, a value in the encoded form decoded.
+TEST(Headers, TheRequestHeadersOfTheRevision) {
+    const auto modern = builtin(modern_revision);
+    const json call = Peer::make_request(*modern, "c", "tools/call", {{"name", "echo"}, {"arguments", {{"x", 1}}}});
+    const Fields standard = modern_headers(call);
+    struct Case {
+        std::string name;
+        json request;
+        Fields fields;
+        bool accepted;
+        std::string mentions;  // a part of the error message
+    };
+    json number_name = call;
+    number_name["params"]["name"] = 5;
+    const json list = Peer::make_request(*modern, "c", "tools/list");
+    const std::vector<Case> cases{
+        {"the standard headers", call, standard, true, ""},
+        {"names in other cases",
+         call,
+         {{"mcp-protocol-version", modern_revision}, {"MCP-METHOD", "tools/call"}, {"mcp-name", "echo"}},
+         true,
+         ""},
+        {"Mcp-Name in the encoded form", call, replaced(standard, "Mcp-Name", "=?base64?ZWNobw==?="), true, ""},
+        {"Mcp-Name on a request that does not need it", list,
+         replaced(modern_headers(list), "Mcp-Name", "anything"), true, ""},
+        {"Mcp-Method differs", call, replaced(standard, "Mcp-Method", "prompts/list"), false, "Mcp-Method"},
+        {"Mcp-Method in another case", call, replaced(standard, "Mcp-Method", "TOOLS/CALL"), false, "Mcp-Method"},
+        {"Mcp-Method missing", call, without(standard, "Mcp-Method"), false, "Mcp-Method"},
+        {"Mcp-Method repeated", call, [&] {
+             Fields fields = standard;
+             fields.emplace_back("mcp-method", "tools/call");
+             return fields;
+         }(), false, "more than once"},
+        {"MCP-Protocol-Version repeated", call, [&] {
+             Fields fields = standard;
+             fields.emplace_back("MCP-Protocol-Version", modern_revision);
+             return fields;
+         }(), false, "more than once"},
+        {"Mcp-Name missing", call, without(standard, "Mcp-Name"), false, "Mcp-Name"},
+        {"Mcp-Name differs", call, replaced(standard, "Mcp-Name", "wrong_tool_name"), false, "Mcp-Name"},
+        {"Mcp-Name in the encoded form without its padding", call,
+         replaced(standard, "Mcp-Name", "=?base64?ZWNobw?="), false, "encoded form"},
+        {"Mcp-Name in the encoded form with characters outside the alphabet", call,
+         replaced(standard, "Mcp-Name", "=?base64?SGVs!!!bG8=?="), false, "encoded form"},
+        {"a value that only looks encoded is taken as it is", call,
+         replaced(standard, "Mcp-Name", "=?base64?="), false, "does not match"},
+        {"Mcp-Name whose decoded value differs", call, replaced(standard, "Mcp-Name", "=?base64?" "?="), false,
+         "does not match"},
+        {"Mcp-Name plain but holding the encoded digits", call, replaced(standard, "Mcp-Name", "ZWNobw=="), false,
+         "does not match"},
+        {"a body whose params.name is not a string", number_name, standard, false, "string"},
+    };
+    for (const auto& item : cases) {
+        SCOPED_TRACE(item.name);
+        FakeHost host;
+        Recorder recorder;
+        auto session = tagged_session(host, recorder, http_options());
+        EXPECT_TRUE(feed(*session, 1, item.request, item.fields));
+        const neomcp::Output output = only_output(recorder, 1);
+        const json answer = message_of(output);
+        if (item.accepted) {
+            EXPECT_TRUE(answer.contains("result")) << answer.dump();
+            EXPECT_EQ(output.refusal, neomcp::RefusalReason::none);
+            continue;
+        }
+        EXPECT_EQ(error_code_of(answer), -32020) << answer.dump();
+        EXPECT_EQ(output.refusal, neomcp::RefusalReason::header_mismatch);
+        EXPECT_EQ(prescribed_status(output), 400);
+        EXPECT_NE(error_message_of(answer).find(item.mentions), std::string::npos) << answer.dump();
+    }
+}
+
+TEST(Headers, AMismatchTakesItsCodeFromTheRevisionThatDefinesIt) {
+    FakeHost host;
+    Recorder recorder;
+    auto session = tagged_session(host, recorder, http_options());
+    const json list = Peer::make_request(*builtin(modern_revision), "r", "tools/list");
+    // The header names a served legacy revision, which defines no such error; the body's revision does.
+    EXPECT_TRUE(feed(*session, 1, list, replaced(modern_headers(list), "MCP-Protocol-Version", "2025-11-25")));
+    const neomcp::Output output = only_output(recorder, 1);
+    EXPECT_EQ(error_code_of(message_of(output)), -32020);
+    ASSERT_TRUE(output.profile);
+    EXPECT_EQ(output.profile->revision(), modern_revision);
+}
+
+TEST(Headers, WithoutARevisionThatDefinesTheErrors) {
+    FakeHost host;
+    Recorder recorder;
+    neomcp::SessionOptions options = http_options();
+    options.profiles = profiles_of({"2025-03-26", "2025-06-18", "2025-11-25"});
+    auto session = tagged_session(host, recorder, options);
+    EXPECT_TRUE(feed(*session, 1, json{{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/list"}},
+                     {{"MCP-Protocol-Version", "1999-01-01"}}));
+    const neomcp::Output refused = only_output(recorder, 1);
+    EXPECT_EQ(refused.refusal, neomcp::RefusalReason::unsupported_version_header);
+    EXPECT_EQ(error_code_of(message_of(refused)), -32600) << "Invalid Request, a code of JSON-RPC itself";
+    const json modern = Peer::make_request(*builtin(modern_revision), 2, "tools/list");
+    EXPECT_TRUE(feed(*session, 2, modern, modern_headers(modern)));
+    const neomcp::Output unserved = only_output(recorder, 2);
+    EXPECT_EQ(unserved.refusal, neomcp::RefusalReason::unsupported_version)
+        << "the header and the body agree on a revision that is not served";
+}
+
+TEST(Headers, OnStdioHeadersChangeNothing) {
+    FakeHost host;
+    Recorder recorder;
+    auto session = tagged_session(host, recorder);
+    const json list = Peer::make_request(*builtin(modern_revision), "r", "tools/list");
+    EXPECT_TRUE(feed(*session, 1, list, {{"MCP-Protocol-Version", "1999-01-01"}, {"Mcp-Method", "prompts/list"}}));
+    EXPECT_TRUE(message_of(only_output(recorder, 1)).contains("result"));
+    EXPECT_TRUE(feed(*session, 2, list, {}));
+    EXPECT_TRUE(message_of(only_output(recorder, 2)).contains("result"));
 }
 
 }  // namespace

@@ -138,6 +138,7 @@ unset(CMAKE_REQUIRED_FLAGS)
 
 add_library(neomcp_core
     src/core/base64.cpp
+    src/core/headers.cpp
     src/core/jsonrpc.cpp
     src/core/model.cpp
     src/core/wire.cpp
