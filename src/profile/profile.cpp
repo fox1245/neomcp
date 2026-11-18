@@ -34,6 +34,22 @@ std::string_view to_string(Era era) noexcept {
     return {};
 }
 
+std::string_view to_string(Transport transport) noexcept {
+    switch (transport) {
+        case Transport::stdio: return "stdio";
+        case Transport::http_sse: return "http_sse";
+        case Transport::streamable_http: return "streamable_http";
+    }
+    return {};
+}
+
+std::optional<int> StreamableHttpTransport::status_for(std::string_view reason) const {
+    const auto it = std::lower_bound(status.begin(), status.end(), reason,
+                                     [](const NamedStatus& entry, std::string_view key) { return entry.reason < key; });
+    if (it == status.end() || it->reason != reason) return std::nullopt;
+    return it->status;
+}
+
 std::optional<std::string_view> RequestHeader::params_member(std::string_view method) const {
     if (scope != HeaderScopeKind::per_method) return std::nullopt;
     for (const auto& entry : methods) {
@@ -674,7 +690,8 @@ private:
                                    {"delete_ends_session", true},
                                    {"request_headers", false},
                                    {"argument_headers", false},
-                                   {"encoded_header_value", false}});
+                                   {"encoded_header_value", false},
+                                   {"status", false}});
         StreamableHttpTransport transport;
         HeaderNames names;
 
@@ -716,7 +733,30 @@ private:
             transport.encoded_header_value =
                 EncodedHeaderValue{nonempty_string_of(body.at("prefix")), nonempty_string_of(body.at("suffix"))};
         }
+        if (const auto status = object.find("status")) transport.status = statuses(*status);
         return transport;
+    }
+
+    // Reason to HTTP status: each reason a declared one, each status a three-digit HTTP status code.
+    static std::vector<NamedStatus> statuses(const Node& node) {
+        static constexpr int lowest_status = 100;
+        static constexpr int highest_status = 599;
+        std::vector<NamedStatus> table;
+        const auto reasons = declared_status_reasons();
+        for_each_entry(node, [&](const std::string& reason, const Node& value) {
+            if (std::find(reasons.begin(), reasons.end(), reason) == reasons.end()) {
+                fail(value.pointer(), "a member named after one of the declared reasons: " + join(reasons),
+                     "unknown reason '" + reason + "'");
+            }
+            const int status = int_of(value);
+            if (status < lowest_status || status > highest_status) {
+                fail(value.pointer(), "an HTTP status code from 100 to 599", "found " + std::to_string(status));
+            }
+            table.push_back(NamedStatus{reason, status});
+        });
+        std::sort(table.begin(), table.end(),
+                  [](const NamedStatus& a, const NamedStatus& b) { return a.reason < b.reason; });
+        return table;
     }
 
     RequestHeader request_header(const Node& node, HeaderNames& names) {

@@ -23,6 +23,30 @@ constexpr std::array<std::string_view, 2> streamable_http_cancel_names{"cancelle
 // error_result: a tool result with isError set; invalid_params_error: the JSON-RPC error Invalid params.
 constexpr std::array<std::string_view, 2> invalid_arguments_names{"error_result", "invalid_params_error"};
 
+// The reasons a Streamable HTTP status map can name. The first group are the reasons a session gives when it refuses
+// an input before any method ran (neomcp::RefusalReason spells them the same way); the rest are decided by the HTTP
+// transport itself.
+constexpr std::array<std::string_view, 18> status_reason_names{
+    "parse_error",
+    "invalid_request",
+    "too_long",
+    "too_deep",
+    "header_mismatch",
+    "unsupported_version",
+    "invalid_request_meta",
+    "unsupported_version_header",
+    "method_not_found",
+    "missing_connection",
+    "missing_client_capability",  // a request needs a client capability the client did not declare
+    "missing_session",            // a request without a session id where the revision requires one
+    "unknown_session",            // a session id that names no live session
+    "accepted",                   // a notification or a response was taken; nothing answers it
+    "notification_refused",       // a notification was not taken
+    "origin_rejected",            // the Origin header names an origin that is not allowed
+    "get_stream_not_offered",     // a GET while no stream is offered
+    "delete_not_allowed",         // a DELETE while ending a session that way is not allowed
+};
+
 }  // namespace
 
 Names declared_mechanisms(Slot slot) {
@@ -46,5 +70,7 @@ Names declared_cancel(Transport transport) {
 }
 
 Names declared_invalid_arguments() { return invalid_arguments_names; }
+
+Names declared_status_reasons() { return status_reason_names; }
 
 }  // namespace neomcp::profile

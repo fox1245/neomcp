@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -386,6 +387,98 @@ TEST(Values, DeclaredNamesAreDistinctAndNonEmpty) {
         check(declared_cancel(transport));
     }
     check(declared_invalid_arguments());
+    check(declared_status_reasons());
+}
+
+TEST(Values, TransportNamesAreTheDocumentsMembers) {
+    EXPECT_EQ(to_string(Transport::stdio), "stdio");
+    EXPECT_EQ(to_string(Transport::http_sse), "http_sse");
+    EXPECT_EQ(to_string(Transport::streamable_http), "streamable_http");
+}
+
+// The statuses each revision prescribes, stated here from the pages and not read back from the profiles:
+// basic/transports.mdx of the legacy revisions; basic/transports/streamable-http.mdx, basic/index.mdx and
+// basic/versioning.mdx of 2026-07-28. A cell the pages leave open is absent.
+TEST(Values, StatusesPerRevision) {
+    using Table = std::vector<std::pair<std::string, int>>;
+    const std::vector<std::tuple<std::string_view, Table, std::vector<std::string>>> expected{
+        {"2025-03-26",
+         {{"accepted", 202}, {"delete_not_allowed", 405}, {"get_stream_not_offered", 405}, {"missing_session", 400},
+          {"notification_refused", 400}, {"unknown_session", 404}},
+         {"basic/transports.mdx"}},
+        {"2025-06-18",
+         {{"accepted", 202}, {"delete_not_allowed", 405}, {"get_stream_not_offered", 405}, {"missing_session", 400},
+          {"notification_refused", 400}, {"unknown_session", 404}, {"unsupported_version_header", 400}},
+         {"basic/transports.mdx"}},
+        {"2025-11-25",
+         {{"accepted", 202}, {"delete_not_allowed", 405}, {"get_stream_not_offered", 405}, {"missing_session", 400},
+          {"notification_refused", 400}, {"origin_rejected", 403}, {"unknown_session", 404},
+          {"unsupported_version_header", 400}},
+         {"basic/transports.mdx"}},
+        {"2026-07-28",
+         {{"accepted", 202}, {"delete_not_allowed", 405}, {"get_stream_not_offered", 405}, {"header_mismatch", 400},
+          {"invalid_request_meta", 400}, {"method_not_found", 404}, {"missing_client_capability", 400},
+          {"notification_refused", 400}, {"origin_rejected", 403}, {"unsupported_version", 400}},
+         {"basic/transports/streamable-http.mdx", "basic/index.mdx", "basic/versioning.mdx"}},
+    };
+    std::size_t with_transport = 0;
+    for (const auto revision : builtin_revisions()) {
+        if (require_builtin(revision)->streamable_http()) ++with_transport;
+    }
+    ASSERT_EQ(with_transport, expected.size()) << "a new revision needs its expected statuses here";
+    const auto reasons = declared_status_reasons();
+    for (const auto& [revision, table, pages] : expected) {
+        SCOPED_TRACE(std::string(revision));
+        const ProfilePtr profile = require_builtin(revision);
+        ASSERT_NE(profile, nullptr);
+        ASSERT_TRUE(profile->streamable_http());
+        const StreamableHttpTransport& http = *profile->streamable_http();
+        Table found;
+        for (const auto& entry : http.status) found.emplace_back(entry.reason, entry.status);
+        EXPECT_EQ(found, table);
+        for (const auto& [reason, status] : table) {
+            EXPECT_EQ(http.status_for(reason), status) << reason;
+            EXPECT_NE(std::find(reasons.begin(), reasons.end(), reason), reasons.end()) << reason;
+        }
+        EXPECT_FALSE(http.status_for("parse_error")) << "no revision prescribes a status for it";
+        EXPECT_FALSE(http.status_for("no_such_reason"));
+        const auto& listed = profile->evidence().pages;
+        for (const auto& page : pages) {
+            const std::string path = "docs/specification/" + std::string(revision) + "/" + page;
+            EXPECT_NE(std::find(listed.begin(), listed.end(), path), listed.end()) << "the evidence names " << path;
+        }
+    }
+}
+
+TEST(Values, StatusMapIsOptional) {
+    json document = builtin_document(modern_revision);
+    document["transports"]["streamable_http"].erase("status");
+    auto result = load(document.dump());
+    ASSERT_TRUE(std::holds_alternative<ProfilePtr>(result));
+    const ProfilePtr profile = std::get<ProfilePtr>(result);
+    ASSERT_TRUE(profile->streamable_http());
+    EXPECT_TRUE(profile->streamable_http()->status.empty());
+    EXPECT_FALSE(profile->streamable_http()->status_for("header_mismatch"));
+}
+
+TEST(Rejects, StatusForAnUndeclaredReason) {
+    json document = builtin_document(modern_revision);
+    document["transports"]["streamable_http"]["status"]["teapot"] = 418;
+    const Error error = rejected(document);
+    EXPECT_EQ(error.pointer, "/transports/streamable_http/status/teapot");
+    EXPECT_NE(error.expected.find("header_mismatch"), std::string::npos) << error.expected;
+}
+
+TEST(Rejects, StatusThatIsNotAnHttpStatus) {
+    for (const json& value : {json(99), json(600), json(-400), json("400"), json(400.5), json(nullptr)}) {
+        SCOPED_TRACE(value.dump());
+        json document = builtin_document(modern_revision);
+        document["transports"]["streamable_http"]["status"]["header_mismatch"] = value;
+        EXPECT_EQ(rejected(document).pointer, "/transports/streamable_http/status/header_mismatch");
+    }
+    json document = builtin_document(modern_revision);
+    document["transports"]["streamable_http"]["status"] = json::array();
+    EXPECT_EQ(rejected(document).pointer, "/transports/streamable_http/status");
 }
 
 TEST(Rejects, UndeclaredInvalidArgumentsName) {

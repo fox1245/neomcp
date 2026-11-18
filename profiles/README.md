@@ -24,6 +24,7 @@ repository and the date they were read.
 | `mechanisms.change_feed` | How change notifications reach a client: `connection_notifications` or `subscriptions_listen`. |
 | `mechanisms.batch` | `array` when a JSON-RPC batch is allowed, else `none`. |
 | `transports` | The transports of the revision and, per transport, how a request is cancelled and which headers, streams and session rules apply. |
+| `transports.streamable_http.status` | Optional. The HTTP status the revision prescribes for a reason: one member per reason, named after a reason the library declares (for example `header_mismatch`, `accepted` or `unknown_session`), with the status code. A reason the revision prescribes no status for is left out, and the transport answers it with a status of its own. |
 | `errors` | Error codes the revision defines, and codes it forbids a sender to use. |
 | `tools.invalid_arguments` | How a server reports tool arguments that fail the tool's input schema: `invalid_params_error` (the JSON-RPC error Invalid params, a protocol error) or `error_result` (a tool result with `isError` set, a tool execution error). The revision's `server/tools.mdx` says which. |
 

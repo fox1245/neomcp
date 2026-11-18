@@ -65,6 +65,18 @@
       "encoded_header_value": {
         "prefix": "=?base64?",
         "suffix": "?="
+      },
+      "status": {
+        "header_mismatch": 400,
+        "unsupported_version": 400,
+        "invalid_request_meta": 400,
+        "missing_client_capability": 400,
+        "method_not_found": 404,
+        "accepted": 202,
+        "notification_refused": 400,
+        "origin_rejected": 403,
+        "get_stream_not_offered": 405,
+        "delete_not_allowed": 405
       }
     }
   },

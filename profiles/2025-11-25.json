@@ -35,7 +35,17 @@
       },
       "get_stream": true,
       "resumable": true,
-      "delete_ends_session": true
+      "delete_ends_session": true,
+      "status": {
+        "unsupported_version_header": 400,
+        "missing_session": 400,
+        "unknown_session": 404,
+        "accepted": 202,
+        "notification_refused": 400,
+        "origin_rejected": 403,
+        "get_stream_not_offered": 405,
+        "delete_not_allowed": 405
+      }
     }
   },
   "errors": {

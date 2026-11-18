@@ -32,7 +32,15 @@
       "version_header": null,
       "get_stream": true,
       "resumable": true,
-      "delete_ends_session": true
+      "delete_ends_session": true,
+      "status": {
+        "missing_session": 400,
+        "unknown_session": 404,
+        "accepted": 202,
+        "notification_refused": 400,
+        "get_stream_not_offered": 405,
+        "delete_not_allowed": 405
+      }
     }
   },
   "errors": {

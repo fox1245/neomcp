@@ -43,12 +43,17 @@ std::string_view to_string(Era era) noexcept;
 // The transports a profile can describe.
 enum class Transport { stdio, http_sse, streamable_http };
 
+// The member of `transports` that describes the transport.
+std::string_view to_string(Transport transport) noexcept;
+
 // The names the library declares. A profile may select only these, and code that implements a mechanism attaches
-// to one of them: the mechanisms of a slot, the cancellation mechanisms of a transport, and the ways a revision
-// reports tool arguments that fail the tool's input schema (`tools.invalid_arguments`).
+// to one of them: the mechanisms of a slot, the cancellation mechanisms of a transport, the ways a revision
+// reports tool arguments that fail the tool's input schema (`tools.invalid_arguments`), and the reasons a
+// Streamable HTTP status map gives a status for (`transports.streamable_http.status`).
 std::span<const std::string_view> declared_mechanisms(Slot slot);
 std::span<const std::string_view> declared_cancel(Transport transport);
 std::span<const std::string_view> declared_invalid_arguments();
+std::span<const std::string_view> declared_status_reasons();
 
 struct Evidence {
     std::string verified_at;
@@ -111,6 +116,12 @@ struct EncodedHeaderValue {
     std::string suffix;
 };
 
+// The HTTP status a revision prescribes for a reason, one of declared_status_reasons().
+struct NamedStatus {
+    std::string reason;
+    int status = 0;  // 100 to 599
+};
+
 struct StreamableHttpTransport {
     std::string cancel;
     std::optional<std::string> session_header;
@@ -121,6 +132,12 @@ struct StreamableHttpTransport {
     std::vector<RequestHeader> request_headers;
     std::optional<ArgumentHeaders> argument_headers;
     std::optional<EncodedHeaderValue> encoded_header_value;
+    // The statuses the revision prescribes, sorted by reason; a reason it prescribes none for is not listed, and the
+    // transport answers it with a status of its own choosing.
+    std::vector<NamedStatus> status;
+
+    // The status the revision prescribes for the reason; empty when it prescribes none.
+    std::optional<int> status_for(std::string_view reason) const;
 };
 
 struct NamedCode {
