@@ -14,7 +14,8 @@
 ---
 
 neomcp is a C++ library for writing [Model Context Protocol](https://modelcontextprotocol.io) (MCP) servers and
-clients. Work in progress. Nothing here is usable yet.
+clients. Work in progress: servers over stdio work today, the rest is listed under Status, and the interface
+may still change.
 
 ## Status
 
@@ -37,7 +38,8 @@ Still planned:
 ## Build
 
 Requirements: CMake 3.20 or newer, a C++20 compiler, and network access at configure time (the pinned
-dependencies are fetched: [neojson](https://github.com/fox1245/neojson), and GoogleTest when the tests are built).
+dependencies are fetched: [neojson](https://github.com/fox1245/neojson), standalone Asio, and GoogleTest when the
+tests are built).
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
