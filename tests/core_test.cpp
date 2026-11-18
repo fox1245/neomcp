@@ -24,6 +24,7 @@
 
 #include <gtest/gtest.h>
 
+#include "core/base64.h"
 #include "neomcp/jsonrpc.h"
 #include "neomcp/mechanism.h"
 #include "neomcp/model.h"
@@ -345,6 +346,83 @@ TEST(JsonRpc, NestingDepth) {
     const std::string_view brackets_in_a_string = R"(["[[[[\"[[["])";
     EXPECT_FALSE(neomcp::nesting_exceeds(brackets_in_a_string, 1)) << "brackets inside strings do not count";
     EXPECT_FALSE(neomcp::nesting_exceeds("[][][][]", 1));
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Base64 in the strict form
+
+// A plain encoder, written here so that the decoder is checked against an independent implementation.
+std::string encode_base64(std::string_view bytes) {
+    constexpr std::string_view digits = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const auto byte = [&](std::size_t i) { return i < bytes.size() ? static_cast<unsigned>(static_cast<unsigned char>(bytes[i])) : 0u; };
+    std::string out;
+    for (std::size_t i = 0; i < bytes.size(); i += 3) {
+        const unsigned value = (byte(i) << 16) | (byte(i + 1) << 8) | byte(i + 2);
+        const std::size_t present = std::min<std::size_t>(3, bytes.size() - i);
+        out.push_back(digits[(value >> 18) & 63u]);
+        out.push_back(digits[(value >> 12) & 63u]);
+        out.push_back(present > 1 ? digits[(value >> 6) & 63u] : '=');
+        out.push_back(present > 2 ? digits[value & 63u] : '=');
+    }
+    return out;
+}
+
+TEST(Base64, TestVectorsOfRfc4648) {
+    const std::vector<std::pair<std::string, std::string>> vectors{
+        {"", ""}, {"Zg==", "f"}, {"Zm8=", "fo"}, {"Zm9v", "foo"}, {"Zm9vYg==", "foob"}, {"Zm9vYmE=", "fooba"},
+        {"Zm9vYmFy", "foobar"}};
+    for (const auto& [text, bytes] : vectors) {
+        SCOPED_TRACE(text);
+        EXPECT_EQ(neomcp::detail::decode_base64(text), bytes);
+    }
+}
+
+// The examples of the encoded header value form (basic/transports/streamable-http.mdx of 2026-07-28).
+TEST(Base64, ExamplesOfTheEncodedHeaderValue) {
+    const std::vector<std::pair<std::string, std::string>> examples{
+        {"SGVsbG8sIOS4lueVjA==", "Hello, \xe4\xb8\x96\xe7\x95\x8c"},
+        {"IHBhZGRlZCA=", " padded "},
+        {"bGluZTEKbGluZTI=", "line1\nline2"},
+        {"PT9iYXNlNjQ/bGl0ZXJhbD89", "=?base64?literal?="},
+    };
+    for (const auto& [text, bytes] : examples) {
+        SCOPED_TRACE(text);
+        EXPECT_EQ(neomcp::detail::decode_base64(text), bytes);
+    }
+}
+
+TEST(Base64, EveryByteValueRoundTrips) {
+    std::string bytes;
+    for (int value = 0; value < 256; ++value) bytes.push_back(static_cast<char>(value));
+    for (std::size_t length = 0; length <= bytes.size(); length += 85) {
+        const std::string part = bytes.substr(bytes.size() - length);
+        EXPECT_EQ(neomcp::detail::decode_base64(encode_base64(part)), part) << length;
+    }
+    EXPECT_EQ(neomcp::detail::decode_base64(encode_base64(bytes)), bytes);
+}
+
+TEST(Base64, RejectsEverythingButTheStrictForm) {
+    for (const std::string text : {
+             "SGVsbG8",       // not a multiple of four characters (padding missing)
+             "SGVs!!!bG8=",   // characters outside the alphabet
+             "Zh==",          // the bits after the data are not zero
+             "Zm9=",          // the same with one padding character
+             "-_-_",          // the URL-safe alphabet
+             "Zm9v Zg==",     // whitespace
+             "Zm9v\nZg==",    // a line break
+             "Zm9vZg==\n",    // a trailing line break
+             "Zg==Zg==",      // padding before the end
+             "Z===",          // three padding characters
+             "====",          // padding only
+             "=",
+             "Zg=",
+             "Zm9v====",
+         }) {
+        SCOPED_TRACE(text);
+        EXPECT_FALSE(neomcp::detail::decode_base64(text));
+    }
+    EXPECT_FALSE(neomcp::detail::decode_base64(std::string("Zm9v\0Zg=", 8))) << "a NUL byte";
+    EXPECT_FALSE(neomcp::detail::decode_base64("Zm9v\xc3\xa9Zg")) << "bytes above 0x7f";
 }
 
 TEST(Wire, KeepMembersLeavesValuesOfUnknownTypes) {

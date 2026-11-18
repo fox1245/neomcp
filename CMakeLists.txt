@@ -137,6 +137,7 @@ endif()
 unset(CMAKE_REQUIRED_FLAGS)
 
 add_library(neomcp_core
+    src/core/base64.cpp
     src/core/jsonrpc.cpp
     src/core/model.cpp
     src/core/wire.cpp
@@ -144,7 +145,9 @@ add_library(neomcp_core
     src/core/session.cpp
     src/core/peer.cpp)
 add_library(neomcp::core ALIAS neomcp_core)
-target_include_directories(neomcp_core PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+target_include_directories(neomcp_core
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(neomcp_core PUBLIC neomcp::profile neojson::neojson Threads::Threads)
 target_compile_features(neomcp_core PUBLIC cxx_std_20)
 target_compile_options(neomcp_core PUBLIC ${NEOMCP_STOP_TOKEN_OPTIONS})

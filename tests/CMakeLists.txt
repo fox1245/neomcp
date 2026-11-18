@@ -59,6 +59,8 @@ endif()
 
 add_executable(neomcp_core_test core_test.cpp)
 target_link_libraries(neomcp_core_test PRIVATE neomcp::core GTest::gtest_main Threads::Threads)
+# The test reaches internal pieces of the core (the Base64 decoder).
+target_include_directories(neomcp_core_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 neomcp_configure_target(neomcp_core_test)
 gtest_discover_tests(neomcp_core_test DISCOVERY_TIMEOUT 120)
 
