@@ -514,6 +514,39 @@ TEST(Rejects, UnionThatContainsItselfThroughAnotherUnion) {
     EXPECT_TRUE(error.pointer == "/wire/unions/Loop1/0" || error.pointer == "/wire/unions/Loop2/0") << error.pointer;
 }
 
+// Unions that share their alternatives: every level has two unions and both list the two unions of the next
+// level, so the number of paths from the top doubles per level while the number of unions grows by two.
+json document_with_shared_unions(std::size_t levels) {
+    json document = builtin_document(modern_revision);
+    json& unions = document["wire"]["unions"];
+    for (std::size_t level = 0; level < levels; ++level) {
+        const std::string next = std::to_string(level + 1);
+        const json alternatives = level + 1 == levels
+                                      ? json::array({"ElicitRequestFormParams", "ElicitRequestURLParams"})
+                                      : json::array({"Shared" + next + "a", "Shared" + next + "b"});
+        unions["Shared" + std::to_string(level) + "a"] = alternatives;
+        unions["Shared" + std::to_string(level) + "b"] = alternatives;
+    }
+    return document;
+}
+
+TEST(Wire, UnionsSharedByManyOthersAreWorkedOutOnce) {
+    json document = document_with_shared_unions(48);
+    document["wire"]["requests"]["tools/list"]["params"] = "Shared0a";
+    document["wire"]["requests"]["tools/list"]["params_required"] = json::array({"message"});
+    const auto result = load(document.dump());
+    const auto* error = std::get_if<Error>(&result);
+    ASSERT_EQ(error, nullptr) << error->pointer << ": " << error->message;
+}
+
+TEST(Rejects, McpNameMemberMissingBehindUnionsSharedByManyOthers) {
+    json document = document_with_shared_unions(48);
+    document["wire"]["requests"]["tools/call"]["params"] = "Shared0a";
+    document["wire"]["requests"]["tools/call"]["params_required"] = json::array({"message"});
+    const std::size_t index = header_index(document, "Mcp-Name");
+    EXPECT_EQ(rejected(document).pointer, header_pointer(index) + "/on/" + pointer_token("tools/call"));
+}
+
 TEST(Rejects, UnionAlternativeThatRepeats) {
     json document = builtin_document(modern_revision);
     document["wire"]["unions"]["ElicitRequestParams"].push_back("ElicitRequestFormParams");

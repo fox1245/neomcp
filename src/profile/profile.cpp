@@ -556,16 +556,21 @@ private:
         profile_.unions_ = std::move(table);
     }
 
+    // What each union requires, kept so that a union several others share is worked out once: the number of paths
+    // through shared unions grows exponentially with their depth.
+    std::map<std::string, std::vector<std::string>, std::less<>> union_required_;
+
     // The members every object type behind a name requires: the type's own, or for a union what all of its
     // alternatives require. The unions are known to be acyclic.
-    std::vector<std::string> required_of(const std::string& name) const {
+    const std::vector<std::string>& required_of(const std::string& name) {
         if (const Type* type = profile_.type(name)) return type->required;
+        if (const auto known = union_required_.find(name); known != union_required_.end()) return known->second;
         std::vector<std::string> common;
         bool first = true;
         for (const auto& alternative : profile_.union_type(name)->alternatives) {
-            std::vector<std::string> required = required_of(alternative);
+            const std::vector<std::string>& required = required_of(alternative);
             if (first) {
-                common = std::move(required);
+                common = required;
                 first = false;
             } else {
                 std::vector<std::string> both;
@@ -574,16 +579,20 @@ private:
                 common = std::move(both);
             }
         }
-        return common;
+        return union_required_.emplace(name, std::move(common)).first->second;
     }
 
-    // The object types behind a name: the type itself, or for a union the types of all of its alternatives.
-    void object_types(const std::string& name, std::vector<const Type*>& out) const {
+    // The object types behind a name, each once: the type itself, or for a union the types of all of its
+    // alternatives. `visited` holds the names already followed.
+    void object_types(const std::string& name, std::vector<const Type*>& out, std::set<std::string>& visited) const {
+        if (!visited.insert(name).second) return;
         if (const Type* type = profile_.type(name)) {
             out.push_back(type);
             return;
         }
-        for (const auto& alternative : profile_.union_type(name)->alternatives) object_types(alternative, out);
+        for (const auto& alternative : profile_.union_type(name)->alternatives) {
+            object_types(alternative, out, visited);
+        }
     }
 
     // A message that names a params type has the members that type requires; for a union, the members every
@@ -597,7 +606,7 @@ private:
                 fail(entry_pointer + "/params", "a name of wire.types or wire.unions",
                      "'" + *message.params + "' names neither");
             }
-            const std::vector<std::string> required = required_of(*message.params);
+            const std::vector<std::string>& required = required_of(*message.params);
             if (message.params_required != required) {
                 fail(entry_pointer + "/params_required",
                      "the members every alternative of " + *message.params + " requires: " + list(required),
@@ -764,7 +773,8 @@ private:
                      "'" + *request->params + "' of '" + entry.method + "' is listed in neither");
             }
             std::vector<const Type*> candidates;
-            object_types(*request->params, candidates);
+            std::set<std::string> visited;
+            object_types(*request->params, candidates, visited);
             for (const Type* type : candidates) {
                 if (!type->has_property(entry.member)) {
                     fail(pointer, "a property of " + type->name + ", which '" + entry.method + "' may carry",
