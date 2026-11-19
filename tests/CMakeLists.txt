@@ -307,6 +307,12 @@ target_link_libraries(neomcp_http_unused_session_test PRIVATE neomcp::http neomc
 neomcp_configure_target(neomcp_http_unused_session_test)
 gtest_discover_tests(neomcp_http_unused_session_test DISCOVERY_TIMEOUT 120)
 
+# The bytes a legacy session keeps for the resources its client watches.
+add_executable(neomcp_http_watch_bytes_test http_watch_bytes_test.cpp)
+target_link_libraries(neomcp_http_watch_bytes_test PRIVATE neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_http_watch_bytes_test)
+gtest_discover_tests(neomcp_http_watch_bytes_test DISCOVERY_TIMEOUT 120)
+
 # The server the official conformance runner tests (the CI job `conformance`). It is neither installed nor an example.
 add_executable(neomcp_conformance_fixture conformance/everything_server.cpp)
 target_link_libraries(neomcp_conformance_fixture PRIVATE neomcp::http Threads::Threads)
