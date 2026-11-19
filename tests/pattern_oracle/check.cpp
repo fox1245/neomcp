@@ -256,6 +256,10 @@ int main(int argc, char** argv) {
                              ? 1.0
                              : static_cast<double>(report.compared_patterns) / static_cast<double>(report.accepted_by_reference);
     std::cout << "  share of the accepted patterns that reached a comparison: " << share << " (floor " << min_share << ")\n";
+    // A file without cases, or one in which nothing was compared, says nothing about the translator: it is a failure of
+    // the run and not a pass.
+    if (report.cases == 0) report.fail("the file holds no case");
+    if (report.compared_texts == 0) report.fail("no text was compared");
     if (share < min_share) report.fail("too few patterns reached a comparison");
     std::cout << (report.differences == 0 ? "PASS" : "FAIL") << ": " << report.differences << " failures";
     if (report.first_failure != 0) std::cout << ", the first at case " << report.first_failure;
