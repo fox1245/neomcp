@@ -17,12 +17,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <variant>
 #include <vector>
 
 #include "neomcp/json.h"
+#include "neomcp/profile.h"
 
 namespace neomcp {
 
@@ -68,5 +70,24 @@ inline constexpr std::size_t default_header_schema_depth = 64;
 // refused rather than overlooked. A schema nested deeper than `max_depth` is refused.
 std::variant<std::vector<HeaderParameter>, HeaderMarkIssue> header_parameters(
     const json& input_schema, std::string_view keyword, std::size_t max_depth = default_header_schema_depth);
+
+// Why a value cannot be mirrored into a header.
+struct HeaderValueIssue {
+    std::string rule;  // in words; never holds the value
+};
+
+// The text of a string for a header value, in the way the revision's framing (`encoded_header_value`) prescribes: the
+// string as it is when it is plain, otherwise the framing's prefix, the Base64 of its bytes (standard alphabet, with
+// padding) and its suffix. A string is plain when every byte is visible ASCII or a space (0x20 to 0x7E), it does not
+// begin or end with a space, and it does not both begin with the prefix and end with the suffix (the form that would be
+// read as encoded). This is stricter than what a receiver accepts as plain, which also holds a horizontal tab and
+// any space inside: a string with a tab is always encoded, so that what is written is valid in either reading.
+std::string encode_header_text(std::string_view text, const profile::EncodedHeaderValue& framing);
+
+// The value of the header that mirrors a parameter: a string by encode_header_text, an integer in decimal (a whole
+// number within +-max_safe_integer; one outside is an issue), a boolean as `true` or `false`. A null value has no
+// header and gives an empty result; any other kind of value is an issue.
+std::variant<std::optional<std::string>, HeaderValueIssue> encode_header_value(const json& value,
+                                                                              const profile::EncodedHeaderValue& framing);
 
 }  // namespace neomcp

@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <optional>
 #include <utility>
+
+#include "neomcp/base64.h"
 
 namespace neomcp {
 namespace {
@@ -223,6 +226,65 @@ std::variant<std::vector<HeaderParameter>, HeaderMarkIssue> header_parameters(co
     Reader reader(keyword, max_depth);
     if (auto issue = reader.read(input_schema)) return std::move(*issue);
     return reader.take();
+}
+
+namespace {
+
+constexpr unsigned char first_plain_byte = 0x20;  // a space
+constexpr unsigned char last_plain_byte = 0x7E;   // a tilde
+constexpr char space = ' ';
+constexpr std::string_view true_text = "true";
+constexpr std::string_view false_text = "false";
+
+bool starts_with(std::string_view text, std::string_view prefix) {
+    return text.size() >= prefix.size() && text.substr(0, prefix.size()) == prefix;
+}
+
+bool ends_with(std::string_view text, std::string_view suffix) {
+    return text.size() >= suffix.size() && text.substr(text.size() - suffix.size()) == suffix;
+}
+
+bool plain_byte(char c) noexcept {
+    const auto byte = static_cast<unsigned char>(c);
+    return byte >= first_plain_byte && byte <= last_plain_byte;
+}
+
+}  // namespace
+
+std::string encode_header_text(std::string_view text, const profile::EncodedHeaderValue& framing) {
+    bool plain = std::all_of(text.begin(), text.end(), plain_byte);
+    // Space is a plain byte, but not at either end, where a receiver may trim it.
+    if (!text.empty() && (text.front() == space || text.back() == space)) plain = false;
+    // A plain string that looks like the encoded form would be taken for it; it is encoded as well.
+    if (starts_with(text, framing.prefix) && ends_with(text, framing.suffix)) plain = false;
+    if (plain) return std::string(text);
+    return framing.prefix + base64_encode(text) + framing.suffix;
+}
+
+std::variant<std::optional<std::string>, HeaderValueIssue> encode_header_value(
+    const json& value, const profile::EncodedHeaderValue& framing) {
+    if (value.is_null()) return std::optional<std::string>();
+    if (const auto* text = value.get_ptr<const std::string*>()) return std::optional<std::string>(encode_header_text(*text, framing));
+    if (const auto* flag = value.get_ptr<const json::boolean_t*>()) {
+        return std::optional<std::string>(std::string(*flag ? true_text : false_text));
+    }
+    std::optional<std::int64_t> number;
+    if (const auto* unsigned_value = value.get_ptr<const json::number_unsigned_t*>()) {
+        if (*unsigned_value <= static_cast<std::uint64_t>(max_safe_integer)) number = static_cast<std::int64_t>(*unsigned_value);
+    } else if (const auto* signed_value = value.get_ptr<const json::number_integer_t*>()) {
+        if (*signed_value >= -max_safe_integer && *signed_value <= max_safe_integer) number = *signed_value;
+    } else if (const auto* real = value.get_ptr<const json::number_float_t*>()) {
+        if (std::isfinite(*real) && std::floor(*real) == *real &&
+            std::fabs(*real) <= static_cast<double>(max_safe_integer)) {
+            number = static_cast<std::int64_t>(*real);
+        }
+    } else {
+        return HeaderValueIssue{"only a string, an integer and a boolean can be mirrored into a header"};
+    }
+    if (!number) {
+        return HeaderValueIssue{"a number must be a whole number within the range of a header value, -(2^53 - 1) to 2^53 - 1"};
+    }
+    return std::optional<std::string>(std::to_string(*number));
 }
 
 }  // namespace neomcp

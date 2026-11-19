@@ -1,6 +1,7 @@
 # The client half of the protocol core: the readers of the wire writers, the inverse input functions and the header
 # value encoder. The tests reach internal headers of the core (the checker of argument headers, the wire names).
 add_executable(neomcp_client_core_test
+    header_value_test.cpp
     support.cpp
     input_inverse_test.cpp
     wire_read_test.cpp)
