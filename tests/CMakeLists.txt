@@ -108,6 +108,19 @@ if(NEOMCP_TEST_TIME_BOUNDS)
     gtest_discover_tests(neomcp_json_schema_pattern_linear_test DISCOVERY_TIMEOUT 120 PROPERTIES TIMEOUT 300)
 endif()
 
+# The differential test of the pattern translator against a JavaScript engine: the checker reads a file of cases that
+# tests/pattern_oracle/generate.js wrote (the CI job `pattern-oracle` generates and checks them). The hand-written
+# cases of tests/data/pattern_cases.json are checked on every test run; a file of generated cases is checked when
+# NEOMCP_PATTERN_ORACLE_CASES names it, so that the ordinary test run does not need Node.
+set(NEOMCP_PATTERN_ORACLE_CASES "" CACHE FILEPATH "A file of cases written by tests/pattern_oracle/generate.js; when set, ctest checks it")
+add_executable(neomcp_pattern_oracle pattern_oracle/check.cpp)
+target_link_libraries(neomcp_pattern_oracle PRIVATE neomcp::schema neojson::neojson)
+neomcp_configure_target(neomcp_pattern_oracle)
+add_test(NAME PatternOracle.HandWrittenCases COMMAND neomcp_pattern_oracle "${CMAKE_CURRENT_SOURCE_DIR}/data/pattern_cases.json")
+if(NEOMCP_PATTERN_ORACLE_CASES)
+    add_test(NAME PatternOracle.GeneratedCases COMMAND neomcp_pattern_oracle "${NEOMCP_PATTERN_ORACLE_CASES}")
+endif()
+
 add_executable(neomcp_crypto_test crypto_test.cpp)
 target_link_libraries(neomcp_crypto_test PRIVATE neomcp::crypto GTest::gtest_main Threads::Threads)
 target_include_directories(neomcp_crypto_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
