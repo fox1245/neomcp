@@ -87,6 +87,8 @@ gtest_discover_tests(neomcp_json_schema_pattern_time_test DISCOVERY_TIMEOUT 120)
 # What a pattern means in the dialect of JSON Schema, what is refused, and the bound on the memory of a pattern.
 add_executable(neomcp_json_schema_pattern_test json_schema_pattern_test.cpp)
 target_link_libraries(neomcp_json_schema_pattern_test PRIVATE neomcp::schema neojson::neojson GTest::gtest_main Threads::Threads)
+target_compile_definitions(neomcp_json_schema_pattern_test PRIVATE
+    "NEOMCP_PATTERN_CASES_FILE=\"${CMAKE_CURRENT_SOURCE_DIR}/data/pattern_cases.json\"")
 neomcp_configure_target(neomcp_json_schema_pattern_test)
 gtest_discover_tests(neomcp_json_schema_pattern_test DISCOVERY_TIMEOUT 120)
 

@@ -4,6 +4,9 @@
 #include <gtest/gtest.h>
 
 #include <cstddef>
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <variant>
@@ -37,12 +40,6 @@ bool matches(const std::string& pattern, const std::string& text) {
 
 bool contains(const std::string& text, const std::string& part) { return text.find(part) != std::string::npos; }
 
-struct Case {
-    std::string pattern;
-    std::string text;
-    bool matched;
-};
-
 TEST(JsonSchemaPattern, ThePatternIsSearchedForAndNotAnchored) {
     EXPECT_TRUE(matches("b", "abc"));
     EXPECT_FALSE(matches("^b", "abc"));
@@ -52,93 +49,44 @@ TEST(JsonSchemaPattern, ThePatternIsSearchedForAndNotAnchored) {
     EXPECT_TRUE(matches("", ""));
 }
 
+// The cases of tests/data/pattern_cases.json: a pattern and either the answer of a search for each of its texts or the
+// fact that the pattern is a syntax error in Unicode mode. The same file is checked against a JavaScript engine by
+// tests/pattern_oracle/generate.js, so the expectations have one source and two engines agree with it.
+json read_cases() {
+    std::ifstream stream(NEOMCP_PATTERN_CASES_FILE, std::ios::binary);
+    if (!stream) throw std::runtime_error(std::string("cannot open ") + NEOMCP_PATTERN_CASES_FILE);
+    std::ostringstream text;
+    text << stream.rdbuf();
+    return json::parse(text.str());
+}
+
 TEST(JsonSchemaPattern, TheMeaningOfEachConstructIsThatOfEcmaScriptInUnicodeMode) {
-    const std::string emoji = "\xF0\x9F\x98\x80";  // U+1F600
-    const std::vector<Case> cases = {
-        // A character is a code point, whatever the number of bytes.
-        {"^.$", emoji, true},
-        {"^..$", emoji, false},
-        {"^[^a]$", emoji, true},
-        {"^.$", "\xC3\xA9", true},
-        {"^\\u{1F600}$", emoji, true},
-        {"^\\uD83D\\uDE00$", emoji, true},
-        {"^\\u00e9$", "\xC3\xA9", true},
-        {"^[\\u{1F600}-\\u{1F64F}]$", emoji, true},
-        {"^[\xC3\xA9]$", "\xC3\xA9", true},
-        // The dot does not match a line terminator; a negated class does.
-        {"^.$", "\n", false},
-        {"^.$", "\r", false},
-        {"^.$", "\xE2\x80\xA8", false},
-        {"^.$", "\xE2\x80\xA9", false},
-        {"^.$", "\x0B", true},
-        {"^[^a]$", "\n", true},
-        {"^[^]$", "\n", true},
-        {"^[]$", "a", false},
-        {"[]", "", false},
-        // '$' is the end of the text and not the place before a final line feed.
-        {"a$", "a\n", false},
-        {"a$", "a", true},
-        {"^a", "\na", false},
-        // \d and \w are ASCII; \s is the white space and the line terminators of ECMA-262.
-        {"^\\d+$", "0123456789", true},
-        {"^\\d$", "\xD9\xA3", false},
-        {"^\\w+$", "azAZ09_", true},
-        {"^\\w$", "\xC3\xA9", false},
-        {"^\\W$", "\xC3\xA9", true},
-        {"^\\s$", "\xC2\xA0", true},
-        {"^\\s$", "\xEF\xBB\xBF", true},
-        {"^\\s$", "\xE3\x80\x80", true},
-        {"^\\s$", "\xE2\x80\xA8", true},
-        {"^\\s$", "\x0B", true},
-        {"^\\s$", "\x0C", true},
-        {"^\\s$", "\xE1\xA0\x8E", false},  // U+180E is not white space
-        {"^\\S$", "\xC2\xA0", false},
-        {"^\\S$", "a", true},
-        {"^[\\s\\d]+$", " 1\t2", true},
-        {"^[\\S]$", " ", false},
-        // Word boundaries are ASCII.
-        {"\\bfoo\\b", "a foo b", true},
-        {"\\bfoo\\b", "afoob", false},
-        {"\\Boo\\B", "afoob", true},
-        // Escapes.
-        {"^\\cJ$", "\n", true},
-        {"^\\x41$", "A", true},
-        {"^\\0$", std::string(1, '\0'), true},
-        {"^[\\b]$", "\b", true},
-        {"^\\/$", "/", true},
-        {"^a\\.b$", "a.b", true},
-        {"^a\\.b$", "axb", false},
-        // Classes.
-        {"^[a-c-]+$", "a-b-c", true},
-        {"^[\\w-]+$", "a-b_c", true},
-        {"^[a-z-9]+$", "ab-9", true},
-        {"^[a-z-9]+$", "ab5", false},
-        {"^[\\^\\]]+$", "^]", true},
-        // General categories.
-        {"^\\p{Lu}+$", "ABC", true},
-        {"^\\p{Lu}+$", "ABc", false},
-        {"^\\p{Uppercase_Letter}$", "\xC3\x89", true},
-        {"^\\P{Lu}$", "a", true},
-        {"^\\P{Lu}$", "A", false},
-        {"^[\\p{L}\\d]+$", "a1\xC3\xA9", true},
-        {"^[^\\p{L}]$", "1", true},
-        {"^\\p{gc=Nd}+$", "123", true},
-        {"^\\p{General_Category=Letter}+$", "ab\xC3\xA9", true},
-        {"^\\p{Letter}cole", "\xC3\xA9" "cole", true},
-        // Groups, alternation and quantifiers.
-        {"^(?:ab|cd){2}$", "abcd", true},
-        {"^(?:ab|cd){2}$", "abab", true},
-        {"^(?:ab|cd){2}$", "ab", false},
-        {"^(?<year>\\d{4})-(?<month>\\d{2})$", "2026-11", true},
-        {"^a+?$", "aaa", true},
-        {"^a{2,3}$", "aaaa", false},
-        {"^a{2,}$", "aaaa", true},
-        {"^(a|ab)(c|bcd)(d*)$", "abcd", true},
-    };
-    for (const Case& entry : cases) {
-        EXPECT_EQ(matches(entry.pattern, entry.text), entry.matched)
-            << "pattern " << entry.pattern << ", text " << json(entry.text).dump(-1, ' ', false, json::error_handler_t::replace);
+    const json document = read_cases();
+    std::size_t compared = 0;
+    for (const json& entry : document.at("cases")) {
+        if (entry.contains("syntax_error")) continue;
+        const std::string pattern = entry.at("pattern").get<std::string>();
+        for (const json& item : entry.at("texts")) {
+            const std::string text = item.at("text").get<std::string>();
+            EXPECT_EQ(matches(pattern, text), item.at("match").get<bool>())
+                << "pattern " << pattern << ", text " << json(text).dump(-1, ' ', false, json::error_handler_t::replace);
+            ++compared;
+        }
     }
+    EXPECT_GE(compared, 100U);
+}
+
+TEST(JsonSchemaPattern, APatternThatIsASyntaxErrorInUnicodeModeIsRefused) {
+    const json document = read_cases();
+    std::size_t refused = 0;
+    for (const json& entry : document.at("cases")) {
+        if (!entry.contains("syntax_error")) continue;
+        const std::string pattern = entry.at("pattern").get<std::string>();
+        const auto result = compile_pattern(pattern);
+        EXPECT_TRUE(std::holds_alternative<Issue>(result)) << "accepted: " << pattern;
+        ++refused;
+    }
+    EXPECT_GE(refused, 50U);
 }
 
 TEST(JsonSchemaPattern, PatternPropertiesAndPropertyNamesUseTheSameDialect) {
