@@ -272,6 +272,14 @@ struct DefaultValue {
     void apply(json& schema) const { detail::set_keyword(schema, "default", detail::option_json(value)); }
 };
 
+// Documentation: adds `title`, a short display name of the member (a form shows it as the label of the field).
+struct Title {
+    std::string_view text;
+    template <class Member>
+    static constexpr void check() {}
+    void apply(json& schema) const { detail::set_keyword(schema, "title", json(std::string(text))); }
+};
+
 // Marks the parameter to be mirrored into an HTTP header whose name portion is `name`, where a revision that the
 // server serves lets a client do that. The header is then "<prefix><name>"; the prefix and the schema keyword that
 // carries the mark come from the revision's profile, so nothing here spells them. The member's own schema stays as
@@ -339,6 +347,8 @@ constexpr auto one_of(Vs... values) {
 }
 
 constexpr HeaderName mirror_in_header(std::string_view name) { return {name}; }
+
+constexpr Title title(std::string_view text) { return {text}; }
 
 template <class V>
 constexpr DefaultValue<detail::option_value_t<V>> default_value(V value) {

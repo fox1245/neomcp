@@ -204,6 +204,12 @@ target_link_libraries(neomcp_server_input_test PRIVATE neomcp::server GTest::gte
 neomcp_configure_target(neomcp_server_input_test)
 gtest_discover_tests(neomcp_server_input_test DISCOVERY_TIMEOUT 120)
 
+# Declared inputs: the form built from a described struct, the rounds under both mechanisms, the answers refused.
+add_executable(neomcp_server_declared_test server_declared_test.cpp)
+target_link_libraries(neomcp_server_declared_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_server_declared_test)
+gtest_discover_tests(neomcp_server_declared_test DISCOVERY_TIMEOUT 120)
+
 # ---- The stdio transport ---------------------------------------------------------------------------------------------
 
 add_executable(neomcp_stdio_test stdio_test.cpp)

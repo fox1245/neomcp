@@ -159,6 +159,7 @@
 #include "neomcp/profile.h"
 #include "neomcp/server/context.h"
 #include "neomcp/server/feature_handler.h"
+#include "neomcp/server/form_schema.h"
 #include "neomcp/server/handler.h"
 #include "neomcp/session.h"
 #include "neomcp/tool_host.h"
