@@ -63,11 +63,19 @@ SigpipeGuard::~SigpipeGuard() = default;
 FdReader::FdReader(int fd, bool interruptible) : fd_(fd) {
     if (!interruptible) return;
     int ends[2] = {-1, -1};
+#ifdef __linux__
+    // One step: the descriptors are close-on-exec and non-blocking from the moment they exist.
+    if (::pipe2(ends, O_CLOEXEC | O_NONBLOCK) != 0) return;  // without it the read cannot be interrupted, and still works
+#else
+    // Where there is no pipe2 (macOS), the flags are set in a second step. A child that another thread starts between
+    // the two calls inherits both ends of this pipe. That costs the child two open descriptors and nothing else: the
+    // pipe is only ever written by interrupt(), and the child has no reason to read it.
     if (::pipe(ends) != 0) return;  // without it the read cannot be interrupted, and still works
     for (const int end : ends) {
         ::fcntl(end, F_SETFD, ::fcntl(end, F_GETFD) | FD_CLOEXEC);
         ::fcntl(end, F_SETFL, ::fcntl(end, F_GETFL) | O_NONBLOCK);
     }
+#endif
     wake_read_ = ends[0];
     wake_write_ = ends[1];
 }
