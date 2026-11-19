@@ -4,6 +4,7 @@
 #include <system_error>
 #include <utility>
 
+#include "neomcp/http/authority.h"
 #include "neomcp/http/policy.h"
 
 #include "http_base/ip_text.h"
