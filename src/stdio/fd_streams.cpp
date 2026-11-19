@@ -60,7 +60,8 @@ SigpipeGuard::~SigpipeGuard() = default;
 
 #else
 
-FdReader::FdReader(int fd) : fd_(fd) {
+FdReader::FdReader(int fd, bool interruptible) : fd_(fd) {
+    if (!interruptible) return;
     int ends[2] = {-1, -1};
     if (::pipe(ends) != 0) return;  // without it the read cannot be interrupted, and still works
     for (const int end : ends) {
@@ -78,18 +79,20 @@ FdReader::~FdReader() {
 
 std::size_t FdReader::read(char* buffer, std::size_t capacity) {
     for (;;) {
-        if (wake_read_ >= 0) {
-            pollfd waits[2] = {{fd_, POLLIN, 0}, {wake_read_, POLLIN, 0}};
-            if (::poll(waits, 2, -1) < 0) {
-                if (errno == EINTR) continue;
-                return 0;
-            }
-            if ((waits[1].revents & POLLIN) != 0) return 0;  // interrupted, for good: the pipe is never drained
-            if (waits[0].revents == 0) continue;
+        // Every wait is a poll, with or without the private pipe: a descriptor that is in non-blocking mode (its
+        // owner may have left it so) answers a read with EAGAIN when nothing has arrived, and that is a reason to
+        // wait, not the end of the input.
+        pollfd waits[2] = {{fd_, POLLIN, 0}, {wake_read_, POLLIN, 0}};
+        const nfds_t watched = wake_read_ >= 0 ? 2 : 1;
+        if (::poll(waits, watched, -1) < 0) {
+            if (errno == EINTR) continue;
+            return 0;
         }
+        if (watched == 2 && (waits[1].revents & POLLIN) != 0) return 0;  // interrupted, for good: the pipe is never drained
+        if (waits[0].revents == 0) continue;
         const ssize_t count = ::read(fd_, buffer, capacity);
         if (count > 0) return static_cast<std::size_t>(count);
-        if (count < 0 && (errno == EINTR || (errno == EAGAIN && wake_read_ >= 0))) continue;
+        if (count < 0 && (errno == EINTR || errno == EAGAIN)) continue;
         return 0;
     }
 }

@@ -765,6 +765,46 @@ TEST(Descriptors, AReaderDeliversWhatIsWrittenAndThenTheEnd) {
     EXPECT_EQ(reader.read(buffer, sizeof buffer), 0u);
 }
 
+// A descriptor in non-blocking mode answers a read with EAGAIN when nothing has arrived. That is a reason to wait for
+// more, not the end of the input: the reader returns the bytes that come and returns 0 only at the real end.
+void expect_nonblocking_input_is_waited_on(bool without_wake_pipe) {
+    Pipe pipe;
+    ASSERT_NE(::fcntl(pipe.read_end, F_SETFL, ::fcntl(pipe.read_end, F_GETFL) | O_NONBLOCK), -1);
+    // A reader without its private pipe is what one is when the pipe could not be made.
+    neomcp::detail::FdReader reader(pipe.read_end, !without_wake_pipe);
+    std::promise<std::size_t> first;
+    std::promise<std::size_t> second;
+    std::thread reading([&] {
+        char buffer[8];
+        first.set_value(reader.read(buffer, sizeof buffer));
+        second.set_value(reader.read(buffer, sizeof buffer));
+    });
+    auto first_result = first.get_future();
+    auto second_result = second.get_future();
+    // Nothing has been written: the read is waiting, it has not returned 0.
+    EXPECT_EQ(first_result.wait_for(300ms), std::future_status::timeout);
+    EXPECT_EQ(::write(pipe.write_end, "abc", 3), 3);
+    EXPECT_EQ(first_result.wait_for(patience), std::future_status::ready);
+    if (first_result.wait_for(0s) == std::future_status::ready) {
+        EXPECT_EQ(first_result.get(), 3u);
+    }
+    EXPECT_EQ(second_result.wait_for(300ms), std::future_status::timeout);
+    pipe.close_write();  // the real end of the input
+    EXPECT_EQ(second_result.wait_for(patience), std::future_status::ready);
+    if (second_result.wait_for(0s) == std::future_status::ready) {
+        EXPECT_EQ(second_result.get(), 0u);
+    }
+    reading.join();
+}
+
+TEST(Descriptors, ANonBlockingDescriptorIsWaitedOnAndNotTakenForTheEndOfTheInput) {
+    expect_nonblocking_input_is_waited_on(false);
+}
+
+TEST(Descriptors, ANonBlockingDescriptorIsWaitedOnWhenTheReaderHasNoPipeOfItsOwn) {
+    expect_nonblocking_input_is_waited_on(true);
+}
+
 TEST(Descriptors, AnInterruptEndsABlockedRead) {
     Pipe pipe;
     neomcp::detail::FdReader reader(pipe.read_end);

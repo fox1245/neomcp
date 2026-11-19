@@ -14,7 +14,9 @@ namespace neomcp::detail {
 // there is no portable way to end a blocked read, and interrupt() only makes the next read return 0.
 class FdReader final : public ByteReader {
 public:
-    explicit FdReader(int fd);
+    // `interruptible` false makes a reader without the private pipe, which is also what a reader is when the pipe could
+    // not be created: its wait cannot be ended by interrupt(), and it still waits for input without ending early.
+    explicit FdReader(int fd, bool interruptible = true);
     ~FdReader() override;
     FdReader(const FdReader&) = delete;
     FdReader& operator=(const FdReader&) = delete;
