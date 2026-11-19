@@ -288,6 +288,7 @@ constexpr std::chrono::milliseconds stall_body_timeout = 600ms;
 constexpr std::chrono::milliseconds stall_read_timeout = 2s;
 constexpr std::chrono::milliseconds stall_pace = 150ms;
 
+#if !defined(_WIN32)  // used by the tests whose peers are POSIX sockets
 struct Stall {
     const char* where;
     std::string before;  // sent at once after the header fields
@@ -319,6 +320,7 @@ ListenerOptions one_worker(std::chrono::milliseconds read_timeout, std::chrono::
     options.max_worker_threads = 1;
     return options;
 }
+#endif
 
 TEST(HttpBodyDeadline, AChunkedBodyStalledInItsFramingIsCutAtTheDeadline) {
     NEOMCP_SKIP_WITHOUT_RAW_SOCKETS();
