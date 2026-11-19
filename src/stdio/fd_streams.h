@@ -3,7 +3,6 @@
 
 #include <atomic>
 #include <cstddef>
-#include <memory>
 #include <string_view>
 
 #include "neomcp/stdio.h"
@@ -59,8 +58,8 @@ private:
 #endif
 };
 
-// POSIX: ignores SIGPIPE for the lifetime of the object when `enabled`, and restores the previous disposition.
-// Elsewhere it does nothing.
+// POSIX: ignores SIGPIPE for the lifetime of the object when `enabled`. Guards may overlap in any order: the
+// disposition from before the first one is restored when the last one is gone. Elsewhere it does nothing.
 class SigpipeGuard {
 public:
     explicit SigpipeGuard(bool enabled);
@@ -69,8 +68,7 @@ public:
     SigpipeGuard& operator=(const SigpipeGuard&) = delete;
 
 private:
-    struct Saved;  // the previous disposition
-    std::unique_ptr<Saved> saved_;
+    bool held_ = false;  // this guard counts among those that keep SIGPIPE ignored
 };
 
 }  // namespace neomcp::detail

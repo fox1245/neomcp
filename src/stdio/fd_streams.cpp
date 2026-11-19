@@ -2,7 +2,7 @@
 
 #include <cerrno>
 #include <cstddef>
-#include <memory>
+#include <mutex>
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -55,7 +55,6 @@ BinaryMode::~BinaryMode() {
     if (previous_ != -1) _setmode(fd_, previous_);
 }
 
-struct SigpipeGuard::Saved {};
 SigpipeGuard::SigpipeGuard(bool) {}
 SigpipeGuard::~SigpipeGuard() = default;
 
@@ -121,21 +120,32 @@ bool FdWriter::write(std::string_view bytes) {
 BinaryMode::BinaryMode(int) {}
 BinaryMode::~BinaryMode() = default;
 
-struct SigpipeGuard::Saved {
-    struct sigaction action;
-};
+namespace {
+
+// The guards that are alive, and the disposition from before the first of them.
+std::mutex sigpipe_mutex;
+std::size_t sigpipe_guards = 0;
+struct sigaction sigpipe_original;
+
+}  // namespace
 
 SigpipeGuard::SigpipeGuard(bool enabled) {
     if (!enabled) return;
-    struct sigaction ignore = {};
-    ignore.sa_handler = SIG_IGN;
-    sigemptyset(&ignore.sa_mask);  // unqualified: some platforms define it as a macro
-    auto saved = std::make_unique<Saved>();
-    if (::sigaction(SIGPIPE, &ignore, &saved->action) == 0) saved_ = std::move(saved);
+    const std::lock_guard<std::mutex> lock(sigpipe_mutex);
+    if (sigpipe_guards == 0) {
+        struct sigaction ignore = {};
+        ignore.sa_handler = SIG_IGN;
+        sigemptyset(&ignore.sa_mask);  // unqualified: some platforms define it as a macro
+        if (::sigaction(SIGPIPE, &ignore, &sigpipe_original) != 0) return;
+    }
+    ++sigpipe_guards;
+    held_ = true;
 }
 
 SigpipeGuard::~SigpipeGuard() {
-    if (saved_) ::sigaction(SIGPIPE, &saved_->action, nullptr);
+    if (!held_) return;
+    const std::lock_guard<std::mutex> lock(sigpipe_mutex);
+    if (--sigpipe_guards == 0) ::sigaction(SIGPIPE, &sigpipe_original, nullptr);
 }
 
 #endif
