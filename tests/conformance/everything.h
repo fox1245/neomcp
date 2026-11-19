@@ -450,12 +450,40 @@ inline void register_prompts(neomcp::Server& server) {
     });
 }
 
+// What the runner's change checks use: a tool and a prompt that the two trigger tools offer and withdraw, and a
+// resource that clients watch. A handle is a value, so each trigger keeps the handle of what it switches.
+inline void register_changes(neomcp::Server& server) {
+    const neomcp::ToolHandle hidden_tool =
+        server.tool("test_hidden_tool", "A tool the trigger offers and withdraws", [] { return std::string("hidden"); })
+            .enable(false);
+    server.tool("test_trigger_tool_change", "Changes the list of tools", [hidden_tool] {
+        hidden_tool.enable(!hidden_tool.enabled());
+        return std::string("The list of tools changed.");
+    });
+
+    const neomcp::PromptHandle hidden_prompt =
+        server
+            .prompt("test_hidden_prompt", "A prompt the trigger offers and withdraws", [] { return std::string("hidden"); })
+            .enable(false);
+    server.tool("test_trigger_prompt_change", "Changes the list of prompts", [hidden_prompt] {
+        hidden_prompt.enable(!hidden_prompt.enabled());
+        return std::string("The list of prompts changed.");
+    });
+
+    server
+        .resource("test://watched-resource", "Watched resource",
+                  [] { return std::string("The content of the resource that clients watch."); })
+        .description("A resource clients subscribe to")
+        .mime_type("text/plain");
+}
+
 inline void register_everything(neomcp::Server& server) {
     register_tools(server);
     register_input_tools(server);
     register_resources(server);
     register_prompts(server);
     register_input_prompt(server);
+    register_changes(server);
 }
 
 }  // namespace conformance

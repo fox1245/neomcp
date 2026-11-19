@@ -1,7 +1,5 @@
-# The scenarios of the official conformance runner, revision 2025-11-25, that the fixture server cannot pass yet. It
-# serves tools (among them the ones that ask the client for sampling and for forms while they run), resources, a
-# resource template, prompts and completion; it does not subscribe a client to the changes of a resource.
-# An entry that starts to pass fails the run, so this list shrinks as the server grows.
-server:
-  - resources-subscribe
-  - resources-unsubscribe
+# The scenarios of the official conformance runner, revision 2025-11-25, that the fixture server cannot pass yet:
+# none. The server serves tools (among them the ones that ask the client for sampling and for forms while they run),
+# resources with subscriptions, a resource template, prompts and completion.
+# An entry that starts to pass fails the run, so a scenario is listed here only while it cannot pass.
+server: []

@@ -371,7 +371,8 @@ TEST_P(FixtureScenarios, ResourcesListHasEachResourceWithAUriANameAndADescriptio
         EXPECT_FALSE(resource.at("description").get<std::string>().empty()) << resource.dump();
         uris.insert(resource.at("uri").get<std::string>());
     }
-    EXPECT_EQ(uris, (std::set<std::string>{"test://static-binary", "test://static-text"})) << "direct resources only";
+    EXPECT_EQ(uris, (std::set<std::string>{"test://static-binary", "test://static-text", "test://watched-resource"}))
+        << "direct resources only";
 }
 
 TEST_P(FixtureScenarios, TheStaticTextResourceIsRead) {
