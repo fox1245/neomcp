@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <set>
 #include <span>
 #include <stdexcept>
@@ -3316,6 +3317,88 @@ TEST(Headers, OnStdioHeadersChangeNothing) {
     EXPECT_TRUE(message_of(only_output(recorder, 1)).contains("result"));
     EXPECT_TRUE(feed(*session, 2, list, {}));
     EXPECT_TRUE(message_of(only_output(recorder, 2)).contains("result"));
+}
+
+// A host that keeps the handle of the call it was given, so that a thread of the test can report progress through it.
+class HandleKeepingHost final : public neomcp::ToolHost {
+public:
+    HandleKeepingHost() {
+        neomcp::ToolDefinition tool;
+        tool.name = "t";
+        tools_.push_back(std::move(tool));
+    }
+    std::span<const neomcp::ToolDefinition> tools() const override { return tools_; }
+    void call(const neomcp::CallRequest&, neomcp::CallControl control, neomcp::Completion done) override {
+        {
+            std::lock_guard lock(mutex_);
+            control_.emplace(std::move(control));
+            done_.emplace(std::move(done));
+        }
+        arrived_.notify_all();
+    }
+    neomcp::CallControl wait_for_call() {
+        std::unique_lock lock(mutex_);
+        arrived_.wait(lock, [&] { return control_.has_value(); });
+        return *control_;
+    }
+
+private:
+    std::vector<neomcp::ToolDefinition> tools_;
+    std::mutex mutex_;
+    std::condition_variable arrived_;
+    std::optional<neomcp::CallControl> control_;
+    std::optional<neomcp::Completion> done_;
+};
+
+// A sink that threw is not called again, whichever thread has something to write when it did. Two threads write at
+// once (the reader answering pings, a thread of the test reporting progress); the sink throws on its Nth call.
+TEST(Sink, ASinkThatThrewIsNotCalledAgain) {
+    const auto modern = builtin(modern_revision);
+    std::mt19937 choices(7);
+    const auto stop_at = std::chrono::steady_clock::now() + 3s;
+    for (int round = 0; round < 20000 && std::chrono::steady_clock::now() < stop_at; ++round) {
+        HandleKeepingHost host;
+        std::atomic<int> calls{0};
+        std::atomic<int> after_the_throw{0};
+        std::atomic<bool> threw{false};
+        const int throws_at = 3 + static_cast<int>(choices() % 40);
+        neomcp::SessionOptions options;
+        options.profiles = {modern};
+        options.server_info.name = "sink";
+        options.server_info.version = "1";
+        auto made = neomcp::Session::create_tagged(std::move(options), host, [&](neomcp::Output) {
+            if (threw.load()) {
+                ++after_the_throw;
+                return;
+            }
+            if (++calls == throws_at) {
+                threw = true;
+                throw std::runtime_error("the sink failed");
+            }
+        });
+        auto session = std::move(std::get<std::unique_ptr<neomcp::Session>>(made));
+        const auto feed_line = [&](neomcp::UnitId unit, const json& message) {
+            try {
+                session->receive(unit, message.dump(), {});
+            } catch (const std::runtime_error&) {
+                // The sink's failure reaches the thread that was writing.
+            }
+        };
+        feed_line(1, Peer::make_request(*modern, 1, "tools/call",
+                                        json{{"name", "t"}, {"arguments", json::object()}, {"_meta", json{{"progressToken", "p"}}}}));
+        neomcp::CallControl control = host.wait_for_call();
+        std::atomic<bool> go{false};
+        std::thread reporter([&] {
+            while (!go.load()) {
+            }
+            for (int i = 1; i < 200; ++i) control.progress(i, 1000);
+        });
+        go = true;
+        for (int i = 0; i < 60; ++i) feed_line(100 + i, Peer::make_request(*modern, 100 + i, "ping", json::object()));
+        reporter.join();
+        ASSERT_EQ(after_the_throw.load(), 0) << "round " << round << ": the sink was called " << after_the_throw.load()
+                                              << " times after it threw";
+    }
 }
 
 }  // namespace
