@@ -258,7 +258,8 @@ std::variant<InputResponse, std::string> read_elicitation(const json& result) {
                        " of an elicitation result is not a string, a number, a boolean or an array of strings";
             }
         }
-        answer.content = *content;
+        // Fields belong to an acceptance; what a client sends with a decline or a cancel is not passed on.
+        if (answer.action == ElicitationAction::accept) answer.content = *content;
     }
     return InputResponse(std::move(answer));
 }
