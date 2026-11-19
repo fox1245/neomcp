@@ -8,9 +8,13 @@
 
 namespace neomcp::detail {
 
-// A line ends at '\n'; a '\r' before it is dropped; an empty line is skipped. A line longer than `max_line_bytes`
-// (measured without the dropped '\r') is handed over truncated to max_line_bytes + 1 bytes, so that the receiver
-// sees it is too long, and the rest of it is skipped without being stored.
+// A line ends at '\n'. A last line that has no '\n' ends with the input (finish()): the end of the input stands in for
+// the line feed, so the line is delivered and the same rule applies to it. Exactly one '\r' just before the end of a
+// line is dropped, with a line feed or without one ("a\r\n" and "a\r" at the end of the input are both "a"; "a\r\r\n"
+// is "a\r"). A '\r' anywhere else belongs to the line. An empty line, which "\r\n" and a lone "\r" at the end of the
+// input are too, is skipped. A line longer than `max_line_bytes` (measured without the dropped '\r') is handed over
+// truncated to max_line_bytes + 1 bytes, so that the receiver sees it is too long, and the rest of it is skipped
+// without being stored.
 class LineSplitter {
 public:
     explicit LineSplitter(std::size_t max_line_bytes)
@@ -29,7 +33,8 @@ public:
         }
     }
 
-    // The end of input: a last line without a terminator is a line too.
+    // The end of input: a last line without a line feed is a line too, and a '\r' at its end is dropped as before a
+    // line feed.
     template <class OnLine>
     void finish(OnLine&& on_line) {
         if (!line_.empty()) deliver(on_line);

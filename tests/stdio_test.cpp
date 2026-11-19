@@ -295,6 +295,25 @@ TEST(LineSplitter, TerminatorsAndEmptyLines) {
     EXPECT_TRUE(split(1000, {""}, true).empty());
 }
 
+// The end of the input ends the last line like a line feed does, so one carriage return before it is dropped in
+// the same way, and the bound is measured without it.
+TEST(LineSplitter, TheEndOfTheInputEndsTheLastLineLikeALineFeedDoes) {
+    EXPECT_EQ(split(1000, {"a\nb\r"}, true), (std::vector<std::string>{"a", "b"}));
+    EXPECT_EQ(split(1000, {"b\r\r"}, true), (std::vector<std::string>{"b\r"}));
+    EXPECT_EQ(split(1000, {"b\r\n"}, true), (std::vector<std::string>{"b"}));
+    EXPECT_EQ(split(1000, {"b\r"}, false), std::vector<std::string>{});  // not finished: nothing is delivered
+    EXPECT_EQ(split(1000, {"b\r", "\r"}, true), (std::vector<std::string>{"b\r"}));
+    EXPECT_EQ(split(1000, {"b", "\r"}, true), (std::vector<std::string>{"b"}));
+    EXPECT_EQ(split(1000, by_byte("a\r\nb\r"), true), (std::vector<std::string>{"a", "b"}));
+    // A lone carriage return is an empty line, as a lone "\r\n" is.
+    EXPECT_TRUE(split(1000, {"x\n", "\r"}, true) == std::vector<std::string>{"x"});
+    constexpr std::size_t limit = 10;
+    const std::string at_limit(limit, 'x');
+    const std::string over_limit(limit + 1, 'y');
+    EXPECT_EQ(split(limit, {at_limit + "\r"}, true), (std::vector<std::string>{at_limit}));
+    EXPECT_EQ(split(limit, {over_limit + "\r"}, true), (std::vector<std::string>{over_limit}));
+}
+
 TEST(LineSplitter, ALimitThatCannotBeExceededKeepsEveryLine) {
     const std::size_t no_limit = std::numeric_limits<std::size_t>::max();
     EXPECT_EQ(split(no_limit, {"ab\ncd\n"}, false), (std::vector<std::string>{"ab", "cd"}));
