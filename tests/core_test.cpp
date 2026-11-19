@@ -938,6 +938,28 @@ TEST(Handshake, WhatItSaysAboutTheClientIsBoundedInBytesAndNotRepeated) {
     }
 }
 
+TEST(Handshake, ByDefaultAHandshakeWithIconsGivenInlineAsDataIsTaken) {
+    const auto legacy = builtin("2025-11-25");
+    FakeHost host;
+    Peer peer(host, test_options());
+    // Four icons of 48 KiB each as data URIs, about 192 KiB in all: within the default, which is 256 KiB.
+    json icons = json::array();
+    for (const char* size : {"48x48", "96x96", "192x192", "512x512"}) {
+        json sizes = json::array();
+        sizes.push_back(size);
+        icons.push_back(json{{"src", "data:image/png;base64," + std::string(48 * 1024, 'A')},
+                             {"mimeType", "image/png"},
+                             {"sizes", std::move(sizes)}});
+    }
+    json request = Peer::initialize_request(*legacy, 1);
+    request["params"]["clientInfo"]["icons"] = std::move(icons);
+    ASSERT_LT(neomcp::serialize(request["params"]["clientInfo"]).size(), neomcp::SessionDefaults::max_client_info_bytes);
+    const auto answer = peer.request(request, patience);
+    ASSERT_TRUE(answer);
+    EXPECT_TRUE(answer->contains("result")) << answer->dump().substr(0, 200);
+    EXPECT_EQ(neomcp::SessionDefaults::max_client_info_bytes, std::size_t{256} * 1024);
+}
+
 TEST(Handshake, EveryCallSeesWhatTheHandshakeSaidAboutTheClient) {
     FakeHost host;
     Peer peer(host, test_options());

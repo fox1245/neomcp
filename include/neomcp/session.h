@@ -196,7 +196,7 @@ struct SessionDefaults {
     static constexpr std::size_t max_input_rounds = 10;
     static constexpr std::chrono::seconds request_state_ttl{600};
     static constexpr bool answers_need_state = false;
-    static constexpr std::size_t max_client_info_bytes = std::size_t{64} * 1024;
+    static constexpr std::size_t max_client_info_bytes = std::size_t{256} * 1024;
     static constexpr std::size_t max_token_bytes = 1024;
 };
 
@@ -245,8 +245,9 @@ struct SessionOptions {
 
     // The bytes of what a handshake says about the client, which the connection keeps for its whole life: its
     // clientInfo and capabilities objects, as serialized. A handshake that says more is refused with Invalid params.
-    // Zero is an error. Default 64 KiB: a name, a version, a title, a website and a few icons take a few KiB, and
-    // icons given inline as data take tens of KiB.
+    // Zero is an error. Default 256 KiB: a client may give its icons inline as data (the icons of an Implementation),
+    // several sizes of them, and a refused handshake leaves that client with no connection at all; what the server
+    // keeps stays bounded all the same (the sessions it keeps at once times this).
     std::size_t max_client_info_bytes = SessionDefaults::max_client_info_bytes;
 
     // The longest string a client may give as a progress token, or as the id of a request that opens a subscription
