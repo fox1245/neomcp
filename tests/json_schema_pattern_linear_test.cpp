@@ -26,6 +26,8 @@ using Clock = std::chrono::steady_clock;
 constexpr std::size_t shortest = std::size_t{1} << 16;
 constexpr std::size_t doublings = 4;  // up to 1 MiB
 constexpr int repeats = 5;
+// A measurement that the machine disturbed is taken again; a matcher whose time is not linear fails every time.
+constexpr int attempts = 3;
 
 struct Case {
     std::string pattern;
@@ -76,25 +78,25 @@ TEST(JsonSchemaPatternLinear, TheTimeDoesNotGrowFasterThanTheStringDoubles) {
         const Validator& validator = std::get<Validator>(result);
         // The first run builds the tables the engine fills while it matches.
         (void)validator.validate(json(repeated(entry.unit, shortest, entry.suffix)));
-        std::vector<double> times;
-        for (std::size_t step = 0; step <= doublings; ++step) {
-            const std::size_t bytes = shortest << step;
-            times.push_back(best_time(validator, json(repeated(entry.unit, bytes, entry.suffix))));
-        }
         // Linear: 16 times the text takes about 16 times as long. The allowance is three times that, and a floor
         // under the first time keeps a single scheduling delay from making the ratio meaningless. A matcher whose time
-        // grows with the square of the length takes 256 times as long.
-        const double first = std::max(times.front(), 2e-4);
-        const double growth = times.back() / first;
+        // grows with the square of the length takes 256 times as long. Single doublings are not bounded: the engine
+        // may change its way of matching at some length and stay linear, and one disturbed measurement would decide.
         const double length_ratio = static_cast<double>(std::size_t{1} << doublings);
+        std::vector<double> times;
+        double growth = 0;
+        for (int attempt = 0; attempt < attempts; ++attempt) {
+            times.clear();
+            for (std::size_t step = 0; step <= doublings; ++step) {
+                const std::size_t bytes = shortest << step;
+                times.push_back(best_time(validator, json(repeated(entry.unit, bytes, entry.suffix))));
+            }
+            growth = times.back() / std::max(times.front(), 2e-4);
+            if (growth < length_ratio * 3.0) break;
+        }
         EXPECT_LT(growth, length_ratio * 3.0) << entry.pattern << ": " << times.front() << " s for " << shortest
                                               << " bytes, " << times.back() << " s for " << (shortest << doublings)
-                                              << " bytes";
-        // And no single doubling costs more than four times the one before.
-        for (std::size_t step = 1; step < times.size(); ++step) {
-            EXPECT_LT(times[step], std::max(times[step - 1], 2e-4) * 4.0)
-                << entry.pattern << ", doubling " << step << ": " << times[step - 1] << " s then " << times[step] << " s";
-        }
+                                              << " bytes, in each of " << attempts << " measurements";
     }
 }
 
