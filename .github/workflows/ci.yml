@@ -6,6 +6,8 @@ name: CI
 # official Python SDK's client, and one runs the official conformance suite against the HTTP server, once per revision.
 # The README's two programs are built as a user builds them (the repository added as a subdirectory of another
 # project) and run once: on Linux with Clang, and on Windows with MSVC, where the HTTP server's SIGTERM check is left out.
+# One more job checks the translation of regular expressions for the schema keyword `pattern` against V8: Node writes
+# patterns with the answers of V8, and a test executable compares the validator with them.
 
 on:
   push:
@@ -148,6 +150,38 @@ jobs:
           echo "--- fixture log"
           cat "$RUNNER_TEMP/fixture.log" || true
           python3 -I tests/conformance/summarize_checks.py "$RUNNER_TEMP/results-2026-07-28" "$RUNNER_TEMP/results-2025-11-25"
+
+  pattern-oracle:
+    name: pattern-oracle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON
+      - name: Build the checker
+        run: cmake --build build --parallel --target neomcp_pattern_oracle
+      - name: Show the reference engine and its Unicode version
+        run: |
+          node --version
+          node -p "'v8 ' + process.versions.v8 + ', unicode ' + process.versions.unicode"
+      - name: The hand-written cases against V8
+        run: node tests/pattern_oracle/generate.js --check tests/data/pattern_cases.json
+      - name: The hand-written cases against the validator
+        run: build/tests/neomcp_pattern_oracle tests/data/pattern_cases.json
+      - name: Every general category against the characters whose category both engines agree on
+        run: |
+          node tests/pattern_oracle/generate.js --audit-properties --out "$RUNNER_TEMP/properties.json"
+          build/tests/neomcp_pattern_oracle "$RUNNER_TEMP/properties.json"
+      - name: Generated patterns against the validator (three seeds)
+        run: |
+          for seed in 11 22 33; do
+            node tests/pattern_oracle/generate.js --seed "$seed" --count 20000 --out "$RUNNER_TEMP/cases-$seed.json"
+            build/tests/neomcp_pattern_oracle "$RUNNER_TEMP/cases-$seed.json"
+          done
 
   consumer:
     name: consumer-linux-clang
