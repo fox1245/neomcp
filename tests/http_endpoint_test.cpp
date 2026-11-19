@@ -1256,12 +1256,13 @@ TEST(HttpEndpointHandler, ABodyBeyondTheServersMessageBoundIs413AndStoppingRefus
 
 TEST(HttpEndpointHandler, CreateRefusesOptionsOutOfRange) {
     neomcp::Server server({.name = "s", .version = "1"});
-    for (int which = 0; which < 4; ++which) {
+    for (int which = 0; which < 5; ++which) {
         neomcp::http::EndpointOptions options;
         if (which == 0) options.max_sessions = 0;
         if (which == 1) options.session_idle_timeout = 0ms;
         if (which == 2) options.stream_after = 0ms;
         if (which == 3) options.max_stream_buffer_bytes = 0;
+        if (which == 4) options.unused_session_timeout = 0ms;
         auto policy = neomcp::http::HostPolicy::create({});
         ASSERT_TRUE(policy);
         EXPECT_FALSE(neomcp::http::Endpoint::create(server, std::move(*policy.value), options)) << which;

@@ -36,8 +36,10 @@
 // such as the change notifications of the connection; at most one such stream at a time, a second GET is answered 409;
 // without one they are dropped), DELETE ends it
 // (204). It also ends after EndpointOptions::session_idle_timeout without a request in progress or an open stream, and
-// when the endpoint stops; later requests that name it are answered 404. Requests of one session may arrive on many
-// threads; the endpoint feeds them to the session one at a time.
+// when the endpoint stops. While nobody used it (no request after its handshake named it), it ends after
+// EndpointOptions::unused_session_timeout, or earlier when the table is full and a new handshake takes its place.
+// Later requests that name an ended session are answered 404, which tells a client to open a new one. Requests of one
+// session may arrive on many threads; the endpoint feeds them to the session one at a time.
 //
 // Threads: the endpoint has one thread of its own, which runs its deadlines. It never holds a lock while it calls
 // into a session, a responder or a stream.
@@ -59,12 +61,22 @@ class Server;
 namespace neomcp::http {
 
 struct EndpointOptions {
-    // Sessions kept at once; a handshake beyond it is refused with 503. At least 1. Default 1024.
+    // Sessions kept at once. At least 1. Default 1024. When that many are kept, a new handshake takes the place of the
+    // session nobody used (see unused_session_timeout) that was kept longest, which ends; when every kept session was
+    // used, the handshake is refused with 503. A session that was used never gives its place to a new one. Places
+    // are not counted per client address: behind a proxy many clients share one, and one client can use many.
     std::size_t max_sessions = 1024;
 
     // A kept session without a request in progress and without an open stream for this long is closed. Positive.
     // Default 30 minutes.
     std::chrono::milliseconds session_idle_timeout = std::chrono::minutes(30);
+
+    // A kept session nobody used is closed after this long from its handshake. A session counts as used from the
+    // first request after its handshake that names it (a POST, a GET or a DELETE with its id): usually the
+    // notification that completes the handshake, but any request does, so a client that sends that notification
+    // late, after a ping or a request of its own, is not cut. Positive. Default 30 seconds: far more than a client
+    // needs to send its first request after the answer to its handshake arrived.
+    std::chrono::milliseconds unused_session_timeout = std::chrono::seconds(30);
 
     // A request that has had no output for this long is answered with an event stream (when the client accepts one),
     // so that keep-alive comments can flow while it runs. Positive. Default 5 seconds.

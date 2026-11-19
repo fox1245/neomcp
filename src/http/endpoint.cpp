@@ -9,7 +9,11 @@
 //   and it holds its entry, so a session that has no id lives exactly as long as its one request.
 //
 // Locks, in the order they may be nested: Impl::mutex, Entry::mutex, Exchange::mutex, the timer's. None is held
-// while a session, a responder, a stream or the policy is called.
+// while a session, a responder, a stream or the policy is called. Two entries' locks are never held at once.
+//
+// Sessions nobody used. A kept entry is listed in Impl::unused, in the order it was kept, until a request names it
+// (find) or it ends; the list and the entry's place in it are guarded by Impl::mutex, so a newcomer that takes the
+// place of the oldest listed entry (keep_entry) and the first request of that entry are decided one after the other.
 //
 // Feeding. A session takes one input at a time, and requests of one session arrive on many threads. The inputs of an
 // entry queue in it, and the thread that finds nobody feeding feeds them all, one after the other, without a lock
@@ -29,6 +33,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <list>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -226,6 +231,17 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
         std::size_t active = 0;            // exchanges not released, and the connection stream
         std::uint64_t idle_generation = 0;  // a job of the idle timer acts only when it is still current
         Timer::Id idle_timer = 0;
+
+        // Guarded by Impl::mutex.
+        bool used = false;  // a request after the handshake named it
+        std::optional<std::list<std::shared_ptr<Entry>>::iterator> unused_place;  // in Impl::unused
+        Timer::Id unused_timer = 0;
+    };
+
+    // What an ended session leaves to close, once no lock is held.
+    struct Ended {
+        std::shared_ptr<Session> session;
+        std::shared_ptr<BodyStream> stream;
     };
 
     enum class Phase { waiting, streaming, done };
@@ -305,8 +321,12 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
     std::variant<std::shared_ptr<Entry>, std::string_view> open_entry();
     std::variant<std::string, std::string_view> keep_entry(const std::shared_ptr<Entry>& entry,
                                                            const profile::ProfilePtr& opened);
-    std::shared_ptr<Entry> find(std::string_view id) const;
+    // The kept entry under `id`, marked used; null when there is none.
+    std::shared_ptr<Entry> find(std::string_view id);
     void forget(const Entry& entry);
+    void unlist(Entry& entry);                  // with `mutex` held
+    Ended end_unused(Entry& entry);             // with `mutex` held; takes the entry's lock
+    void expire_unused(const std::shared_ptr<Entry>& entry);
     void feed(const std::shared_ptr<Entry>& entry, Feed input);
     void feed_one(const std::shared_ptr<Entry>& entry, const std::shared_ptr<Session>& session, Feed& input);
     void activate(Entry& entry);    // with the entry's lock held
@@ -369,6 +389,7 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
     std::uint64_t next_serial = 1;
     std::map<std::uint64_t, std::shared_ptr<Entry>> live;
     std::map<std::string, std::shared_ptr<Entry>, std::less<>> by_id;
+    std::list<std::shared_ptr<Entry>> unused;  // kept entries nobody used yet, the longest kept first
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -679,6 +700,7 @@ void Endpoint::Impl::remove(const Request& request, const Responder& responder) 
             entry->idle_timer = 0;
             by_id.erase(entry->id);
             live.erase(entry->serial);
+            unlist(*entry);
         }
     }
     if (!session) {
@@ -731,25 +753,85 @@ std::variant<std::string, std::string_view> Endpoint::Impl::keep_entry(const std
     // The id is the session's only secret: without the operating system's random source there is no session.
     std::optional<std::string> id = random_hex(session_id_bytes);
     if (!id) return reason::no_capacity;
-    std::lock_guard table(mutex);
-    if (stopping.load()) return reason::stopping;
-    if (by_id.size() >= options.max_sessions) return reason::no_capacity;
-    if (by_id.find(*id) != by_id.end()) return reason::no_capacity;  // never two sessions under one id
+    Ended displaced;
     {
-        std::lock_guard lock(entry->mutex);
-        if (entry->closed.load()) return reason::stopping;
-        entry->keep = Keep::kept;
-        entry->id = *id;
-        entry->profile = opened;
+        std::lock_guard table(mutex);
+        if (stopping.load()) return reason::stopping;
+        if (by_id.find(*id) != by_id.end()) return reason::no_capacity;  // never two sessions under one id
+        // A full table makes room only by ending the session nobody used that was kept longest.
+        const bool full = by_id.size() >= options.max_sessions;
+        if (full && unused.empty()) return reason::no_capacity;
+        {
+            std::lock_guard lock(entry->mutex);
+            if (entry->closed.load()) return reason::stopping;
+            entry->keep = Keep::kept;
+            entry->id = *id;
+            entry->profile = opened;
+        }
+        if (full) {
+            const std::shared_ptr<Entry> oldest = unused.front();
+            displaced = end_unused(*oldest);
+        }
+        by_id.emplace(*id, entry);
+        entry->unused_place = unused.insert(unused.end(), entry);
+        entry->unused_timer = timer.schedule(Clock::now() + options.unused_session_timeout,
+                                             [self = weak_from_this(), weak = std::weak_ptr<Entry>(entry)] {
+                                                 const auto impl = self.lock();
+                                                 const auto owner = weak.lock();
+                                                 if (impl && owner) impl->expire_unused(owner);
+                                             });
     }
-    by_id.emplace(*id, entry);
+    // Every request still open on the displaced session ends, and is answered as one whose session ended.
+    if (displaced.session) displaced.session->close();
+    if (displaced.stream) displaced.stream->end();
     return std::move(*id);
 }
 
-std::shared_ptr<Endpoint::Impl::Entry> Endpoint::Impl::find(std::string_view id) const {
+std::shared_ptr<Endpoint::Impl::Entry> Endpoint::Impl::find(std::string_view id) {
     std::lock_guard lock(mutex);
     const auto found = by_id.find(id);
-    return found == by_id.end() ? nullptr : found->second;
+    if (found == by_id.end()) return nullptr;
+    // From its first request after the handshake on, a session never gives its place to a newcomer. Constant work:
+    // only that first request takes it off the list.
+    Entry& entry = *found->second;
+    if (!entry.used) {
+        entry.used = true;
+        unlist(entry);
+    }
+    return found->second;
+}
+
+void Endpoint::Impl::unlist(Entry& entry) {
+    if (entry.unused_place) {
+        unused.erase(*entry.unused_place);
+        entry.unused_place.reset();
+    }
+    if (entry.unused_timer != 0) timer.cancel(entry.unused_timer);
+    entry.unused_timer = 0;
+}
+
+Endpoint::Impl::Ended Endpoint::Impl::end_unused(Entry& entry) {
+    unlist(entry);
+    by_id.erase(entry.id);
+    live.erase(entry.serial);
+    std::lock_guard lock(entry.mutex);
+    if (entry.closed.load()) return {};
+    entry.closed = true;
+    if (entry.idle_timer != 0) timer.cancel(entry.idle_timer);
+    entry.idle_timer = 0;
+    return Ended{entry.session, std::move(entry.connection_stream)};
+}
+
+void Endpoint::Impl::expire_unused(const std::shared_ptr<Entry>& entry) {
+    Ended ended;
+    {
+        std::lock_guard table(mutex);
+        entry->unused_timer = 0;  // this is its job
+        if (stopping.load() || entry->used || !entry->unused_place) return;
+        ended = end_unused(*entry);
+    }
+    if (ended.session) ended.session->close();
+    if (ended.stream) ended.stream->end();
 }
 
 void Endpoint::Impl::forget(const Entry& entry) {
@@ -864,6 +946,7 @@ void Endpoint::Impl::expire(const std::shared_ptr<Entry>& entry, std::uint64_t g
         session = entry->session;
         by_id.erase(entry->id);
         live.erase(entry->serial);
+        unlist(*entry);
     }
     if (session) session->close();
 }
@@ -1154,6 +1237,9 @@ void Endpoint::Impl::stop() noexcept {
         for (auto& item : live) entries.push_back(std::move(item.second));
         live.clear();
         by_id.clear();
+        // The timer's jobs are dropped below; a job that runs meanwhile finds `stopping` and leaves.
+        for (const auto& listed : unused) listed->unused_place.reset();
+        unused.clear();
     }
     for (const auto& entry : entries) {
         std::shared_ptr<Session> session;
@@ -1195,6 +1281,9 @@ Outcome<std::unique_ptr<Endpoint>> Endpoint::create(Server& server, HostPolicy p
     if (options.max_sessions < 1) return Result::failure("max_sessions must be at least 1");
     if (options.session_idle_timeout <= std::chrono::milliseconds::zero()) {
         return Result::failure("session_idle_timeout must be positive");
+    }
+    if (options.unused_session_timeout <= std::chrono::milliseconds::zero()) {
+        return Result::failure("unused_session_timeout must be positive");
     }
     if (options.stream_after <= std::chrono::milliseconds::zero()) return Result::failure("stream_after must be positive");
     if (options.max_stream_buffer_bytes < 1) return Result::failure("max_stream_buffer_bytes must be at least 1");
