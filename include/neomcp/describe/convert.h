@@ -292,6 +292,7 @@ T decode(const json& value, const PathNode* path) {
         if (!value.is_string()) {
             fail(path, "string");
         }
+        static_assert(unique_enum_names(DescribedEnum<T>::values), "neomcp: two enumerators of a described enum have the same name");
         const std::string& name = *value.get_ptr<const std::string*>();
         for (const auto& entry : DescribedEnum<T>::values) {
             if (entry.name == name) {
@@ -301,6 +302,7 @@ T decode(const json& value, const PathNode* path) {
         fail(path, enumerator_list<T>());
     } else if constexpr (kind == Kind::object) {
         static_assert(std::is_default_constructible_v<T>, "neomcp: a described struct must be default constructible to be decoded");
+        static_assert(unique_names(Described<T>::fields), "neomcp: two members of a described struct have the same name");
         if (!value.is_object()) {
             fail(path, "object");
         }
@@ -372,6 +374,7 @@ json encode(const T& value) {
         }
         return result;
     } else if constexpr (kind == Kind::enumeration) {
+        static_assert(unique_enum_names(DescribedEnum<T>::values), "neomcp: two enumerators of a described enum have the same name");
         for (const auto& entry : DescribedEnum<T>::values) {
             if (entry.value == value) {
                 return json(std::string(entry.name));
@@ -379,6 +382,7 @@ json encode(const T& value) {
         }
         throw std::invalid_argument("neomcp: the enum value has no declared name");
     } else if constexpr (kind == Kind::object) {
+        static_assert(unique_names(Described<T>::fields), "neomcp: two members of a described struct have the same name");
         json result = json::object();
         std::apply([&](const auto&... item) { (encode_member(result, value, item), ...); }, Described<T>::fields.items);
         return result;
