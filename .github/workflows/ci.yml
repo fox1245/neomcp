@@ -8,6 +8,8 @@ name: CI
 # project) and run once: on Linux with Clang, and on Windows with MSVC, where the HTTP server's SIGTERM check is left out.
 # One more job checks the translation of regular expressions for the schema keyword `pattern` against V8: Node writes
 # patterns with the answers of V8, and a test executable compares the validator with them.
+# One more job compares the wire data of every profile in profiles/ with the schema the protocol's specification
+# publishes, read at the one commit that NOTICE names.
 
 on:
   push:
@@ -228,3 +230,40 @@ jobs:
       # Not run here: check_http.py ends the server with SIGTERM, which Python cannot send to a process on Windows
       # (terminate() there kills it without letting it exit by itself). The HTTP server is compiled and linked above,
       # and the listener's own tests run in the windows jobs of the main build.
+
+  profile-wire:
+    name: profile-wire
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      # The one place the specification's commit is named here. It must be the commit NOTICE gives.
+      SPEC_COMMIT: d4b317231161ee96d3eefb2448bda4230c76f4c6
+      SPEC_REPOSITORY: https://github.com/modelcontextprotocol/modelcontextprotocol.git
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The pinned commit is the one NOTICE names
+        run: grep -F "$SPEC_COMMIT" NOTICE
+      - name: Fetch the schema folder of the specification at the pinned commit
+        run: |
+          git clone --quiet --filter=blob:none --sparse --no-checkout "$SPEC_REPOSITORY" "$RUNNER_TEMP/spec"
+          git -C "$RUNNER_TEMP/spec" sparse-checkout set --no-cone /schema/
+          git -C "$RUNNER_TEMP/spec" checkout --quiet "$SPEC_COMMIT"
+          test "$(git -C "$RUNNER_TEMP/spec" rev-parse HEAD)" = "$SPEC_COMMIT"
+      - name: The wire data of each profile matches the schema of its revision
+        run: |
+          status=0
+          for profile in profiles/*.json; do
+            revision="$(basename "$profile" .json)"
+            schema="$RUNNER_TEMP/spec/schema/$revision/schema.json"
+            if [ ! -f "$schema" ]; then
+              echo "::error file=$profile::the specification has no $schema"
+              status=1
+              continue
+            fi
+            if python3 -I tools/profile_wire.py "$schema" --check "$profile"; then
+              echo "$profile matches schema/$revision/schema.json"
+            else
+              status=1
+            fi
+          done
+          exit "$status"
