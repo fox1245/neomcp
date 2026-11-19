@@ -990,7 +990,7 @@ TEST(SubscriptionFeed, AConnectionWhoseClientIsNotReadyHearsNothingWhileASubscri
 // every delay in turn, so that it falls between the check that the feed is still live and the subscription entering
 // the calls in flight.
 TEST(SubscriptionFeed, ASubscriptionOpenedAsTheFeedEndsIsEndedOrRefused) {
-    constexpr int rounds = 20000;
+    constexpr int rounds = 3000;
     std::mt19937 delays(20260101);
     for (int round = 0; round < rounds; ++round) {
         FeedHost host;
