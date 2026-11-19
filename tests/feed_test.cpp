@@ -510,6 +510,69 @@ TEST(ConnectionFeed, AConnectionWatchesNoMoreResourcesThanTheBound) {
     EXPECT_EQ(client.result("resources/subscribe", json{{"uri", "test://item/1"}}), json::object());
 }
 
+// A URI the template "test://item/{id}" matches, `length` bytes long.
+std::string item_uri(std::size_t length, char fill = '7') {
+    const std::string prefix = "test://item/";
+    return prefix + std::string(length - prefix.size(), fill);
+}
+
+bool refused_for_bound(const json& answer) {
+    return answer.contains("error") && answer.at("error").at("code") == neomcp::error_code::internal_error &&
+           answer.at("error").at("data") == json{{"reason", "limit"}};
+}
+
+TEST(ConnectionFeed, AWatchedUriIsBoundedInLengthAndALongerOneIsNotRepeated) {
+    FeedHost host;
+    neomcp::SessionOptions options = options_for(legacy_revision);
+    constexpr std::size_t bound = 64;
+    options.max_watched_uri_bytes = bound;
+    Client client(host, legacy_revision, std::move(options));
+    EXPECT_EQ(client.result("resources/subscribe", json{{"uri", item_uri(bound)}}), json::object()) << "at the bound";
+    const std::string longer = item_uri(bound + 1, '8');
+    const json refused = client.request("resources/subscribe", json{{"uri", longer}});
+    EXPECT_TRUE(refused_for_bound(refused)) << refused.dump();
+    EXPECT_EQ(refused.dump().find(longer), std::string::npos) << "the answer repeats the URI";
+    // A URI that long names no resource either, and is still refused for its length, without its text.
+    const std::string missing = "test://missing/" + std::string(1000, 'm');
+    const json unknown = client.request("resources/subscribe", json{{"uri", missing}});
+    EXPECT_TRUE(refused_for_bound(unknown)) << unknown.dump().substr(0, 300);
+    EXPECT_EQ(unknown.dump().find(missing), std::string::npos);
+    // Unwatching one changes nothing, as for any URI not watched.
+    EXPECT_EQ(client.result("resources/unsubscribe", json{{"uri", longer}}), json::object());
+    host.report(neomcp::ChangeKind::resource_updated, longer);
+    host.report(neomcp::ChangeKind::resource_updated, item_uri(bound));
+    EXPECT_EQ(client.peer.next_notification(patience), updated(item_uri(bound))) << "only the URI at the bound";
+}
+
+TEST(ConnectionFeed, TheBytesOfTheWatchedUrisAreBoundedAndAnUnsubscribeGivesThemBack) {
+    FeedHost host;
+    neomcp::SessionOptions options = options_for(legacy_revision);
+    constexpr std::size_t uri_bytes = 40;
+    constexpr std::size_t fit = 3;
+    options.max_watched_bytes = fit * uri_bytes;  // three URIs of 40 bytes exactly
+    Client client(host, legacy_revision, std::move(options));
+    std::vector<std::string> uris;
+    for (char fill : {'1', '2', '3', '4'}) uris.push_back(item_uri(uri_bytes, fill));
+    for (std::size_t i = 0; i < fit; ++i) {
+        EXPECT_EQ(client.result("resources/subscribe", json{{"uri", uris[i]}}), json::object()) << i;
+    }
+    EXPECT_TRUE(refused_for_bound(client.request("resources/subscribe", json{{"uri", uris[fit]}})))
+        << "one byte past the bound";
+    EXPECT_TRUE(refused_for_bound(client.request("resources/subscribe", json{{"uri", "test://item/9"}})))
+        << "a short URI does not fit either";
+    EXPECT_EQ(client.result("resources/subscribe", json{{"uri", uris[0]}}), json::object())
+        << "a URI watched already takes no more room";
+    // An unsubscribe gives its bytes back, again and again.
+    for (int turn = 0; turn < 3; ++turn) {
+        SCOPED_TRACE(turn);
+        EXPECT_EQ(client.result("resources/unsubscribe", json{{"uri", uris[1]}}), json::object());
+        EXPECT_EQ(client.result("resources/subscribe", json{{"uri", uris[fit]}}), json::object());
+        EXPECT_TRUE(refused_for_bound(client.request("resources/subscribe", json{{"uri", uris[1]}})));
+        EXPECT_EQ(client.result("resources/unsubscribe", json{{"uri", uris[fit]}}), json::object());
+        EXPECT_EQ(client.result("resources/subscribe", json{{"uri", uris[1]}}), json::object());
+    }
+}
+
 TEST(ConnectionFeed, WithoutUpdatesReportedWatchingIsNotOffered) {
     FeedHost host(neomcp::ChangeSupport{true, true, true, false});
     Client client(host, legacy_revision);
@@ -835,6 +898,46 @@ TEST(SubscriptionFeed, TheBoundsOfASessionAreKept) {
     client.peer.notify(Peer::make_request(*client.profile, 3, "subscriptions/listen",
                                           listen_params({{"toolsListChanged", true}})));
     EXPECT_EQ(client.peer.next_notification(patience), acknowledged(3, {{"toolsListChanged", true}}));
+}
+
+TEST(SubscriptionFeed, TheUrisOfASubscriptionAreBoundedInLengthAndInBytes) {
+    FeedHost host;
+    neomcp::SessionOptions options = options_for(modern_revision);
+    constexpr std::size_t uri_bytes = 40;
+    options.max_watched_uri_bytes = uri_bytes;
+    options.max_watched_bytes = 2 * uri_bytes;
+    Client client(host, modern_revision, std::move(options));
+    const std::string longer = item_uri(uri_bytes + 1);
+    for (const json& filter : {json{{"resourceSubscriptions", {longer}}},
+                               json{{"resourceSubscriptions",
+                                     {item_uri(uri_bytes, '1'), item_uri(uri_bytes, '2'), "test://item/3"}}}}) {
+        const json refused = client.request("subscriptions/listen", listen_params(filter));
+        ASSERT_TRUE(refused.contains("error")) << refused.dump();
+        EXPECT_EQ(refused.at("error").at("code"), neomcp::error_code::invalid_params);
+        EXPECT_EQ(refused.dump().find(longer), std::string::npos) << "the answer repeats the URI";
+    }
+    EXPECT_EQ(host.watchers(), 0u) << "a refused subscription registers nothing";
+    // At both bounds exactly.
+    json fit = json::array();
+    fit.push_back(item_uri(uri_bytes, '1'));
+    fit.push_back(item_uri(uri_bytes, '2'));
+    client.peer.notify(
+        Peer::make_request(*client.profile, 5, "subscriptions/listen", listen_params({{"resourceSubscriptions", fit}})));
+    EXPECT_EQ(client.peer.next_notification(patience), acknowledged(5, {{"resourceSubscriptions", fit}}));
+}
+
+TEST(FeedBounds, ASessionIsNotCreatedWithAZeroByteBound) {
+    FeedHost host;
+    for (int which = 0; which < 2; ++which) {
+        neomcp::SessionOptions options = options_for(legacy_revision);
+        if (which == 0) options.max_watched_uri_bytes = 0;
+        if (which == 1) options.max_watched_bytes = 0;
+        auto made = neomcp::Session::create(std::move(options), host, [](std::string) {});
+        ASSERT_TRUE(std::holds_alternative<neomcp::CreateError>(made)) << which;
+        const std::string& message = std::get<neomcp::CreateError>(made).message;
+        EXPECT_NE(message.find(which == 0 ? "max_watched_uri_bytes" : "max_watched_bytes"), std::string::npos)
+            << message;
+    }
 }
 
 TEST(SubscriptionFeed, TheNotificationsOfACallNeverGoToASubscription) {
