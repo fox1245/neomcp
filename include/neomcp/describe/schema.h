@@ -202,28 +202,28 @@ void add_property(json& properties, json& required, const F& item) {
 // Appends the marks (neomcp::mirror_in_header) of the described struct T and of the described structs its members
 // hold, with the members that lead to each.
 template <class T>
-void collect_header_marks(std::vector<std::string>& path, std::vector<HeaderMark>& out);
+void collect_header_marks(std::vector<std::string>& member_path, std::vector<HeaderMark>& out);
 
 // Only the option that marks a parameter leaves a mark.
 template <class Option>
 void note_mark(const Option&, const std::vector<std::string>&, std::vector<HeaderMark>&) {}
 
-inline void note_mark(const HeaderName& option, const std::vector<std::string>& path, std::vector<HeaderMark>& out) {
-    out.push_back(HeaderMark{path, std::string(option.name)});
+inline void note_mark(const HeaderName& option, const std::vector<std::string>& member_path, std::vector<HeaderMark>& out) {
+    out.push_back(HeaderMark{member_path, std::string(option.name)});
 }
 
 template <class T, class F>
-void collect_field_marks(std::vector<std::string>& path, std::vector<HeaderMark>& out, const F& item) {
+void collect_field_marks(std::vector<std::string>& member_path, std::vector<HeaderMark>& out, const F& item) {
     using Core = optional_core_t<typename F::member_type>;
-    path.emplace_back(item.name);
-    std::apply([&](const auto&... option) { (note_mark(option, path, out), ...); }, item.options);
-    if constexpr (described<Core> && !has_custom_schema<Core>) collect_header_marks<Core>(path, out);
-    path.pop_back();
+    member_path.emplace_back(item.name);
+    std::apply([&](const auto&... option) { (note_mark(option, member_path, out), ...); }, item.options);
+    if constexpr (described<Core> && !has_custom_schema<Core>) collect_header_marks<Core>(member_path, out);
+    member_path.pop_back();
 }
 
 template <class T>
-void collect_header_marks(std::vector<std::string>& path, std::vector<HeaderMark>& out) {
-    std::apply([&](const auto&... item) { (collect_field_marks<T>(path, out, item), ...); }, Described<T>::fields.items);
+void collect_header_marks(std::vector<std::string>& member_path, std::vector<HeaderMark>& out) {
+    std::apply([&](const auto&... item) { (collect_field_marks<T>(member_path, out, item), ...); }, Described<T>::fields.items);
 }
 
 template <class T>
@@ -248,9 +248,9 @@ json object_schema() {
 template <class T>
 std::vector<HeaderMark> header_marks_of() {
     static_assert(described<T>, "neomcp: header_marks_of needs a described struct");
-    std::vector<std::string> path;
+    std::vector<std::string> member_path;
     std::vector<HeaderMark> marks;
-    detail::collect_header_marks<T>(path, marks);
+    detail::collect_header_marks<T>(member_path, marks);
     return marks;
 }
 
