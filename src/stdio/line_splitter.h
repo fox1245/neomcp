@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstddef>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -12,7 +13,8 @@ namespace neomcp::detail {
 // sees it is too long, and the rest of it is skipped without being stored.
 class LineSplitter {
 public:
-    explicit LineSplitter(std::size_t max_line_bytes) : keep_(max_line_bytes + 1) {}
+    explicit LineSplitter(std::size_t max_line_bytes)
+        : keep_(max_line_bytes == std::numeric_limits<std::size_t>::max() ? max_line_bytes : max_line_bytes + 1) {}
 
     // Calls `on_line(std::string_view)` for each complete line of `chunk`, in order. The view is valid during the call.
     template <class OnLine>
