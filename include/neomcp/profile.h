@@ -225,6 +225,13 @@ public:
     const Type* type(std::string_view name) const;
     const Union* union_type(std::string_view name) const;
 
+    // Whether an error response of the revision may leave out `id`, as an answer to a message whose id could not be
+    // read must when the revision's types allow it: the types list at least one type that has the JSON-RPC members
+    // `error` and `id`, and none of them requires `id`. False when a revision requires `id` in its error responses
+    // (the answer then carries `id` as null, the one form JSON-RPC itself prescribes), and false when the types list no
+    // such type.
+    bool error_response_may_omit_id() const;
+
 private:
     friend class ProfileLoader;
     Profile() = default;

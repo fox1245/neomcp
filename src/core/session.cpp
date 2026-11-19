@@ -513,8 +513,16 @@ private:
     // Queues an output and drains; when it is dropped, tells the idle callback what a drain would have told it.
     void push(std::unique_lock<std::mutex>& lock, Queued queued, Writer writer);
     void emit(Queued queued, Writer writer);
-    void emit_answer(Answer answer, const Unit& unit, Writer writer);
-    void emit_refusal(const Unit& unit, int code, std::string message, RefusalReason reason);
+    void emit_answer(Answer answer, const Unit& unit, const Claims& claims, Writer writer);
+    void emit_refusal(const Unit& unit, const Claims& claims, int code, std::string message, RefusalReason reason);
+    // The profile of the client that sent what is being answered, as far as it is known: the connection's, else the
+    // unit's, else the one its version header names; null when none is.
+    profile::ProfilePtr client_profile(const Unit& unit, const Claims* claims) const;
+    // Leaves `id` out of an error answer that has none to give where the client's revision allows it: an answer to
+    // what could not be read has `id` null otherwise, which the revisions' schemas do not allow either, but which is the
+    // form JSON-RPC prescribes. When the client's revision is not known the member is left out only if every served
+    // revision allows it.
+    void conform_id(json& message, const profile::ProfilePtr& client) const;
     // Ends a unit that awaits no answer.
     void end_unit(const Unit& unit, Writer writer);
     void drain(std::unique_lock<std::mutex>& lock, Writer writer);
@@ -821,14 +829,14 @@ bool SessionCore::receive(std::optional<UnitId> number, std::string_view input,
 
 bool SessionCore::read(std::string_view line, const Unit& unit, const Claims& claims) {
     if (line.size() > options_.max_message_bytes) {
-        emit_refusal(unit, error_code::invalid_request,
+        emit_refusal(unit, claims, error_code::invalid_request,
                      "Invalid Request: the message is longer than " + std::to_string(options_.max_message_bytes) +
                          " bytes",
                      RefusalReason::too_long);
         return true;
     }
     if (nesting_exceeds(line, options_.max_nesting_depth)) {
-        emit_refusal(unit, error_code::invalid_request,
+        emit_refusal(unit, claims, error_code::invalid_request,
                      "Invalid Request: the message nests deeper than " + std::to_string(options_.max_nesting_depth) +
                          " levels",
                      RefusalReason::too_deep);
@@ -836,13 +844,13 @@ bool SessionCore::read(std::string_view line, const Unit& unit, const Claims& cl
     }
     json value = json::parse(line, nullptr, false);
     if (value.is_discarded()) {
-        emit_refusal(unit, error_code::parse_error, "Parse error", RefusalReason::parse_error);
+        emit_refusal(unit, claims, error_code::parse_error, "Parse error", RefusalReason::parse_error);
         return true;
     }
     if (value.is_array()) return receive_array(std::move(value), unit, claims);
     Handled handled = handle(std::move(value), Place{unit, nullptr, 0, &claims});
     if (handled.answer) {
-        emit_answer(std::move(*handled.answer), unit, Writer::reader);
+        emit_answer(std::move(*handled.answer), unit, claims, Writer::reader);
         return true;
     }
     return handled.later;
@@ -851,7 +859,7 @@ bool SessionCore::read(std::string_view line, const Unit& unit, const Claims& cl
 bool SessionCore::receive_array(json value, const Unit& unit, const Claims& claims) {
     // The headers belong to the whole batch.
     if (auto refusal = version_refusal(claims, std::nullopt)) {
-        emit_answer(std::move(*refusal), unit, Writer::reader);
+        emit_answer(std::move(*refusal), unit, claims, Writer::reader);
         return true;
     }
     const BatchMechanism* mechanism = nullptr;
@@ -864,13 +872,13 @@ bool SessionCore::receive_array(json value, const Unit& unit, const Claims& clai
         }
     }
     if (mechanism == nullptr || !mechanism->accepts_arrays()) {
-        emit_refusal(unit, error_code::invalid_request, "Invalid Request: this connection does not accept batches",
+        emit_refusal(unit, claims, error_code::invalid_request, "Invalid Request: this connection does not accept batches",
                      RefusalReason::invalid_request);
         return true;
     }
     auto& items = *value.get_ptr<json::array_t*>();
     if (items.empty()) {
-        emit_refusal(unit, error_code::invalid_request, "Invalid Request: the batch is empty",
+        emit_refusal(unit, claims, error_code::invalid_request, "Invalid Request: the batch is empty",
                      RefusalReason::invalid_request);
         return true;
     }
@@ -889,6 +897,7 @@ bool SessionCore::receive_array(json value, const Unit& unit, const Claims& clai
         Handled handled = handle(std::move(items[i]), Place{unit, batch, i, &claims});
         if (handled.answer || handled.later) awaits = true;
         if (handled.answer) {
+            conform_id(handled.answer->message, profile);
             const std::lock_guard<std::mutex> lock(mutex_);
             batch->responses[i] = std::move(handled.answer->message);
         }
@@ -2759,15 +2768,41 @@ void SessionCore::emit(Queued queued, Writer writer) {
     push(lock, std::move(queued), writer);
 }
 
-void SessionCore::emit_answer(Answer answer, const Unit& unit, Writer writer) {
+profile::ProfilePtr SessionCore::client_profile(const Unit& unit, const Claims* claims) const {
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        if (connection_) return connection_->served->profile;
+        if (unit && unit->profile) return unit->profile;
+    }
+    if (claims != nullptr && claims->named != nullptr) return claims->named->profile;
+    return nullptr;
+}
+
+void SessionCore::conform_id(json& message, const profile::ProfilePtr& client) const {
+    auto* members = message.get_ptr<json::object_t*>();
+    if (members == nullptr || members->find("error") == members->end()) return;
+    const auto id = members->find("id");
+    if (id == members->end() || !id->second.is_null()) return;
+    const bool omit =
+        client ? client->error_response_may_omit_id()
+               : !served_.empty() && std::all_of(served_.begin(), served_.end(), [](const Served& served) {
+                     return served.profile->error_response_may_omit_id();
+                 });
+    if (omit) members->erase(id);
+}
+
+void SessionCore::emit_answer(Answer answer, const Unit& unit, const Claims& claims, Writer writer) {
+    conform_id(answer.message, client_profile(unit, &claims));
     emit(Queued{make_output(serialize(answer.message), OutputKind::response, unit != nullptr, answer.refusal,
                             std::move(answer.profile)),
                 nullptr, unit},
          writer);
 }
 
-void SessionCore::emit_refusal(const Unit& unit, int code, std::string message, RefusalReason reason) {
-    emit_answer(Answer{make_error(std::nullopt, code, std::move(message)), reason, nullptr}, unit, Writer::reader);
+void SessionCore::emit_refusal(const Unit& unit, const Claims& claims, int code, std::string message,
+                               RefusalReason reason) {
+    emit_answer(Answer{make_error(std::nullopt, code, std::move(message)), reason, nullptr}, unit, claims,
+                Writer::reader);
 }
 
 void SessionCore::end_unit(const Unit& unit, Writer writer) {

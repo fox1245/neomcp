@@ -815,7 +815,13 @@ TEST(Era, ArraysOutsideTheBatchRevisionAreRefused) {
         const auto answer = conversation.peer.next_other(patience);
         ASSERT_TRUE(answer);
         EXPECT_EQ(error_code_of(*answer), -32600) << answer->dump();
-        EXPECT_TRUE(answer->at("id").is_null());
+        if (revision == "2025-11-25") {
+            // Its error responses may leave the id out, and the connection says this client speaks it.
+            EXPECT_FALSE(answer->contains("id"));
+        } else {
+            // The others require it, or open no connection that says which revision the client speaks.
+            EXPECT_TRUE(answer->at("id").is_null());
+        }
     }
     FakeHost host;
     Peer peer(host, test_options());
@@ -3137,12 +3143,13 @@ TEST(Headers, OnAnOpenedConnectionAnyServedRevisionIsAccepted) {
     EXPECT_EQ(refused.refusal, neomcp::RefusalReason::unsupported_version_header);
     EXPECT_EQ(error_code_of(message_of(refused)), -32022) << "the code of the newest revision that defines it";
 
-    // A notification alone is refused the same way, with an error that has no id; one the header allows is taken.
+    // A notification alone is refused the same way, with an error that has no id (the connection speaks 2025-11-25,
+    // whose error responses may leave the member out); one the header allows is taken.
     const json initialized = json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}};
     EXPECT_TRUE(feed(*session, 3, initialized, {{"MCP-Protocol-Version", "1999-01-01"}}));
     const neomcp::Output notification = only_output(recorder, 3);
     EXPECT_EQ(notification.refusal, neomcp::RefusalReason::unsupported_version_header);
-    EXPECT_TRUE(message_of(notification).at("id").is_null());
+    EXPECT_FALSE(message_of(notification).contains("id"));
     EXPECT_FALSE(feed(*session, 4, initialized, {{"MCP-Protocol-Version", "2025-11-25"}}));
     EXPECT_EQ(only_output(recorder, 4).kind, neomcp::OutputKind::end);
 }

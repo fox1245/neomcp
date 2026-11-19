@@ -66,6 +66,19 @@ bool Type::is_required(std::string_view property) const {
     return std::binary_search(required.begin(), required.end(), property);
 }
 
+bool Profile::error_response_may_omit_id() const {
+    // The members of a JSON-RPC error response (JSON-RPC 2.0, section 5.1), not data of a revision.
+    constexpr std::string_view error_member = "error";
+    constexpr std::string_view id_member = "id";
+    bool any = false;
+    for (const Type& type : types_) {
+        if (!type.has_property(error_member) || !type.has_property(id_member)) continue;
+        if (type.is_required(id_member)) return false;
+        any = true;
+    }
+    return any;
+}
+
 std::string_view Profile::mechanism(Slot slot) const noexcept {
     return mechanisms_[static_cast<std::size_t>(slot)];
 }

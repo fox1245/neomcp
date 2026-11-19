@@ -100,6 +100,12 @@ target_link_libraries(neomcp_argument_headers_test PRIVATE neomcp::server GTest:
 neomcp_configure_target(neomcp_argument_headers_test)
 gtest_discover_tests(neomcp_argument_headers_test DISCOVERY_TIMEOUT 120)
 
+# The id of an error answer to a message whose id could not be read, in every revision.
+add_executable(neomcp_error_id_test error_id_test.cpp)
+target_link_libraries(neomcp_error_id_test PRIVATE neomcp::core GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_error_id_test)
+gtest_discover_tests(neomcp_error_id_test DISCOVERY_TIMEOUT 120)
+
 add_executable(neomcp_server_features_test server_features_test.cpp)
 target_link_libraries(neomcp_server_features_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
 neomcp_configure_target(neomcp_server_features_test)
