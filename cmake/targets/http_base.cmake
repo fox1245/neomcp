@@ -1,14 +1,16 @@
-# What an HTTP client needs as well as an HTTP server, and nothing that serves: the header collection and the request
-# and response model, media types, the server-sent events writer, the parsers for an authority and an origin with the
-# strict IP text grammar they use, and (as a header only) the random source under the names of the HTTP blocks. It
-# knows nothing of the protocol and does not use the HTTP library; neomcp::http, which serves, links it.
+# What an HTTP client needs as well as an HTTP server, and nothing that serves: the header collection, media types, the
+# server-sent events writer, the parsers for an authority and an origin with the strict IP text grammar they use, and
+# (as a header only) the random source under the names of the HTTP blocks. It knows nothing of the protocol and does
+# not use the HTTP library; neomcp::http, which serves, links it.
 #
-# The headers of this target are in include/neomcp/http/ beside those of neomcp::http. message.h includes body_stream.h
-# (the stream a server fills while it answers) for the type of Response::stream, and policy.h declares the host policy
-# next to the authority parser; both are read here as headers, and the code behind body_stream.h and the host policy
-# is in neomcp::http.
+# The headers of this target are in include/neomcp/http/ beside those of neomcp::http. The request and response model
+# and the responder (message.h, with its code) belong to the server and are built in neomcp::http; the header
+# collection they use is declared in headers.h and built here. policy.h declares the host policy next to the origin
+# parser, and includes message.h and so body_stream.h (the stream a server fills while it answers); the source of the
+# origin parser reads policy.h as a header, and the code behind body_stream.h, the responder and the host policy is in
+# neomcp::http.
 add_library(neomcp_http_base
-    src/http_base/message.cpp
+    src/http_base/headers.cpp
     src/http_base/sse.cpp
     src/http_base/media_type.cpp
     src/http_base/authority.cpp)

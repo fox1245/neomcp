@@ -3,6 +3,8 @@
 // Nothing here depends on an HTTP library or on a socket. A listener turns what it receives into a Request and hands
 // it, with a Responder, to a Handler; the answer is whatever the handler completes the Responder with. The same
 // Handler can therefore be driven by this library's listener, by a test, or by another HTTP server.
+//
+// The header collection, Headers, is declared in neomcp/http/headers.h, which this header includes.
 #pragma once
 
 #include <cstddef>
@@ -15,49 +17,9 @@
 #include <vector>
 
 #include "neomcp/http/body_stream.h"
+#include "neomcp/http/headers.h"
 
 namespace neomcp::http {
-
-// True when the two strings are equal after folding ASCII letters to one case. Header field names compare this way.
-bool equal_ignoring_case(std::string_view left, std::string_view right) noexcept;
-
-// Header fields in the order they were added. Names compare without regard to ASCII case; values are kept as given.
-class Headers {
-public:
-    struct Field {
-        std::string name;
-        std::string value;
-    };
-
-    Headers() = default;
-    Headers(std::initializer_list<Field> fields);
-
-    // Appends a field. A name may occur more than once.
-    Headers& add(std::string name, std::string value);
-
-    // Replaces every field of that name by one with the new value, at the position of the first; appends when there
-    // is none.
-    Headers& set(std::string name, std::string value);
-
-    // Removes every field of that name and returns how many there were.
-    std::size_t remove(std::string_view name);
-
-    // The value of the first field of that name. The view stays valid until the headers are changed.
-    std::optional<std::string_view> get(std::string_view name) const noexcept;
-
-    // The values of every field of that name, in order. Views as for get().
-    std::vector<std::string_view> get_all(std::string_view name) const;
-
-    std::size_t count(std::string_view name) const noexcept;
-    bool contains(std::string_view name) const noexcept { return count(name) > 0; }
-
-    const std::vector<Field>& fields() const noexcept { return fields_; }
-    std::size_t size() const noexcept { return fields_.size(); }
-    bool empty() const noexcept { return fields_.empty(); }
-
-private:
-    std::vector<Field> fields_;
-};
 
 struct Request {
     std::string method;              // as received, e.g. "POST"

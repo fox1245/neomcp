@@ -1,6 +1,6 @@
 #include "neomcp/http/sse.h"
 
-#include "neomcp/http/message.h"
+#include "neomcp/http/headers.h"
 
 namespace neomcp::http {
 

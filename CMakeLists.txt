@@ -218,6 +218,7 @@ include(cmake/NeomcpHttplib.cmake)
 
 add_library(neomcp_http
     src/http/body_stream.cpp
+    src/http/message.cpp
     src/http/policy.cpp
     src/http/listener.cpp
     src/http/timer.cpp

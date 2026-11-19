@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 
-#include "neomcp/http/message.h"
+#include "neomcp/http/headers.h"
 
 namespace neomcp::http {
 
