@@ -48,6 +48,8 @@ Still planned:
 - The client.
 - Authorization.
 
+[ROADMAP.md](ROADMAP.md) lists the work that is in progress and the work that has not been started.
+
 ## Build
 
 Requirements: CMake 3.22 or newer, a C++20 compiler, and network access at configure time (the pinned
