@@ -131,6 +131,8 @@
 // sends requests (2025-11-25 and earlier), the session sends them on the call's stream and waits at most
 // ServerOptions::input_timeout per round and max_input_rounds rounds. Before asking, Context::client_supports tells
 // whether the client can take a request; asking for one it cannot take fails the call as the revision prescribes.
+// Answers that come without any state are taken, each read as the kind of answer its members make it, unless
+// ServerOptions::answers_need_state says to drop them; a handler that gets them has no state of its own.
 //
 // Changes while serving. Registration ends when the server serves, but every tool, resource, template and prompt can be
 // switched off and on again at any time, from any thread, a handler included:
@@ -261,6 +263,10 @@ struct ServerOptions {
     StateClock clock{};
     // Told why a state was refused, for the server's log; the client only learns that it was.
     RequestStateDiagnostic on_request_state_rejected{};
+    // Where the state travels sealed: whether answers that come without any state are dropped (on), so that the
+    // handler asks again, instead of taken (off, the default). Taken answers are each read as the kind of answer
+    // their members make them (see SessionOptions); a state that comes is verified either way.
+    bool answers_need_state = SessionDefaults::answers_need_state;
     // The most bytes the state of a call with declared inputs may hold (neomcp/server/inputs.h): the outcomes of its
     // earlier rounds, as JSON text. A round that would need more ends the call with Invalid params; nothing is dropped.
     // Zero is an error. Default 64 KiB.

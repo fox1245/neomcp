@@ -53,7 +53,9 @@
 // Only the last round's answers come with a call; the outcomes of earlier rounds, accepted values included, are kept in
 // the call's state, each with a digest of the question it answers. The state is the handler's own (where the result
 // asks it travels sealed, see neomcp/server.h); it holds at most ServerOptions::max_declared_state_bytes, and a round
-// that would need more ends the call with Invalid params (nothing is dropped).
+// that would need more ends the call with Invalid params (nothing is dropped). A call that comes back with answers
+// and without any state (see ServerOptions::answers_need_state) has no earlier rounds: its answers count for the
+// questions as they are now.
 //
 // Everything below the public declarations is detail of neomcp/server.h.
 #pragma once
@@ -320,6 +322,7 @@ private:
 
     const Context& context_;
     std::size_t max_state_bytes_;
+    bool stateless_ = false;  // the call came with answers and without a state
     std::map<std::string, std::string> asked_before_;  // key -> digest of the question asked in the round before
     std::map<std::string, Recorded> recorded_;         // the outcomes the state recorded
     std::map<std::string, Recorded> kept_;             // the outcomes this round records

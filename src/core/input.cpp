@@ -1,5 +1,6 @@
 #include "core/input.h"
 
+#include <algorithm>
 #include <initializer_list>
 #include <span>
 #include <type_traits>
@@ -20,6 +21,18 @@ constexpr std::string_view form_params_type = "ElicitRequestFormParams";
 constexpr std::string_view url_params_type = "ElicitRequestURLParams";
 // The union of the blocks a sampling message holds as an array, where a revision allows an array.
 constexpr std::string_view sampling_blocks_union = "SamplingMessageContentBlock";
+
+// The result type of each request a server asks with. The wire tables list the types and what each requires, but do
+// not say which request a result type answers: that link is the specification's, and this is it.
+struct ResultTypeOf {
+    std::string_view method;
+    std::string_view type;
+};
+constexpr ResultTypeOf result_types[] = {
+    {elicit_method, "ElicitResult"},
+    {sampling_method, "CreateMessageResult"},
+    {roots_method, "ListRootsResult"},
+};
 
 constexpr std::string_view elicitation_capability = "elicitation";
 constexpr std::string_view form_capability = "form";
@@ -379,6 +392,23 @@ bool input_supported(const InputRequest& request, const json& capabilities, cons
                      const InputMechanism& mechanism) {
     return std::holds_alternative<json>(write(request, profile, mechanism, false)) &&
            capabilities_declare(request, capabilities);
+}
+
+std::optional<std::string_view> answer_method(const json& result, const profile::Profile& profile,
+                                              const InputMechanism& mechanism) {
+    if (!result.is_object()) return std::nullopt;
+    std::optional<std::string_view> fitting;
+    for (const ResultTypeOf& entry : result_types) {
+        if (!mechanism.carries(profile, entry.method)) continue;
+        const profile::Type* type = profile.type(entry.type);
+        if (type == nullptr) continue;
+        const bool fits = std::all_of(type->required.begin(), type->required.end(),
+                                      [&](const std::string& required) { return member(result, required) != nullptr; });
+        if (!fits) continue;
+        if (fitting) return std::nullopt;  // the answer of two kinds of request: of none
+        fitting = entry.method;
+    }
+    return fitting;
 }
 
 std::variant<InputResponse, std::string> read_answer(std::string_view method, const json& result) {

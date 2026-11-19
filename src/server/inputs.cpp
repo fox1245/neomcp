@@ -186,7 +186,11 @@ void prepare_inputs(std::span<DeclaredInput> inputs, const std::string& label, c
 InputRound::InputRound(const Context& context, std::size_t max_state_bytes)
     : context_(context), max_state_bytes_(max_state_bytes) {
     const std::optional<std::string>& state = context.request_state();
-    if (!state) return;  // no earlier rounds
+    if (!state) {
+        // No state: no earlier rounds, and the answers that came answer the questions as they are now.
+        stateless_ = !context.input_responses().empty();
+        return;
+    }
     // Only this layer writes the state of a call with declared inputs, and it comes back unchanged; one that cannot be
     // read (another format, say) is no earlier rounds, and the answers that came with it answer nothing.
     const json parsed = json::parse(*state, nullptr, false);
@@ -231,7 +235,7 @@ Settlement InputRound::settle(const DeclaredInput& input, InputRequest question)
     const InputResponses& responses = context_.input_responses();
     const auto given = responses.find(input.key);
     const auto before = asked_before_.find(input.key);
-    const bool this_question = before != asked_before_.end() && before->second == digest;
+    const bool this_question = stateless_ || (before != asked_before_.end() && before->second == digest);
     if (given != responses.end() && this_question) {
         InputResponse answer = given->second;
         if (!same_kind(input.kind, answer)) {

@@ -2338,7 +2338,32 @@ std::optional<Answer> SessionCore::take_retry(const Message& request, const Serv
     InputRetry& retry = std::get<InputRetry>(read);
     subject.retry = retry.responses.has_value() || retry.state.has_value();
     if (!retry.state) {
-        // Answers that no sealed state says were asked for are no answers: the host asks for what it still needs.
+        // No state says what was asked. Strict: such answers are no answers, and the host asks for what it still needs.
+        if (options_.answers_need_state || !retry.responses) return std::nullopt;
+        // Otherwise each answer reaches the host as the answer of the one kind of request its members make it; keys
+        // the host did not ask by it ignores.
+        InputResponses answers;
+        if (const auto* given = retry.responses->get_ptr<const json::object_t*>()) {
+            for (const auto& [key, value] : *given) {
+                const auto method = answer_method(value, *served.profile, *served.input);
+                auto answer = method ? read_answer(*method, value)
+                                     : std::variant<InputResponse, std::string>(
+                                           std::string("it is the answer of no request, or of more than one"));
+                if (const auto* why = std::get_if<std::string>(&answer)) {
+                    return served_answer(make_error(id, error_code::invalid_params,
+                                                    "Invalid params: the answer " + key + " in params.inputResponses is "
+                                                    "malformed: " + *why),
+                                         served);
+                }
+                answers.emplace(key, std::get<InputResponse>(std::move(answer)));
+            }
+        }
+        std::visit(
+            [&](auto& host_request) {
+                using T = std::decay_t<decltype(host_request)>;
+                if constexpr (!std::is_same_v<T, std::monostate>) host_request.input_responses = std::move(answers);
+            },
+            subject.request);
         return std::nullopt;
     }
     const auto refuse = [&](RequestStateProblem problem) {

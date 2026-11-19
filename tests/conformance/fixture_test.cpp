@@ -53,7 +53,8 @@ int not_found_code(const std::string& revision) { return revision == modern_revi
 
 // The fixture's server, listening on a free port of the loopback interface.
 struct Fixture {
-    Fixture() : server(conformance::server_options()) {
+    explicit Fixture(neomcp::ServerOptions server_options = conformance::server_options())
+        : server(std::move(server_options)) {
         conformance::register_everything(server);
         neomcp::HttpServerOptions options;
         options.endpoint.stream_after = 1h;  // a silent request is answered in JSON
@@ -936,7 +937,27 @@ TEST_F(ModernInput, TheMultiRoundCallAsksTwiceWithAStateOfEachAndThenEnds) {
     EXPECT_FALSE(asks(third.at("result")));
 }
 
-TEST_F(ModernInput, AnswersThatCameWithoutTheStateTheServerIssuedAreNotAnswers) {
+// The server whose answers without a state are dropped (ServerOptions::answers_need_state).
+neomcp::ServerOptions strict_options() {
+    neomcp::ServerOptions options = conformance::server_options();
+    options.answers_need_state = true;
+    return options;
+}
+
+// What the scenario that sends answers it was not asked for, beside the right one and without the state, sends.
+json extra_answers() {
+    return json{{"user_name", {{"action", "accept"}, {"content", {{"name", "Alice"}}}}},
+                {"unknown_extra_key", {{"action", "accept"}, {"content", {{"foo", "bar"}}}}},
+                {"another_unexpected", {{"action", "accept"}, {"content", {{"baz", 123}}}}}};
+}
+
+TEST_F(ModernInput, AnswersWithoutAStateAreTakenAndTheKeysNobodyAskedByIgnored) {
+    // The scenario that sends the right answer and extra ones, without the state: the call ends.
+    const json extra = call_tool("test_input_required_result_elicitation", json{{"inputResponses", extra_answers()}});
+    ASSERT_TRUE(extra.contains("result")) << extra.dump();
+    EXPECT_FALSE(asks(extra.at("result")));
+    EXPECT_EQ(first_text(extra.at("result")), "Hello, Alice!");
+
     // Wrong keys, no state: the call asks again, with a result and not with an error.
     const json wrong = call_tool("test_input_required_result_elicitation",
                                  json{{"inputResponses", {{"wrong_key", {{"action", "accept"}, {"content", {{"data", "wrong"}}}}}}}});
@@ -944,36 +965,52 @@ TEST_F(ModernInput, AnswersThatCameWithoutTheStateTheServerIssuedAreNotAnswers) 
     ASSERT_TRUE(asks(wrong.at("result")));
     EXPECT_TRUE(wrong.at("result").at("inputRequests").contains("user_name"));
 
-    // The right key and extra ones, no state: asks again as well, because no state says that anything was asked.
-    const json extra = call_tool(
-        "test_input_required_result_elicitation",
-        json{{"inputResponses",
-              {{"user_name", {{"action", "accept"}, {"content", {{"name", "Alice"}}}}},
-               {"unknown_extra_key", {{"action", "accept"}, {"content", {{"foo", "bar"}}}}},
-               {"another_unexpected", {{"action", "accept"}, {"content", {{"baz", 123}}}}}}}});
-    ASSERT_TRUE(extra.contains("result")) << extra.dump();
-    EXPECT_TRUE(asks(extra.at("result")));
-
     // With the state, the same extra keys are ignored and the call ends.
     const json first = call_tool("test_input_required_result_elicitation");
     const json with_state = call_tool(
         "test_input_required_result_elicitation",
-        json{{"inputResponses",
-              {{"user_name", {{"action", "accept"}, {"content", {{"name", "Alice"}}}}},
-               {"unknown_extra_key", {{"action", "accept"}, {"content", {{"foo", "bar"}}}}}}},
-             {"requestState", first.at("result").at("requestState")}});
+        json{{"inputResponses", extra_answers()}, {"requestState", first.at("result").at("requestState")}});
     ASSERT_TRUE(with_state.contains("result")) << with_state.dump();
     EXPECT_FALSE(asks(with_state.at("result")));
     EXPECT_EQ(first_text(with_state.at("result")), "Hello, Alice!");
 }
 
+TEST_F(ModernInput, AServerThatNeedsTheStateAsksAgainForAnswersWithoutIt) {
+    Fixture strict(strict_options());
+    Client asking(strict.port, modern_revision);
+    const auto tool_call = [&](const json& beside) {
+        json params = tool_params("test_input_required_result_elicitation");
+        for (const auto& item : beside.items()) params[item.key()] = item.value();
+        return asking.call("tools/call", params);
+    };
+    const json extra = tool_call(json{{"inputResponses", extra_answers()}});
+    ASSERT_TRUE(extra.contains("result")) << extra.dump();
+    EXPECT_TRUE(asks(extra.at("result"))) << "no state says what was asked";
+
+    const json wrong = tool_call(json{{"inputResponses", {{"wrong_key", {{"action", "accept"}, {"content", {{"data", "wrong"}}}}}}}});
+    ASSERT_TRUE(wrong.contains("result")) << wrong.dump();
+    EXPECT_TRUE(asks(wrong.at("result")));
+
+    // The scenario that validates answers: a number is not taken for a complete, and null is an error.
+    const json number = tool_call(json{{"inputResponses", {{"user_name", 12345}}}});
+    ASSERT_TRUE(number.contains("result")) << number.dump();
+    EXPECT_TRUE(asks(number.at("result")));
+    const json nothing = tool_call(json{{"inputResponses", nullptr}});
+    EXPECT_TRUE(nothing.contains("error")) << nothing.dump();
+
+    // With the state it ends as it does with the default.
+    const json first = tool_call(json::object());
+    const json with_state = tool_call(json{{"inputResponses", extra_answers()}, {"requestState", first.at("result").at("requestState")}});
+    ASSERT_TRUE(with_state.contains("result")) << with_state.dump();
+    EXPECT_EQ(first_text(with_state.at("result")), "Hello, Alice!");
+}
+
 TEST_F(ModernInput, AnswersOfTheWrongShapeAreNeverTakenForAComplete) {
-    // A number for the answer, and a null for the whole of them.
+    // A number for the answer, and a null for the whole of them: without a state, the number is the answer of no
+    // request.
     const json number = call_tool("test_input_required_result_elicitation", json{{"inputResponses", {{"user_name", 12345}}}});
-    ASSERT_TRUE(number.contains("result") || number.contains("error")) << number.dump();
-    if (number.contains("result")) {
-        EXPECT_TRUE(asks(number.at("result")));
-    }
+    ASSERT_TRUE(number.contains("error")) << number.dump();
+    EXPECT_EQ(number.at("error").at("code"), -32602);
     const json nothing = call_tool("test_input_required_result_elicitation", json{{"inputResponses", nullptr}});
     EXPECT_TRUE(nothing.contains("error")) << nothing.dump();
 

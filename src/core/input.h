@@ -38,4 +38,10 @@ bool input_supported(const InputRequest& request, const json& capabilities, cons
 // An answer to a request of `method`, read from the client's result: the answer, or what is wrong with its shape.
 std::variant<InputResponse, std::string> read_answer(std::string_view method, const json& result);
 
+// The method of the request whose answer `result` is, decided from its members alone: of the requests the mechanism
+// lets a server ask with under the profile, the one whose result type in the profile's wire tables has all its
+// required members in `result`. Empty when no request's result type fits, or more than one does.
+std::optional<std::string_view> answer_method(const json& result, const profile::Profile& profile,
+                                              const InputMechanism& mechanism);
+
 }  // namespace neomcp::detail

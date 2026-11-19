@@ -634,6 +634,12 @@ TEST(Declared, ContentThatDoesNotFitTheFormIsInvalidParams) {
     EXPECT_EQ(rated.load(), 0);
     EXPECT_EQ(text_of(client.retry("tools/call", rate, asked, one("rating", accept(J(R"({"stars":4})"))))), "4");
 
+    // Without a state, an answer of another kind than the form's reaches the server, and is refused there.
+    json no_state = params;
+    no_state["inputResponses"] = one("confirm", sampled("yes"));
+    const json other_kind = client.ask("tools/call", no_state);
+    ASSERT_TRUE(other_kind.contains("error")) << other_kind.dump();
+    EXPECT_EQ(other_kind.at("error").at("code"), neomcp::error_code::invalid_params);
     EXPECT_EQ(effects.bodies.load(), 0);
 }
 
@@ -777,6 +783,41 @@ TEST(Declared, TheStateOfEarlierRoundsIsBoundedAndNeverCut) {
     json both = one("first", large);
     both["second"] = small;
     EXPECT_EQ(text_of(client.retry("tools/call", params, first, both)), "1005");
+}
+
+TEST(Declared, AnswersWithoutAStateAreTakenUnlessTheServerNeedsAState) {
+    for (const bool strict : {false, true}) {
+        SCOPED_TRACE(strict ? "strict" : "lenient");
+        Effects effects;
+        neomcp::ServerOptions options = options_with_key();
+        options.answers_need_state = strict;
+        neomcp::Server server(options);
+        register_delete(server, effects);
+        ModernClient client(server);
+        json params = tool_params("delete_folder", J(R"({"path":"/tmp/y"})"));
+        params["inputResponses"] = one("confirm", accept(J(R"({"ok":true})")));
+        params["inputResponses"]["not_asked"] = accept(J(R"({"foo":"bar"})"));
+        const json answer = client.ask("tools/call", params);
+        if (strict) {
+            EXPECT_TRUE(asks(answer)) << answer.dump();
+            EXPECT_EQ(effects.deleted.load(), 0);
+        } else {
+            ASSERT_TRUE(answer.contains("result")) << answer.dump();
+            EXPECT_EQ(text_of(answer), "deleted /tmp/y");
+            EXPECT_EQ(effects.deleted.load(), 1);
+        }
+        // A state that comes is verified either way.
+        params["requestState"] = "forged";
+        const json forged = client.ask("tools/call", params);
+        ASSERT_TRUE(forged.contains("error")) << forged.dump();
+        EXPECT_EQ(forged.at("error").at("message"), "Invalid or expired requestState");
+        const json first = client.ask("tools/call", tool_params("delete_folder", J(R"({"path":"/tmp/y"})")));
+        params["requestState"] = first.at("result").at("requestState").get<std::string>() + "x";
+        const json tampered = client.ask("tools/call", params);
+        ASSERT_TRUE(tampered.contains("error")) << tampered.dump();
+        EXPECT_EQ(tampered.at("error").at("message"), "Invalid or expired requestState");
+        EXPECT_EQ(effects.deleted.load(), strict ? 0 : 1);
+    }
 }
 
 TEST(Declared, KeysNobodyDeclaredAreIgnored) {

@@ -602,11 +602,16 @@ TEST(InputRequiredResult, MissingAnswersAreAskedForAgain) {
     // An answer under another key, with the state: the host asks again.
     const json second = client.retry(tool, first, one("wrong_key", accept(J(R"({"data":"wrong"})"))));
     ASSERT_TRUE(asks(second)) << second.dump();
-    // The same without a state: answers that no state says were asked for are no answers.
+    // The same without a state: the answer reaches the host, which did not ask by that key, and asks again.
     json params = json::object();
     params["inputResponses"] = one("wrong_key", accept(J(R"({"data":"wrong"})")));
     const json third = client.call(tool, params);
     EXPECT_TRUE(asks(third)) << third.dump();
+    // And so does a session that drops answers without a state.
+    neomcp::SessionOptions strict = input_options();
+    strict.answers_need_state = true;
+    Modern strict_client(strict);
+    EXPECT_TRUE(asks(strict_client.call(tool, params)));
 }
 
 TEST(InputRequiredResult, ExtraAnswersAreIgnored) {
@@ -622,11 +627,62 @@ TEST(InputRequiredResult, ExtraAnswersAreIgnored) {
     ASSERT_TRUE(entry);
     EXPECT_EQ(entry->answers.size(), 1u) << "only the asked key reaches the host";
 
-    // Without a state nothing says what was asked: the host asks again (the stricter reading; see the session's
-    // documentation).
+    // Without a state nothing says what was asked: every answer must be the answer of some request (the number is
+    // refused), and the host ignores the keys it did not ask by.
     json params = json::object();
     params["inputResponses"] = answers;
-    EXPECT_TRUE(asks(client.call(tool, params)));
+    const json refused = client.call(tool, params);
+    ASSERT_TRUE(refused.contains("error")) << refused.dump();
+    EXPECT_EQ(refused.at("error").at("code"), neomcp::error_code::invalid_params);
+    answers.erase("another_unexpected");
+    params["inputResponses"] = answers;
+    EXPECT_TRUE(completes(client.call(tool, params)));
+}
+
+TEST(InputRequiredResult, AnswersWithoutAStateAreReadByTheirMembers) {
+    Modern client;
+    const std::string tool = "test_input_required_result_multiple_inputs";
+    json answers = one("user_name", accept(J(R"({"name":"Alice"})")));
+    answers["summary"] = sampled();
+    answers["roots"] = roots_answer();
+    answers["declined"] = J(R"({"action":"decline"})");
+    json params = json::object();
+    params["inputResponses"] = answers;
+    EXPECT_TRUE(asks(client.call(tool, params))) << "this host wants its own state as well";
+    const auto entry = client.host.last(tool);
+    ASSERT_TRUE(entry);
+    EXPECT_EQ(entry->answers.size(), 4u);
+    EXPECT_TRUE(answered<neomcp::ElicitationAnswer>(entry->answers, "user_name"));
+    EXPECT_TRUE(answered<neomcp::SamplingAnswer>(entry->answers, "summary"));
+    EXPECT_TRUE(answered<neomcp::RootsAnswer>(entry->answers, "roots"));
+    EXPECT_TRUE(answered<neomcp::ElicitationAnswer>(entry->answers, "declined"));
+    EXPECT_FALSE(entry->state);
+
+    // An answer with the required members of two kinds, of none, or that is not an object, and one whose kind is clear
+    // but whose shape is wrong, are refused before the host is entered.
+    const int entered = client.host.entries(tool);
+    for (const json& wrong : {J(R"({"action":"accept","roots":[]})"), J(R"({"content":{"type":"text","text":"x"}})"),
+                              json(7), J(R"({"action":"maybe"})")}) {
+        json bad = json::object();
+        bad["inputResponses"] = one("user_name", wrong);
+        const json answer = client.call(tool, bad);
+        ASSERT_TRUE(answer.contains("error")) << wrong.dump() << " " << answer.dump();
+        EXPECT_EQ(answer.at("error").at("code"), neomcp::error_code::invalid_params) << wrong.dump();
+    }
+    EXPECT_EQ(client.host.entries(tool), entered);
+
+    // A session that needs a state drops them: the host sees none.
+    neomcp::SessionOptions strict = input_options();
+    strict.answers_need_state = true;
+    Modern strict_client(strict);
+    EXPECT_TRUE(asks(strict_client.call(tool, params)));
+    const auto strict_entry = strict_client.host.last(tool);
+    ASSERT_TRUE(strict_entry);
+    EXPECT_TRUE(strict_entry->answers.empty());
+    // Malformed ones never even get looked at.
+    json bad = json::object();
+    bad["inputResponses"] = one("user_name", json(7));
+    EXPECT_TRUE(asks(strict_client.call(tool, bad)));
 }
 
 TEST(InputRequiredResult, ADeclinedOrCancelledElicitationCarriesNoContent) {

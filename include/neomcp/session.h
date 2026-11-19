@@ -17,8 +17,11 @@
 //   requests' keys and what the state is bound to: the method, the tool or prompt name or the resource URI, the
 //   arguments, the server and an expiry; signed with HMAC-SHA-256, not encrypted). A retried call carries the answers
 //   and the state; the state is verified before the host is entered, and every refusal is answered the same way
-//   (Invalid params, "Invalid or expired requestState"). Answers to keys the state does not name are ignored, and a
-//   retry without a state carries no answers; an answer whose shape does not fit its request is Invalid params.
+//   (Invalid params, "Invalid or expired requestState"). Answers to keys the state does not name are ignored; an
+//   answer whose shape does not fit its request is Invalid params. A retry that carries answers and no state reaches
+//   the host with them, each read as the answer of the one request whose result type (in the profile's wire tables)
+//   has every member it requires, and one that fits no such type or several is Invalid params; with
+//   SessionOptions::answers_need_state such a retry reaches the host without answers.
 // - server_request: each request goes to the client as a request of the session's own, an output of kind `request`
 //   of the call's unit; the client's responses arrive as input, and when the round's last one is there the host is
 //   called again with the answers. A response that is an error or has the wrong shape ends the call, as do more than
@@ -192,6 +195,7 @@ struct SessionDefaults {
     static constexpr std::size_t max_queued_notifications = 1024;
     static constexpr std::size_t max_input_rounds = 10;
     static constexpr std::chrono::seconds request_state_ttl{600};
+    static constexpr bool answers_need_state = false;
 };
 
 // The defaults of the bounds of change notifications, which SessionOptions and ServerOptions both carry.
@@ -277,6 +281,11 @@ struct SessionOptions {
     StateClock clock;
     // Told why a state was refused; empty: nobody is told. The client gets only "Invalid or expired requestState".
     RequestStateDiagnostic on_request_state_rejected;
+    // Under the same mechanism: whether a retry that carries answers and no state reaches the host without them (on),
+    // so that the host asks again, instead of with them (off, the default). Without a state the session cannot know
+    // which requests were asked, so it reads each answer as the kind of answer its members make it (see Session). A
+    // state that a retry carries is verified either way.
+    bool answers_need_state = SessionDefaults::answers_need_state;
 };
 
 // A mechanism a profile names that the registry has no implementation for.

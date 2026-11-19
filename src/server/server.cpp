@@ -854,6 +854,7 @@ SessionOptions ServerCore::session_options(profile::Transport transport, IdleCal
     session.request_state_ttl = options_.request_state_ttl;
     session.clock = options_.clock;
     session.on_request_state_rejected = options_.on_request_state_rejected;
+    session.answers_need_state = options_.answers_need_state;
     session.max_subscriptions = options_.max_subscriptions;
     session.max_watched_resources = options_.max_watched_resources;
     session.on_idle = std::move(on_idle);
