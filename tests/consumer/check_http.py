@@ -3,7 +3,8 @@
 
     python3 -I tests/consumer/check_http.py PATH_TO_CALC_HTTP
 
-The call is a tools/call in the form of revision 2026-07-28: no handshake, the revision and the client named in the
+First the server is started with arguments that are not a port: it must refuse each with a line on standard error and
+a nonzero exit code, and serve nothing. Then the call is a tools/call in the form of revision 2026-07-28: no handshake, the revision and the client named in the
 request's _meta and in the headers. The server must answer it and, on SIGTERM, exit with 0. POSIX only: on Windows a
 process cannot be sent SIGTERM from Python (terminate() ends it without letting it exit by itself).
 """
@@ -16,6 +17,9 @@ import time
 import urllib.request
 
 REVISION = "2026-07-28"
+# Arguments that are not a port: out of the range of a port, not a number, empty, signed, followed by text, or too
+# long for any integer.
+NOT_A_PORT = ("65536", "70000", "-1", "+8080", "http", "", " 80", "8080x", "99999999999999999999")
 START_TIMEOUT = 30.0
 STOP_TIMEOUT = 15.0
 REQUEST = {
@@ -69,9 +73,34 @@ def call(port):
         return reply.status, reply.headers.get("Content-Type", ""), json.loads(reply.read())
 
 
+def refusals(program):
+    """The ways in which the program does not refuse each argument that is not a port."""
+    errors = []
+    for argument in NOT_A_PORT:
+        process = subprocess.Popen([program, argument], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            out, err = process.communicate(timeout=START_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            errors.append(f"the argument {argument!r} was not refused: the server kept running")
+            continue
+        if process.returncode == 0:
+            errors.append(f"the argument {argument!r} was refused with exit code 0")
+        if not err.strip():
+            errors.append(f"the argument {argument!r} was refused without a line on standard error")
+        if out:
+            errors.append(f"the argument {argument!r} made the server write to standard output")
+    return errors
+
+
 def main():
     if len(sys.argv) != 2:
         raise SystemExit(__doc__)
+    refused = refusals(sys.argv[1])
+    if refused:
+        print("HTTP check FAILED:\n  " + "\n  ".join(refused))
+        return 1
     port = free_port()
     process = subprocess.Popen([sys.argv[1], str(port)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     errors = []
@@ -102,7 +131,7 @@ def main():
         print("HTTP check FAILED:\n  " + "\n  ".join(errors))
         print("standard error of the server: " + process.stderr.read().decode("utf-8", "replace"))
         return 1
-    print(f"HTTP check passed: tools/call answered on port {port}, SIGTERM stopped the server with exit code 0")
+    print(f"HTTP check passed: {len(NOT_A_PORT)} arguments that are not a port were refused, tools/call answered on port {port}, SIGTERM stopped the server with exit code 0")
     return 0
 
 

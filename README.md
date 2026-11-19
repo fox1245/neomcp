@@ -102,12 +102,18 @@ target_link_libraries(calc PRIVATE neomcp::server neomcp::stdio)
 
 The same server speaks Streamable HTTP with `neomcp::run_http` from `<neomcp/http_server.h>` (target
 `neomcp::http`). This program is the first server with `run_http` in place of `run_stdio`. It serves
-`http://127.0.0.1:8000/mcp` until SIGINT or SIGTERM, or on the port given as its first argument:
+`http://127.0.0.1:8000/mcp` until SIGINT or SIGTERM, or on the port given as its first argument. An argument that is
+not a port (a number from 0 to 65535, written in digits only) is refused with a message on standard error and a
+nonzero exit code:
 
 ```cpp
-#include <cstdint>
+#include <charconv>
+#include <cstdlib>
+#include <iostream>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <system_error>
 
 #include <neomcp/http_server.h>
 #include <neomcp/server.h>
@@ -126,7 +132,13 @@ int main(int argc, char** argv) {
     neomcp::HttpServerOptions options;
     options.port = 8000;
     if (argc > 1) {
-        options.port = static_cast<std::uint16_t>(std::stoi(argv[1]));
+        const std::string_view text = argv[1];
+        const char* const end = text.data() + text.size();
+        const auto parsed = std::from_chars(text.data(), end, options.port);
+        if (parsed.ec != std::errc{} || parsed.ptr != end) {
+            std::cerr << "calc_http: \"" << text << "\" is not a port (0 to 65535)\n";
+            return EXIT_FAILURE;
+        }
     }
     return neomcp::run_http(server, options);
 }
