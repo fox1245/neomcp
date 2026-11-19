@@ -50,8 +50,10 @@
 //
 // What the client answers is checked before the handler sees it. A form's content must match its schema and decode
 // as Form; an answer of another kind than its input's, or content that does not fit, ends the call with Invalid params.
-// An answer counts for the question that was asked: the call's state holds a digest of each question asked in the
-// round before (the state is the handler's own; where the result asks it travels sealed, see neomcp/server.h).
+// Only the last round's answers come with a call; the outcomes of earlier rounds, accepted values included, are kept in
+// the call's state, each with a digest of the question it answers. The state is the handler's own (where the result
+// asks it travels sealed, see neomcp/server.h); it holds at most ServerOptions::max_declared_state_bytes, and a round
+// that would need more ends the call with Invalid params (nothing is dropped).
 //
 // Everything below the public declarations is detail of neomcp/server.h.
 #pragma once
@@ -278,7 +280,8 @@ struct DeclaredInput {
 void prepare_inputs(std::span<DeclaredInput> inputs, const std::string& label, const json_schema::Limits& limits);
 
 // Thrown while a call with declared inputs is entered, for answers that cannot be used: an answer of another kind than
-// its input's, a form's content that its schema refuses. The call is answered with Invalid params and the message.
+// its input's, a form's content that its schema refuses, outcomes too large to keep. The call is answered with Invalid
+// params and the message.
 class AnswerRefused : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -290,25 +293,36 @@ struct Settlement {
     bool not_asked = false;               // optional, and the client cannot take its request
 };
 
-// One entry of a call with declared inputs: the questions of the round before (from the state), the answers of the
+// One entry of a call with declared inputs: the outcomes of the earlier rounds (from the state), the answers of the
 // last round, and what this round asks.
 class InputRound {
 public:
-    // Reads the state the call came with. A state that cannot be read counts as no round before, and the answers that
+    // Reads the state the call came with. A state that cannot be read counts as no earlier rounds, and the answers that
     // came with it answer nothing (they are asked again).
-    explicit InputRound(const Context& context);
+    InputRound(const Context& context, std::size_t max_state_bytes);
 
-    // The outcome of `input` for `question`, its question in this entry: the one the client gave for exactly this
-    // question in this round; `not_asked` for an optional input whose request the client cannot take; else nothing,
-    // and the input is asked in this round. Throws AnswerRefused for an answer that does not fit its input.
+    // The outcome of `input` for `question`, its question in this entry: the one recorded for exactly this question,
+    // or the one the client gave for it in this round; `not_asked` for an optional input whose request the client
+    // cannot take; else nothing, and the input is asked in this round. Throws AnswerRefused for an answer that does not
+    // fit its input.
     Settlement settle(const DeclaredInput& input, InputRequest question);
 
-    // The requests of this round and the state that records their questions.
+    // The requests of this round and the state that records the outcomes so far. Throws AnswerRefused when the state
+    // would exceed the bound.
     InputRequired ask() const;
 
 private:
+    struct Recorded {
+        std::string digest;  // of the question answered
+        std::string method;  // of the request
+        InputResponse answer;
+    };
+
     const Context& context_;
+    std::size_t max_state_bytes_;
     std::map<std::string, std::string> asked_before_;  // key -> digest of the question asked in the round before
+    std::map<std::string, Recorded> recorded_;         // the outcomes the state recorded
+    std::map<std::string, Recorded> kept_;             // the outcomes this round records
     std::map<std::string, InputRequest> requests_;     // asked in this round
     std::map<std::string, std::string> asking_;        // key -> digest of the question asked in this round
 };
@@ -320,6 +334,7 @@ template <class... Decls>
 struct InputSet {
     std::tuple<Decls...> declarations;
     std::array<DeclaredInput, sizeof...(Decls)> inputs;
+    std::size_t max_state_bytes = 0;
 };
 
 template <class... Decls>
@@ -582,8 +597,9 @@ void describe_inputs(InputSet<Decls...>& set, std::index_sequence<I...>) {
 // The declarations of a handler, checked and prepared for `label`.
 template <class... Decls>
 InputSet<std::decay_t<Decls>...> make_input_set(const std::string& label, const json_schema::Limits& limits,
-                                                Decls&&... declarations) {
-    InputSet<std::decay_t<Decls>...> set{std::tuple<std::decay_t<Decls>...>(std::forward<Decls>(declarations)...), {}};
+                                                std::size_t max_state_bytes, Decls&&... declarations) {
+    InputSet<std::decay_t<Decls>...> set{std::tuple<std::decay_t<Decls>...>(std::forward<Decls>(declarations)...), {},
+                                         max_state_bytes};
     describe_inputs(set, std::index_sequence_for<Decls...>{});
     prepare_inputs(std::span<DeclaredInput>(set.inputs), label, limits);
     return set;
@@ -714,7 +730,7 @@ void settle_inputs_at(const InputSet<Decls...>& set, const Args& args, InputRoun
 template <class Args, class... Decls>
 std::optional<InputRequired> settle_inputs(const InputSet<Decls...>& set, const Args& args, const Context& context,
                                            AnswersOf<Decls...>& answers) {
-    InputRound entry_round(context);
+    InputRound entry_round(context, set.max_state_bytes);
     std::array<bool, sizeof...(Decls)> settled{};
     settle_inputs_at(set, args, entry_round, answers, settled, std::index_sequence_for<Decls...>{});
     for (const bool has_outcome : settled) {

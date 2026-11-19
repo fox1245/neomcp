@@ -261,6 +261,10 @@ struct ServerOptions {
     StateClock clock{};
     // Told why a state was refused, for the server's log; the client only learns that it was.
     RequestStateDiagnostic on_request_state_rejected{};
+    // The most bytes the state of a call with declared inputs may hold (neomcp/server/inputs.h): the outcomes of its
+    // earlier rounds, as JSON text. A round that would need more ends the call with Invalid params; nothing is dropped.
+    // Zero is an error. Default 64 KiB.
+    std::size_t max_declared_state_bytes = std::size_t{64} * 1024;
 
     // ---- Change notifications (see SessionOptions)
     // Where clients open subscriptions: the subscriptions one session keeps open at once. Zero is an error. Default 16.
@@ -688,7 +692,7 @@ ToolHandle Server::tool(std::string tool_name, std::string tool_description, Han
         definition.input_schema = schema_of<Args>();
         definition.output_schema = detail::output_schema_of<detail::handler_value_t<detail::Input::typed, F>>();
         auto inputs = detail::make_input_set("tool '" + definition.name + "'", options().schema_limits,
-                                             std::forward<First>(first),
+                                             options().max_declared_state_bytes, std::forward<First>(first),
                                              std::forward<Rest>(rest)...);
         return add(std::move(definition),
                    detail::make_declared_tool_body<Args, F>(std::forward<Handler>(handler), std::move(inputs)),
@@ -713,7 +717,7 @@ ToolHandle Server::tool(std::string tool_name, std::string tool_description, Han
         definition.input_schema = detail::empty_object_schema();
         definition.output_schema = detail::output_schema_of<detail::handler_value_t<detail::Input::none, F>>();
         auto inputs = detail::make_input_set("tool '" + definition.name + "'", options().schema_limits,
-                                             std::forward<First>(first),
+                                             options().max_declared_state_bytes, std::forward<First>(first),
                                              std::forward<Rest>(rest)...);
         return add(std::move(definition),
                    detail::make_declared_tool_body<None, F>(std::forward<Handler>(handler), std::move(inputs)));
@@ -735,7 +739,7 @@ ResourceHandle Server::resource(std::string resource_uri, std::string resource_n
         definition.uri = std::move(resource_uri);
         definition.name = std::move(resource_name);
         auto inputs = detail::make_input_set("resource '" + definition.uri + "'", options().schema_limits,
-                                             std::forward<First>(first),
+                                             options().max_declared_state_bytes, std::forward<First>(first),
                                              std::forward<Rest>(rest)...);
         return add_resource(std::move(definition),
                             detail::make_declared_feature_body<detail::ResourceKind, None, F>(
@@ -775,8 +779,8 @@ ResourceTemplateHandle Server::resource_template(std::string template_text, std:
             }
         };
         auto inputs = detail::make_input_set("resource template '" + definition.uri_template + "'",
-                                             options().schema_limits, std::forward<First>(first),
-                                             std::forward<Rest>(rest)...);
+                                             options().schema_limits, options().max_declared_state_bytes,
+                                             std::forward<First>(first), std::forward<Rest>(rest)...);
         return add_resource_template(std::move(definition),
                                      detail::make_declared_feature_body<detail::TemplateKind<Params>, Params, F>(
                                          std::forward<Handler>(handler), std::move(inputs)),
@@ -809,7 +813,7 @@ PromptHandle Server::prompt(std::string prompt_name, std::string prompt_descript
         definition.description = std::move(prompt_description);
         definition.arguments = detail::prompt_arguments_of<Args>();
         auto inputs = detail::make_input_set("prompt '" + definition.name + "'", options().schema_limits,
-                                             std::forward<First>(first),
+                                             options().max_declared_state_bytes, std::forward<First>(first),
                                              std::forward<Rest>(rest)...);
         return add_prompt(std::move(definition), detail::make_declared_feature_body<detail::PromptKind<Args>, Args, F>(
                                                      std::forward<Handler>(handler), std::move(inputs)));
@@ -831,7 +835,7 @@ PromptHandle Server::prompt(std::string prompt_name, std::string prompt_descript
         definition.name = std::move(prompt_name);
         definition.description = std::move(prompt_description);
         auto inputs = detail::make_input_set("prompt '" + definition.name + "'", options().schema_limits,
-                                             std::forward<First>(first),
+                                             options().max_declared_state_bytes, std::forward<First>(first),
                                              std::forward<Rest>(rest)...);
         return add_prompt(std::move(definition), detail::make_declared_feature_body<detail::PromptNoArgumentsKind, None, F>(
                                                      std::forward<Handler>(handler), std::move(inputs)));

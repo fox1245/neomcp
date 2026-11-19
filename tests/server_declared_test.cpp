@@ -522,6 +522,44 @@ TEST(Declared, TheBodyRunsOnceWhenTheAnswerIsThere) {
     EXPECT_EQ(effects.deleted.load(), 1);
 }
 
+TEST(Declared, InputsAreAskedTogetherAndADependentOneInALaterRound) {
+    std::atomic<int> bodies{0};
+    neomcp::Server server(options_with_key());
+    server.tool(
+        "plan_trip", "Ask where, then the model for ideas there, and the roots",
+        [&bodies](const neomcp::Answer<sdt::Destination>& where, const neomcp::Answer<neomcp::SamplingAnswer>& idea,
+                  const neomcp::Answer<neomcp::RootsAnswer>& listed, neomcp::Context&) {
+            ++bodies;
+            return where->city + ": " + idea->content.at("text").get<std::string>() + " (" +
+                   std::to_string(listed->roots.size()) + " roots)";
+        },
+        neomcp::elicit<sdt::Destination>("where", [] { return std::string("Where to?"); }),
+        neomcp::sample("idea",
+                       [](const neomcp::Answer<sdt::Destination>& where) -> neomcp::Question<neomcp::SamplingAnswer> {
+                           if (!where.accepted()) return neomcp::no_question<neomcp::SamplingAnswer>();
+                           return sampling_of("Ideas for " + where->city);
+                       }),
+        neomcp::roots("roots"));
+    ModernClient client(server);
+    const json params = tool_params("plan_trip");
+    const json first = client.ask("tools/call", params);
+    ASSERT_TRUE(asks(first)) << first.dump();
+    EXPECT_EQ(asked_keys(first), (std::set<std::string>{"where", "roots"})) << "the dependent question waits";
+
+    json answers = one("where", accept(J(R"({"city":"Paris"})")));
+    answers["roots"] = roots_answer();
+    const json second = client.retry("tools/call", params, first, answers);
+    ASSERT_TRUE(asks(second)) << second.dump();
+    EXPECT_EQ(asked_keys(second), std::set<std::string>{"idea"});
+    EXPECT_EQ(second.at("result").at("inputRequests").at("idea").at("params").at("messages").at(0).at("content").at("text"),
+              "Ideas for Paris");
+
+    const json third = client.retry("tools/call", params, second, one("idea", sampled("museums")));
+    ASSERT_TRUE(third.contains("result")) << third.dump();
+    EXPECT_EQ(text_of(third), "Paris: museums (2 roots)") << "the earlier rounds' answers came from the state";
+    EXPECT_EQ(bodies.load(), 1);
+}
+
 TEST(Declared, AnAnswerToAQuestionThatChangedIsAskedAgain) {
     std::atomic<int> version{1};
     std::atomic<int> bodies{0};
@@ -549,6 +587,19 @@ TEST(Declared, AnAnswerToAQuestionThatChangedIsAskedAgain) {
     EXPECT_EQ(stale.at("result").at("inputRequests").at("first").at("params").at("message"), "First, version 2");
     EXPECT_EQ(bodies.load(), 0);
 
+    // An outcome an earlier round recorded, for a question that changed since.
+    const json fresh = client.ask("tools/call", params);
+    const json recorded = client.retry("tools/call", params, fresh, one("first", accept(J(R"({"text":"a"})"))));
+    ASSERT_EQ(asked_keys(recorded), std::set<std::string>{"second"});
+    version = 3;
+    const json changed = client.retry("tools/call", params, recorded, one("second", accept(J(R"({"text":"b"})"))));
+    ASSERT_TRUE(asks(changed)) << changed.dump();
+    EXPECT_EQ(asked_keys(changed), std::set<std::string>{"first"});
+    EXPECT_EQ(bodies.load(), 0);
+    const json done = client.retry("tools/call", params, changed, one("first", accept(J(R"({"text":"c"})"))));
+    ASSERT_TRUE(done.contains("result")) << done.dump();
+    EXPECT_EQ(text_of(done), "c+b");
+    EXPECT_EQ(bodies.load(), 1);
 }
 
 TEST(Declared, ContentThatDoesNotFitTheFormIsInvalidParams) {
@@ -699,6 +750,35 @@ TEST(Declared, PromptsResourcesTemplatesAndCoroutinesDeclareInputs) {
     EXPECT_EQ(text_of(client.retry("tools/call", call, client.ask("tools/call", call), yes)), "went on");
 }
 
+TEST(Declared, TheStateOfEarlierRoundsIsBoundedAndNeverCut) {
+    neomcp::ServerOptions options = options_with_key();
+    options.max_declared_state_bytes = 400;
+    neomcp::Server server(options);
+    server.tool(
+        "two_notes", "Two notes, perhaps in two rounds",
+        [](const neomcp::Answer<sdt::Note>& first, const neomcp::Answer<sdt::Note>& second) {
+            return std::to_string(first->text.size() + second->text.size());
+        },
+        neomcp::elicit<sdt::Note>("first", [] { return std::string("First?"); }),
+        neomcp::elicit<sdt::Note>("second", [] { return std::string("Second?"); }));
+    ModernClient client(server);
+    const json params = tool_params("two_notes");
+    const json first = client.ask("tools/call", params);
+    ASSERT_TRUE(asks(first)) << "a round that only asks fits: " << first.dump();
+    json small = accept(json::object());
+    small["content"]["text"] = "short";
+    EXPECT_TRUE(asks(client.retry("tools/call", params, first, one("first", small)))) << "a short answer is kept";
+    json large = accept(json::object());
+    large["content"]["text"] = std::string(1000, 'x');
+    const json too_large = client.retry("tools/call", params, first, one("first", large));
+    ASSERT_TRUE(too_large.contains("error")) << too_large.dump();
+    EXPECT_EQ(too_large.at("error").at("code"), neomcp::error_code::invalid_params);
+    // Both at once need no state at all.
+    json both = one("first", large);
+    both["second"] = small;
+    EXPECT_EQ(text_of(client.retry("tools/call", params, first, both)), "1005");
+}
+
 TEST(Declared, KeysNobodyDeclaredAreIgnored) {
     Effects effects;
     neomcp::Server server(options_with_key());
@@ -721,6 +801,17 @@ TEST(Declared, InputsAreAskedThroughRequestsWhereTheRevisionSendsThem) {
     Effects effects;
     neomcp::Server server(options_with_key());
     register_delete(server, effects);
+    std::atomic<int> bodies{0};
+    server.tool(
+        "two_rounds", "Asks a second question that depends on the first",
+        [&bodies](const neomcp::Answer<sdt::Destination>& where, const neomcp::Answer<sdt::Note>& note) {
+            ++bodies;
+            return where->city + ", " + note->text;
+        },
+        neomcp::elicit<sdt::Destination>("where", [] { return std::string("Where?"); }),
+        neomcp::elicit<sdt::Note>("note", [](const neomcp::Answer<sdt::Destination>& where) {
+            return "A note on " + where->city + "?";
+        }));
     LegacyClient client(server);
     client.send_call(1, tool_params("delete_folder", J(R"({"path":"/var"})")));
     const auto request = client.peer.next_request(patience);
@@ -733,6 +824,20 @@ TEST(Declared, InputsAreAskedThroughRequestsWhereTheRevisionSendsThem) {
     EXPECT_EQ(text_of(*done), "deleted /var");
     EXPECT_EQ(effects.bodies.load(), 1);
 
+    client.send_call(2, tool_params("two_rounds"));
+    const auto where = client.peer.next_request(patience);
+    ASSERT_TRUE(where);
+    EXPECT_EQ(where->at("params").at("message"), "Where?");
+    client.answer(*where, accept(J(R"({"city":"Rome"})")));
+    const auto note = client.peer.next_request(patience);
+    ASSERT_TRUE(note);
+    EXPECT_EQ(note->at("params").at("message"), "A note on Rome?");
+    client.answer(*note, accept(J(R"({"text":"sunny"})")));
+    const auto both = client.peer.await_response(neomcp::RequestId(2), patience);
+    ASSERT_TRUE(both);
+    EXPECT_EQ(text_of(*both), "Rome, sunny");
+    EXPECT_EQ(bodies.load(), 1);
+
     // Content that does not fit the form ends the call with Invalid params.
     client.send_call(3, tool_params("delete_folder", J(R"({"path":"/etc"})")));
     const auto again = client.peer.next_request(patience);
@@ -743,6 +848,12 @@ TEST(Declared, InputsAreAskedThroughRequestsWhereTheRevisionSendsThem) {
     ASSERT_TRUE(refused->contains("error")) << refused->dump();
     EXPECT_EQ(refused->at("error").at("code"), neomcp::error_code::invalid_params);
     EXPECT_EQ(effects.deleted.load(), 1);
+}
+
+TEST(Declared, BadOptionsAreRefused) {
+    neomcp::ServerOptions no_state = options_with_key();
+    no_state.max_declared_state_bytes = 0;
+    EXPECT_THROW(neomcp::Server{no_state}, std::invalid_argument);
 }
 
 }  // namespace

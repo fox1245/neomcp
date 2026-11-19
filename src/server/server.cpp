@@ -470,6 +470,9 @@ ServerCore::ServerCore(ServerOptions options)
         throw std::invalid_argument("neomcp: ServerOptions::prompts_page_size is zero");
     }
     if (options_.max_input_rounds == 0) throw std::invalid_argument("neomcp: ServerOptions::max_input_rounds is zero");
+    if (options_.max_declared_state_bytes == 0) {
+        throw std::invalid_argument("neomcp: ServerOptions::max_declared_state_bytes is zero");
+    }
     if (options_.max_subscriptions == 0) {
         throw std::invalid_argument("neomcp: ServerOptions::max_subscriptions is zero");
     }
