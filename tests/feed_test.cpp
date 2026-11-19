@@ -17,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -982,6 +983,43 @@ TEST(SubscriptionFeed, AConnectionWhoseClientIsNotReadyHearsNothingWhileASubscri
     host.report(neomcp::ChangeKind::prompts_list);
     EXPECT_EQ(peer.next_notification(patience), notification("notifications/prompts/list_changed"))
         << "the change of the tool list reached the connection before its client was ready";
+}
+
+// A subscription that is opened as the host ends its feed either gets the ending of the feed or is refused: it is never
+// acknowledged and then left open for good, with nothing to end it. The host's end is told from another thread, at
+// every delay in turn, so that it falls between the check that the feed is still live and the subscription entering
+// the calls in flight.
+TEST(SubscriptionFeed, ASubscriptionOpenedAsTheFeedEndsIsEndedOrRefused) {
+    constexpr int rounds = 20000;
+    std::mt19937 delays(20260101);
+    for (int round = 0; round < rounds; ++round) {
+        FeedHost host;
+        Tagged client(host);
+        ASSERT_TRUE(client.send(1, "first", "subscriptions/listen", listen_params({{"toolsListChanged", true}})));
+        std::atomic<bool> go{false};
+        const auto delay = std::chrono::nanoseconds(delays() % 60000);
+        std::thread ender([&] {
+            while (!go.load(std::memory_order_acquire)) {
+            }
+            const auto until = std::chrono::steady_clock::now() + delay;
+            while (std::chrono::steady_clock::now() < until) {
+            }
+            host.end_feed();
+        });
+        go.store(true, std::memory_order_release);
+        client.send(2, "second", "subscriptions/listen", listen_params({{"toolsListChanged", true}}));
+        ender.join();
+        bool acknowledged_second = false;
+        bool ended_second = false;
+        for (const auto& output : client.of(2)) {
+            if (output.kind == neomcp::OutputKind::notification) acknowledged_second = true;
+            if (output.last) ended_second = true;
+        }
+        if (acknowledged_second && !ended_second) {
+            ADD_FAILURE() << "round " << round << ": the subscription was acknowledged and never ended";
+            return;
+        }
+    }
 }
 
 }  // namespace
