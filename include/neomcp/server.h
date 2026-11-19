@@ -161,6 +161,7 @@
 #include "neomcp/server/feature_handler.h"
 #include "neomcp/server/form_schema.h"
 #include "neomcp/server/handler.h"
+#include "neomcp/server/inputs.h"
 #include "neomcp/session.h"
 #include "neomcp/tool_host.h"
 

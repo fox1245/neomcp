@@ -1,4 +1,7 @@
-// Tests of the form a declared input asks with, built from a described struct.
+// Tests of declared inputs, through Server and the in-memory peer: the form built from a described struct, the rounds
+// under the revision whose result asks and under one that sends requests, what a handler gets, and the answers that
+// are refused. Every wait is on an event a test controls; the bound on a wait only limits how long a broken build
+// takes to fail.
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -153,6 +156,17 @@ profile::ProfilePtr builtin(const std::string& revision) {
     return found;
 }
 
+neomcp::SamplingRequest sampling_of(std::string prompt) {
+    neomcp::SamplingMessage message;
+    neomcp::TextContent text;
+    text.text = std::move(prompt);
+    message.content.emplace_back(std::move(text));
+    neomcp::SamplingRequest request;
+    request.messages.push_back(std::move(message));
+    request.max_tokens = 50;
+    return request;
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // The form
 
@@ -265,6 +279,49 @@ TEST(FormSchema, AMemberThatDoesNotFitIsRefusedByName) {
     for (const auto& [message, member] : refused) {
         EXPECT_NE(message.find(member), std::string::npos) << "refused naming " << member << ": " << message;
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The declarations
+
+TEST(Declarations, AnAnswerSaysWhatBecameOfItsInput) {
+    const neomcp::Answer<sdt::Confirm> accepted(sdt::Confirm{true});
+    EXPECT_TRUE(accepted.accepted());
+    EXPECT_TRUE(accepted.asked());
+    EXPECT_TRUE(accepted->ok);
+    EXPECT_TRUE((*accepted).ok);
+    for (const auto status : {neomcp::AnswerStatus::declined, neomcp::AnswerStatus::cancelled, neomcp::AnswerStatus::not_asked}) {
+        const neomcp::Answer<sdt::Confirm> other(status);
+        EXPECT_EQ(other.status(), status);
+        EXPECT_FALSE(other.accepted());
+        EXPECT_EQ(other.asked(), status != neomcp::AnswerStatus::not_asked);
+        EXPECT_THROW(static_cast<void>(other.value()), std::logic_error);
+    }
+    EXPECT_EQ(neomcp::Answer<sdt::Confirm>().status(), neomcp::AnswerStatus::not_asked);
+    EXPECT_THROW(static_cast<void>(neomcp::Answer<sdt::Confirm>(neomcp::AnswerStatus::accepted)), std::invalid_argument);
+}
+
+TEST(Declarations, AQuestionAsksOrSaysWhatTheHandlerGets) {
+    const neomcp::Question<sdt::Confirm> literal = "Delete it?";
+    ASSERT_TRUE(literal.asks());
+    EXPECT_EQ(literal.payload(), "Delete it?");
+    const neomcp::Question<sdt::Confirm> none = neomcp::no_question(sdt::Confirm{false});
+    ASSERT_FALSE(none.asks());
+    EXPECT_TRUE(none.answer().accepted());
+    EXPECT_FALSE(none.answer()->ok);
+    const neomcp::Question<neomcp::RootsAnswer> skipped = neomcp::no_question<neomcp::RootsAnswer>();
+    EXPECT_EQ(skipped.answer().status(), neomcp::AnswerStatus::not_asked);
+    const neomcp::Question<neomcp::SamplingAnswer> sampling = sampling_of("Summarise");
+    ASSERT_TRUE(sampling.asks());
+    EXPECT_EQ(sampling.payload().max_tokens, 50U);
+
+    const auto form = neomcp::elicit<sdt::Confirm>("confirm", [] { return std::string("?"); });
+    EXPECT_EQ(form.input_key(), "confirm");
+    EXPECT_FALSE(form.is_optional());
+    EXPECT_TRUE(form.optional().is_optional());
+    EXPECT_FALSE(form.is_optional()) << "optional() makes a copy";
+    EXPECT_TRUE(neomcp::roots("roots").optional().is_optional());
+    EXPECT_EQ(neomcp::sample("s", [] { return sampling_of("x"); }).input_key(), "s");
 }
 
 }  // namespace
