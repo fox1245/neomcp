@@ -8,7 +8,7 @@
 
 #include "neomcp/http/policy.h"
 
-#include "ip_text.h"
+#include "http_base/ip_text.h"
 
 namespace neomcp::http {
 
