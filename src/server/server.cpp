@@ -594,7 +594,13 @@ void ServerCore::write_header_marks(const std::string& tool, json& schema, const
         const auto found = members->find(std::string(name));
         return found == members->end() ? nullptr : &found->second;
     };
+    // A parameter has one header: a second mark on the same member would silently replace the first.
+    std::set<std::vector<std::string>> marked;
     for (const HeaderMark& mark : marks) {
+        if (!marked.insert(mark.path).second) {
+            throw std::invalid_argument("neomcp: tool '" + tool + "': the member '" + mark.path.back() +
+                                        "' is marked to be mirrored into more than one header");
+        }
         json* property = &schema;
         for (const std::string& step : mark.path) {
             json* properties = child(*property, "properties");
