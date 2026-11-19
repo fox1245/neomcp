@@ -11,11 +11,24 @@
 //
 // Refused by `compile`, with the pointer of the offending keyword: a `$schema` that names another dialect,
 // `$dynamicRef`, `$recursiveRef`, a reference to another document, a reference that cannot be resolved, a cycle of
-// references that makes no progress through the value, a `pattern` or `patternProperties` key that `std::regex`
-// (ECMAScript grammar) cannot compile, a keyword of the wrong shape, and a schema nested deeper than
-// Limits::max_schema_depth. A reference is never fetched from the network or the file system.
+// references that makes no progress through the value, a `pattern` or `patternProperties` key that cannot be
+// matched exactly (below), a keyword of the wrong shape, and a schema nested deeper than Limits::max_schema_depth. A
+// reference is never fetched from the network or the file system.
 //
-// `pattern` and `patternProperties` use `std::regex`, which works on the bytes of a string, not on code points.
+// Patterns. `pattern` and `patternProperties` are regular expressions in the dialect of ECMA-262 with the `u` flag
+// (Unicode mode), which is what JSON Schema asks for: a pattern and a string are sequences of code points, a pattern
+// is searched for in the string and not anchored, `.` does not match a line terminator, `\d`, `\w` and `\s` have
+// their ECMA-262 meanings, and a pattern that is a syntax error in Unicode mode (an unescaped `]`, `{` or `}`, an
+// escape of a character that is not a syntax character, a reversed range) is refused. Strings are read as UTF-8, and
+// validation ends with an Issue at a string or property name that is not well-formed UTF-8.
+//
+// A pattern is compiled once, when the schema is compiled, and a string is checked in time proportional to its
+// length, whatever the pattern: there is no backtracking. The engine behind this is RE2, and the pattern is
+// translated to its syntax first. What cannot be translated with the same meaning is refused by `compile`, with the
+// pointer of the keyword and a message that names the construct and its byte offset: lookahead and lookbehind
+// assertions, back-references (numbered and named), group modifiers, Unicode properties other than the general
+// categories (`\p{Lu}`, `\p{Letter}` and `\p{gc=Nd}` work; `C`, `Cn` and `LC` do not, because RE2 defines them
+// differently), repeat counts above 1000, and any pattern that needs more memory than Limits::max_pattern_memory.
 #pragma once
 
 #include <cstddef>

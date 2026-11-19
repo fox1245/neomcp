@@ -49,9 +49,10 @@ Still planned:
 
 ## Build
 
-Requirements: CMake 3.20 or newer, a C++20 compiler, and network access at configure time (the pinned
-dependencies are fetched: [neojson](https://github.com/fox1245/neojson), standalone Asio, cpp-httplib, and
-GoogleTest when the tests are built).
+Requirements: CMake 3.22 or newer, a C++20 compiler, and network access at configure time (the pinned
+dependencies are fetched: [neojson](https://github.com/fox1245/neojson), standalone Asio, cpp-httplib,
+[RE2](https://github.com/google/re2) with [Abseil](https://github.com/abseil/abseil-cpp) for the regular expressions
+of JSON Schema, and GoogleTest when the tests are built).
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
