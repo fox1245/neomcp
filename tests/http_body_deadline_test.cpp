@@ -99,11 +99,16 @@ std::chrono::milliseconds since(Clock::time_point start) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start);
 }
 
-// The request line and header fields; the connection closes after the answer, so that a peer reads to its end.
-std::string head(std::string_view method, std::size_t length, bool chunked = false) {
-    std::string text = std::string(method) + " " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\n" +
-                       "Connection: close\r\n";
-    if (chunked) {
+enum class Framing { length, chunked };
+enum class After { close, keep };
+
+// The request line and header fields. By default the connection closes after the answer, so that a peer reads to its
+// end.
+std::string head(std::string_view method, std::size_t length, Framing framing = Framing::length,
+                 After after = After::close) {
+    std::string text = std::string(method) + " " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\n";
+    if (after == After::close) text += "Connection: close\r\n";
+    if (framing == Framing::chunked) {
         text += "Transfer-Encoding: chunked\r\n";
     } else {
         text += "Content-Length: " + std::to_string(length) + "\r\n";
@@ -173,6 +178,34 @@ public:
                 break;
             }
             got.append(buffer, static_cast<std::size_t>(n));
+        }
+        return got;
+    }
+
+    // One response whose body has a Content-Length, on a connection that stays open; empty when none came in time.
+    std::string read_response(std::chrono::milliseconds timeout = patience) {
+        constexpr std::string_view end_of_head = "\r\n\r\n";
+        constexpr std::string_view length_field = "\r\nContent-Length: ";
+        std::string got;
+        const auto until = Clock::now() + timeout;
+        std::size_t want = std::string::npos;
+        while (want == std::string::npos || got.size() < want) {
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(until - Clock::now());
+            if (left <= 0ms || !readable(left)) return {};
+            char buffer[4096];
+            const auto n = recv(fd_, buffer, sizeof(buffer), 0);
+            if (n <= 0) return {};
+            got.append(buffer, static_cast<std::size_t>(n));
+            const std::size_t head_end = got.find(end_of_head);
+            if (want == std::string::npos && head_end != std::string::npos) {
+                const std::size_t field = got.find(length_field);
+                std::size_t length = 0;
+                for (std::size_t i = field == std::string::npos ? got.size() : field + length_field.size();
+                     i < got.size() && got[i] >= '0' && got[i] <= '9'; ++i) {
+                    length = length * 10 + static_cast<std::size_t>(got[i] - '0');
+                }
+                want = head_end + end_of_head.size() + length;
+            }
         }
         return got;
     }
@@ -247,22 +280,151 @@ TEST(HttpBodyDeadline, ABodyReadInPartWhenTheTimeIsUpIsRefusedAndItsConnectionCl
 #endif
 }
 
-TEST(HttpBodyDeadline, ABodyWithoutADeclaredLengthIsRefusedBeforeItIsRead) {
+// The time limit of a chunked body covers its framing too: the chunk-size lines, their extensions and the trailer
+// fields after the last chunk, which arrive between the pieces of data. Each case sends a byte of one of them every
+// 150 ms, far inside the read timeout, and never completes it; the listener has one worker, which serves another client
+// right after the cut.
+constexpr std::chrono::milliseconds stall_body_timeout = 600ms;
+constexpr std::chrono::milliseconds stall_read_timeout = 2s;
+constexpr std::chrono::milliseconds stall_pace = 150ms;
+
+struct Stall {
+    const char* where;
+    std::string before;  // sent at once after the header fields
+    char repeated;       // then sent a byte at a time
+};
+
+const std::vector<Stall>& stalls() {
+    static const std::vector<Stall> all = {
+        {"a chunk-size line", "4\r\nabcd\r\n", '0'},
+        {"a chunk extension", "4\r\nabcd\r\n4;", 'x'},
+        {"the trailer fields", "4\r\nabcd\r\n0\r\nX-Slow: ", 'v'},
+    };
+    return all;
+}
+
+// Sends the stall's bytes until an answer arrives (or for at most `longest`), then reads the answer.
+std::string stall(RawPeer& peer, const Stall& how, std::chrono::milliseconds longest) {
+    if (!peer.write(head("POST", 0, Framing::chunked)) || !peer.write(how.before)) return {};
+    const auto until = Clock::now() + longest;
+    while (Clock::now() < until && !peer.readable(stall_pace)) {
+        if (!peer.write(std::string(1, how.repeated))) break;
+    }
+    return peer.read_all();
+}
+
+ListenerOptions one_worker(std::chrono::milliseconds read_timeout, std::chrono::milliseconds body_timeout) {
+    ListenerOptions options = options_with(read_timeout, body_timeout);
+    options.worker_threads = 1;
+    options.max_worker_threads = 1;
+    return options;
+}
+
+TEST(HttpBodyDeadline, AChunkedBodyStalledInItsFramingIsCutAtTheDeadline) {
     NEOMCP_SKIP_WITHOUT_RAW_SOCKETS();
 #if !defined(_WIN32)
-    constexpr auto read_timeout = 2s;
-    Echo echo(options_with(read_timeout, 60s));
+    Echo echo(one_worker(stall_read_timeout, stall_body_timeout));
+    ASSERT_NE(echo.port(), 0);
+    for (const Stall& how : stalls()) {
+        SCOPED_TRACE(how.where);
+        RawPeer peer(echo.port());
+        ASSERT_TRUE(peer.connected());
+        const auto start = Clock::now();
+        const std::string answer = stall(peer, how, 8s);
+        const auto took = since(start);
+        EXPECT_EQ(status_of(answer), 408) << answer.substr(0, 200);
+        EXPECT_TRUE(peer.closed());
+        EXPECT_GE(took, stall_body_timeout);
+        EXPECT_LT(took, stall_body_timeout + stall_read_timeout / 2) << "cut after " << took.count() << " ms";
+
+        // The one worker is free again.
+        const auto next = Clock::now();
+        httplib::Client client("127.0.0.1", echo.port());
+        client.set_keep_alive(false);
+        client.set_read_timeout(30, 0);
+        const auto served = client.Post(path, "next", "text/plain");
+        ASSERT_TRUE(served);
+        EXPECT_EQ(served->status, 200);
+        EXPECT_LT(since(next), stall_read_timeout / 2);
+    }
+    EXPECT_EQ(echo.calls(), 1u) << "only the requests after the cuts reached the handler";
+#endif
+}
+
+TEST(HttpBodyDeadline, StopDoesNotWaitForAChunkedBodyStalledInItsFraming) {
+    NEOMCP_SKIP_WITHOUT_RAW_SOCKETS();
+#if !defined(_WIN32)
+    // A deadline of a minute: only stop() ends the stall.
+    Echo echo(one_worker(stall_read_timeout, 60s));
     ASSERT_NE(echo.port(), 0);
     RawPeer peer(echo.port());
     ASSERT_TRUE(peer.connected());
+    std::thread slow([&] { (void)stall(peer, stalls().front(), 20s); });
+    std::this_thread::sleep_for(400ms);  // the chunk-size line is being read
     const auto start = Clock::now();
-    // The header fields only: an answer that waits for a chunk line would come after a read timeout.
-    ASSERT_TRUE(peer.write(head("POST", 0, true)));
-    const std::string answer = peer.read_all();
-    EXPECT_EQ(status_of(answer), 411) << answer.substr(0, 200);
-    EXPECT_TRUE(peer.closed());
-    EXPECT_LT(since(start), read_timeout / 2);
+    echo.listener().stop();
+    const auto took = since(start);
+    slow.join();
+    EXPECT_LT(took, stall_read_timeout) << "stop() took " << took.count() << " ms";
     EXPECT_EQ(echo.calls(), 0u);
+#endif
+}
+
+TEST(HttpBodyDeadline, AnHonestChunkedBodyWithExtensionsAndTrailersIsServedWhole) {
+    NEOMCP_SKIP_WITHOUT_RAW_SOCKETS();
+#if !defined(_WIN32)
+    Echo echo(one_worker(stall_read_timeout, 5s));
+    ASSERT_NE(echo.port(), 0);
+    RawPeer peer(echo.port());
+    ASSERT_TRUE(peer.connected());
+    ASSERT_TRUE(peer.write(head("POST", 0, Framing::chunked)));
+    for (const char* piece : {"5;name=value\r\nhello\r\n", "6;flag\r\n world\r\n", "0\r\nX-Trailer: done\r\n\r\n"}) {
+        std::this_thread::sleep_for(50ms);
+        ASSERT_TRUE(peer.write(piece));
+    }
+    const std::string answer = peer.read_all();
+    EXPECT_EQ(status_of(answer), 200) << answer.substr(0, 200);
+    EXPECT_NE(answer.find("\r\n\r\nhello world"), std::string::npos) << answer;
+    EXPECT_TRUE(echo.saw("hello world"));
+#endif
+}
+
+TEST(HttpBodyDeadline, TheLimitOfOneBodyDoesNotReachTheNextRequest) {
+    NEOMCP_SKIP_WITHOUT_RAW_SOCKETS();
+#if !defined(_WIN32)
+    Echo echo(one_worker(stall_read_timeout, stall_body_timeout));
+    ASSERT_NE(echo.port(), 0);
+    // A body that is cut, then a new connection to the same worker whose body takes most of its own time.
+    {
+        RawPeer cut(echo.port());
+        ASSERT_TRUE(cut.connected());
+        EXPECT_EQ(status_of(stall(cut, stalls().front(), 8s)), 408);
+    }
+    {
+        RawPeer next(echo.port());
+        ASSERT_TRUE(next.connected());
+        const std::string body = "after-a-cut";
+        const std::string answer = trickle(next, head("POST", body.size()) + body, head("POST", body.size()).size(), 40ms);
+        EXPECT_EQ(status_of(answer), 200) << answer.substr(0, 200);
+        EXPECT_TRUE(echo.saw(body));
+    }
+    // One keep-alive connection: a body that is served, a pause longer than its deadline, then a second request whose
+    // body takes most of its own time; both framings.
+    for (const Framing first : {Framing::length, Framing::chunked}) {
+        SCOPED_TRACE(first == Framing::length ? "Content-Length first" : "chunked first");
+        RawPeer peer(echo.port());
+        ASSERT_TRUE(peer.connected());
+        const std::string one = first == Framing::length ? "one" : "3\r\none\r\n0\r\n\r\n";
+        ASSERT_TRUE(peer.write(head("POST", 3, first, After::keep) + one));
+        const std::string answered = peer.read_response();
+        ASSERT_EQ(status_of(answered), 200) << answered.substr(0, 200);
+        EXPECT_NE(answered.find("\r\n\r\none"), std::string::npos);
+        std::this_thread::sleep_for(stall_body_timeout + stall_pace);
+        const std::string two = "second";
+        const std::string second = trickle(peer, head("POST", two.size()) + two, head("POST", two.size()).size(), 60ms);
+        EXPECT_EQ(status_of(second), 200) << second.substr(0, 200);
+        EXPECT_TRUE(echo.saw(two));
+    }
 #endif
 }
 

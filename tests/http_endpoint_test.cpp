@@ -863,6 +863,55 @@ TEST(HttpEndpointRebinding, StartFailsOnANonLoopbackAddressWithoutNamedHosts) {
 
 // ---- Request checks --------------------------------------------------------------------------------------------------
 
+// A POST as the official .NET client sends it: its JSON content has no length known in advance, so the body comes in
+// the chunked transfer coding; here in two chunks, split in the middle of the message.
+httplib::Result post_chunked(std::uint16_t port, const httplib::Headers& headers, const std::string& body) {
+    auto client = make_client(port);
+    const std::size_t half = body.size() / 2;
+    int part = 0;
+    return client->Post(
+        path, headers,
+        [&](std::size_t, httplib::DataSink& sink) {
+            switch (part++) {
+                case 0: return sink.write(body.data(), half);
+                case 1: return sink.write(body.data() + half, body.size() - half);
+                default: sink.done(); return true;
+            }
+        },
+        json_type);
+}
+
+TEST(HttpEndpointChecks, AChunkedPostAsTheDotNetClientSendsItIsAnsweredInBothEras) {
+    Harness harness;
+    // A session-based revision: the handshake, the notification that completes it and a call, each chunked.
+    const auto opened = post_chunked(harness.port, {{"Accept", both_types}}, rpc(1, "initialize", initialize_params()));
+    ASSERT_TRUE(opened);
+    ASSERT_EQ(opened->status, 200) << opened->body;
+    const std::string session = opened->get_header_value("Mcp-Session-Id");
+    ASSERT_FALSE(session.empty());
+    const httplib::Headers in_session{
+        {"Accept", both_types}, {"MCP-Protocol-Version", legacy}, {"Mcp-Session-Id", session}};
+    const auto ready = post_chunked(harness.port, in_session, notification("notifications/initialized"));
+    ASSERT_TRUE(ready);
+    EXPECT_EQ(ready->status, 202);
+    const auto called =
+        post_chunked(harness.port, in_session, rpc(2, "tools/call", call_params("echo", {{"text", "chunked"}})));
+    ASSERT_TRUE(called);
+    ASSERT_EQ(called->status, 200) << called->body;
+    EXPECT_EQ(json::parse(called->body).at("result").at("content").at(0).at("text"), "chunked");
+
+    // 2026-07-28: a request that names its revision.
+    const httplib::Headers modern_fields{{"Accept", both_types},
+                                         {"MCP-Protocol-Version", modern},
+                                         {"Mcp-Method", "tools/call"},
+                                         {"Mcp-Name", "echo"}};
+    const auto modern_called = post_chunked(
+        harness.port, modern_fields, rpc(3, "tools/call", with_meta(call_params("echo", {{"text", "chunked too"}}))));
+    ASSERT_TRUE(modern_called);
+    ASSERT_EQ(modern_called->status, 200) << modern_called->body;
+    EXPECT_EQ(json::parse(modern_called->body).at("result").at("content").at(0).at("text"), "chunked too");
+}
+
 TEST(HttpEndpointChecks, MethodMediaTypeAcceptAndBodyBound) {
     neomcp::Server server({.name = "s", .version = "1", .max_message_bytes = 512});
     neomcp::HttpServer http(server, quick_options());
