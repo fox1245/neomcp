@@ -35,8 +35,9 @@ What exists now:
 - A Streamable HTTP server that serves both eras on one endpoint: sessions for the revisions that have them, the
   per-request form of 2026-07-28 without one.
 - Asking the client for input while a call is served (a form, a completion from its model, its roots): a handler
-  returns what it needs and is entered again with the answers, and the library carries that in the way each
-  revision defines. The state that travels between the rounds is signed by the server.
+  declares what it needs and runs once the answers are there, or returns what it needs and is entered again with
+  them, and the library carries that in the way each revision defines. The state that travels between the rounds is
+  signed by the server.
 - Telling clients of changes: tools, prompts and resources can be switched on and off while the server serves, a
   resource can be reported as updated, and clients hear of it in the way their revision defines.
 - The server is run in CI against the official conformance suite for the revisions 2025-11-25 and 2026-07-28, and
@@ -160,6 +161,34 @@ Sizing: each request waiting for its answer and each open response stream holds 
 for as long as it lasts. `max_worker_threads` (default 32) bounds them together; connections beyond it wait, up to
 `max_queued_connections`, and one beyond that is closed. A client of a session-based revision usually keeps one
 stream open besides its requests, so allow one worker per such client plus the requests you expect in flight.
+
+## Asking the client
+
+A tool, a prompt or a resource can ask the client for something while a call is served: a form the user fills in, a
+completion from the client's model, the client's roots. Declare it after the handler, and the handler takes the
+answer:
+
+```cpp
+struct Confirm {
+    bool ok;
+};
+NEOMCP_DESCRIBE(Confirm, ok, "Delete it?")
+
+server.tool<DeleteArgs>("delete_folder", "Delete a folder",
+    [](const DeleteArgs& a, const neomcp::Answer<Confirm>& confirm) {
+        if (!confirm.accepted() || !confirm->ok) return std::string("kept");
+        remove_folder(a.path);
+        return std::string("deleted");
+    },
+    neomcp::elicit<Confirm>("confirm", [](const DeleteArgs& a) { return "Delete " + a.path + "?"; }));
+```
+
+The form is built from `Confirm`, and what the user submits is checked against it before the handler sees it. The
+question function runs on every round of the call, so it must have no effects and must ask the same question for the
+same arguments. The handler runs exactly once, when every declared input has its answer, and never in a round that
+asks. Whether the client is asked by a result and a retried call or by requests sent while the call waits follows the
+revision it speaks, and the same code serves both. A handler that needs more control returns `neomcp::InputRequired`
+itself and is entered again with the answers, as `neomcp/server.h` describes.
 
 ## License
 
