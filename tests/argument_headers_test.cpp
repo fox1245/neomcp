@@ -3,9 +3,16 @@
 //
 // Every expected value is written here from the specification of the revision that defines argument headers, not
 // read back from its profile; the profile supplies the keyword and the header prefix only to the code under test.
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <initializer_list>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -17,6 +24,7 @@
 #include "neomcp/argument_headers.h"
 #include "neomcp/profile.h"
 #include "neomcp/server.h"
+#include "neomcp/testing/peer.h"
 
 namespace {
 
@@ -344,6 +352,186 @@ TEST(ArgumentHeaderRegistration, ServingTheRevisionThatDefinesThemAmongOthersChe
     neomcp::Server server(std::move(options));
     const json number = one_property(R"({"type":"number","x-mcp-header":"H"})");
     EXPECT_FALSE(registration_error(server, tool_of("t", number)).empty());
+}
+
+}  // namespace
+
+// ---- Marks written with the describe layer ----------------------------------------------------------------------
+
+namespace described {
+
+struct Place {
+    std::string city;
+    std::optional<std::string> zone;
+};
+
+struct Spanner {
+    std::string region;
+    std::int32_t priority;
+    bool verbose;
+    std::optional<std::string> note;
+    Place place;
+    std::string query;
+};
+
+struct Wide {
+    std::int64_t count;
+};
+
+struct BadName {
+    std::string name;
+};
+
+struct Twice {
+    std::string a;
+    std::string b;
+};
+
+struct Listed {
+    std::vector<Place> places;
+};
+
+}  // namespace described
+
+template <>
+struct neomcp::Described<described::Place> {
+    static constexpr auto fields = neomcp::fields(
+        neomcp::field(&described::Place::city, "city", "the city", neomcp::mirror_in_header("City")),
+        neomcp::field(&described::Place::zone, "zone", "the zone", neomcp::mirror_in_header("Zone")));
+};
+
+template <>
+struct neomcp::Described<described::Spanner> {
+    static constexpr auto fields = neomcp::fields(
+        neomcp::field(&described::Spanner::region, "region", "the region", neomcp::mirror_in_header("Region")),
+        neomcp::field(&described::Spanner::priority, "priority", "the priority", neomcp::mirror_in_header("Priority")),
+        neomcp::field(&described::Spanner::verbose, "verbose", "chatty", neomcp::mirror_in_header("Verbose")),
+        neomcp::field(&described::Spanner::note, "note", "a note"),
+        neomcp::field(&described::Spanner::place, "place", "where"),
+        neomcp::field(&described::Spanner::query, "query", "the query"));
+};
+
+template <>
+struct neomcp::Described<described::Wide> {
+    static constexpr auto fields = neomcp::fields(
+        neomcp::field(&described::Wide::count, "count", "how many", neomcp::mirror_in_header("Count")));
+};
+
+template <>
+struct neomcp::Described<described::BadName> {
+    static constexpr auto fields = neomcp::fields(
+        neomcp::field(&described::BadName::name, "name", "a name", neomcp::mirror_in_header("not a token")));
+};
+
+template <>
+struct neomcp::Described<described::Twice> {
+    static constexpr auto fields = neomcp::fields(
+        neomcp::field(&described::Twice::a, "a", "", neomcp::mirror_in_header("Same")),
+        neomcp::field(&described::Twice::b, "b", "", neomcp::mirror_in_header("sAME")));
+};
+
+template <>
+struct neomcp::Described<described::Listed> {
+    static constexpr auto fields = neomcp::fields(neomcp::field(&described::Listed::places, "places", "the places"));
+};
+
+namespace {
+
+std::string mark_of(const json& schema, std::initializer_list<const char*> properties) {
+    const json* at = &schema;
+    for (const char* name : properties) {
+        if (!at->contains("properties") || !at->at("properties").contains(name)) return "(no property)";
+        at = &at->at("properties").at(name);
+    }
+    return at->contains(keyword) ? at->at(keyword).get<std::string>() : "(none)";
+}
+
+TEST(DescribedHeaderMarks, TheMarksOfAStructAreCollectedWithTheirPlaces) {
+    const auto marks = neomcp::header_marks_of<described::Spanner>();
+    ASSERT_EQ(marks.size(), 5U);
+    EXPECT_EQ(marks[0].name, "Region");
+    EXPECT_EQ(marks[0].path, (std::vector<std::string>{"region"}));
+    EXPECT_EQ(marks[1].name, "Priority");
+    EXPECT_EQ(marks[2].name, "Verbose");
+    EXPECT_EQ(marks[3].name, "City");
+    EXPECT_EQ(marks[3].path, (std::vector<std::string>{"place", "city"}));
+    EXPECT_EQ(marks[4].name, "Zone");
+    EXPECT_EQ(marks[4].path, (std::vector<std::string>{"place", "zone"}));
+    EXPECT_TRUE(neomcp::header_marks_of<described::Listed>().empty()) << "nothing below a vector is reached";
+}
+
+TEST(DescribedHeaderMarks, TheSchemaOfTheTypeAloneCarriesNoMark) {
+    const json schema = neomcp::schema_of<described::Spanner>();
+    EXPECT_EQ(mark_of(schema, {"region"}), "(none)");
+}
+
+TEST(DescribedHeaderMarks, ARegisteredToolListsTheKeywordOnTheMarkedMembersOnly) {
+    neomcp::Server server({.name = "t", .version = "1"});
+    server.tool<described::Spanner>("spanner", "d", [](const described::Spanner&) { return std::string("done"); });
+    ASSERT_EQ(server.tools().size(), 1U);
+    const json& schema = server.tools()[0].input_schema;
+    EXPECT_EQ(mark_of(schema, {"region"}), "Region");
+    EXPECT_EQ(mark_of(schema, {"priority"}), "Priority");
+    EXPECT_EQ(mark_of(schema, {"verbose"}), "Verbose");
+    EXPECT_EQ(mark_of(schema, {"place", "city"}), "City");
+    EXPECT_EQ(mark_of(schema, {"place", "zone"}), "Zone") << "an optional member may carry a mark";
+    EXPECT_EQ(mark_of(schema, {"note"}), "(none)");
+    EXPECT_EQ(mark_of(schema, {"place"}), "(none)");
+    EXPECT_EQ(mark_of(schema, {"query"}), "(none)");
+    // What the schema of the type says is kept.
+    EXPECT_EQ(schema.at("properties").at("priority").at("maximum"), 2147483647);
+    EXPECT_EQ(schema.at("properties").at("region").at("description"), "the region");
+}
+
+TEST(DescribedHeaderMarks, ARevisionWithoutArgumentHeadersGetsNoKeyword) {
+    neomcp::ServerOptions options{.name = "t", .version = "1"};
+    options.profiles = profiles_of({"2025-11-25"});
+    neomcp::Server server(std::move(options));
+    server.tool<described::Spanner>("spanner", "d", [](const described::Spanner&) { return std::string("done"); });
+    EXPECT_EQ(mark_of(server.tools()[0].input_schema, {"region"}), "(none)");
+}
+
+TEST(DescribedHeaderMarks, TheKeywordOfEveryServedRevisionIsWritten) {
+    // Two profiles that name different keywords: each is written, so a client of either finds its own.
+    const auto text = std::string(neomcp::profile::builtin_text(modern_revision));
+    json second = parsed(text);
+    second["revision"] = "2099-01-01";
+    second["transports"]["streamable_http"]["argument_headers"]["schema_keyword"] = "x-other-header";
+    const auto loaded = neomcp::profile::load(second.dump());
+    if (const auto* error = std::get_if<neomcp::profile::Error>(&loaded)) {
+        FAIL() << "the profile did not load: " << error->pointer << " " << error->message;
+    }
+    neomcp::ServerOptions options{.name = "t", .version = "1"};
+    options.profiles = {neomcp::profile::builtin(modern_revision), std::get<neomcp::profile::ProfilePtr>(loaded)};
+    neomcp::Server server(std::move(options));
+    server.tool<described::Place>("place", "d", [](const described::Place&) { return std::string("done"); });
+    const json& city = server.tools()[0].input_schema.at("properties").at("city");
+    EXPECT_EQ(city.at(keyword), "City");
+    EXPECT_EQ(city.at("x-other-header"), "City");
+}
+
+TEST(DescribedHeaderMarks, MarksThatBreakARuleRefuseTheTool) {
+    neomcp::Server server({.name = "t", .version = "1"});
+    const auto message_of = [&](auto tool_registration) {
+        try {
+            tool_registration();
+        } catch (const std::invalid_argument& error) {
+            return std::string(error.what());
+        }
+        return std::string();
+    };
+    const std::string wide = message_of(
+        [&] { server.tool<described::Wide>("wide", "d", [](const described::Wide&) { return std::string("done"); }); });
+    EXPECT_NE(wide.find("wide"), std::string::npos) << wide;
+    EXPECT_NE(wide.find("/properties/count"), std::string::npos) << wide;
+    EXPECT_NE(wide.find("bounded"), std::string::npos) << wide;
+    const std::string bad = message_of(
+        [&] { server.tool<described::BadName>("bad", "d", [](const described::BadName&) { return std::string("done"); }); });
+    EXPECT_NE(bad.find("token"), std::string::npos) << bad;
+    const std::string twice = message_of(
+        [&] { server.tool<described::Twice>("twice", "d", [](const described::Twice&) { return std::string("done"); }); });
+    EXPECT_NE(twice.find("without regard to case"), std::string::npos) << twice;
+    EXPECT_TRUE(server.tools().empty());
 }
 
 }  // namespace

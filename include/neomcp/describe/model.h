@@ -230,6 +230,35 @@ struct DefaultValue {
     void apply(json& schema) const { detail::set_keyword(schema, "default", detail::option_json(value)); }
 };
 
+// Marks the parameter to be mirrored into an HTTP header whose name portion is `name`, where a revision that the
+// server serves lets a client do that. The header is then "<prefix><name>"; the prefix and the schema keyword that
+// carries the mark come from the revision's profile, so nothing here spells them. The member's own schema stays as
+// it is: Server::tool<Args> writes the keyword into the tool's input schema when it registers the tool, once for
+// every keyword the served revisions define, and writes nothing when none does.
+//
+// Applies to bool, integer and std::string members, also inside a described struct that is itself a member (not
+// below a vector or a map). The rules for a mark are checked when the tool is registered (see header_parameters in
+// neomcp/argument_headers.h): the name must be an HTTP token and unique among the marks without regard to case, and an
+// integer member needs a lower and an upper bound within +-9007199254740991 (neomcp::minimum and neomcp::maximum).
+// The option is not enforced by decoding, and a schema made by schema_of<Args>() alone does not carry the mark.
+struct HeaderName {
+    std::string_view name;
+    template <class Member>
+    static constexpr void check() {
+        static_assert(std::is_same_v<Member, bool> || std::is_same_v<Member, std::string> ||
+                          (std::is_integral_v<Member> && detail::is_number_v<Member>),
+                      "neomcp::mirror_in_header applies to bool, integer and std::string members only");
+    }
+    void apply(json&) const {}
+};
+
+// One parameter marked with neomcp::mirror_in_header: the names of the members that lead to it from the root of the
+// arguments, and the name portion of its header.
+struct HeaderMark {
+    std::vector<std::string> path;
+    std::string name;
+};
+
 template <class V>
 constexpr Minimum<std::decay_t<V>> minimum(V value) {
     static_assert(detail::is_number_v<V>, "neomcp::minimum takes an integer or a floating point number");
@@ -262,6 +291,8 @@ constexpr auto one_of(Vs... values) {
         return OneOf<int, 0>{};
     }
 }
+
+constexpr HeaderName mirror_in_header(std::string_view name) { return {name}; }
 
 template <class V>
 constexpr DefaultValue<detail::option_value_t<V>> default_value(V value) {

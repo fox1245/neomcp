@@ -392,6 +392,13 @@ public:
     // A tool whose arguments are the described struct Args: the input schema is schema_of<Args>() and arguments are
     // decoded with from_json<Args>. Throws std::invalid_argument for an empty or duplicate name and std::logic_error
     // once the server serves; each message names the tool.
+    //
+    // A member described with neomcp::mirror_in_header(name) is marked in the input schema for the revisions that let
+    // a client mirror a parameter into an HTTP header: for each of them the schema keyword the revision defines is
+    // written on the member's property, and a call over Streamable HTTP must then carry the header that mirrors it
+    // (see neomcp/argument_headers.h). The marks have to obey the rules of those revisions, else std::invalid_argument
+    // names the tool, the place and the rule. Only a struct described with a Described specialisation can carry
+    // options; NEOMCP_DESCRIBE cannot.
     template <class Args, class Handler>
     ToolHandle tool(std::string name, std::string description, Handler&& handler);
 
@@ -401,7 +408,9 @@ public:
 
     // A tool with a definition written by hand; the handler takes the arguments object and returns a ToolResult.
     // The input schema must be an object schema the validator accepts, and so must the output schema when there is
-    // one; std::invalid_argument otherwise.
+    // one; std::invalid_argument otherwise. The schema may mark integer, string and boolean parameters for HTTP
+    // headers with the keyword the revision defines (header_parameters in neomcp/argument_headers.h states the rules);
+    // for a server that serves a revision that defines it, a mark that breaks a rule is std::invalid_argument too.
     template <class Handler>
     ToolHandle tool(ToolDefinition definition, Handler&& handler);
 
@@ -460,7 +469,7 @@ public:
     CompletionHost* completion_host() noexcept override;
 
 private:
-    ToolHandle add(ToolDefinition definition, detail::Body body);
+    ToolHandle add(ToolDefinition definition, detail::Body body, std::vector<HeaderMark> marks = {});
     ResourceHandle add_resource(ResourceDefinition definition, detail::FeatureBody<ReadResult> body);
     PromptHandle add_prompt(PromptDefinition definition, detail::FeatureBody<PromptResult> body);
     ResourceTemplateHandle add_resource_template(ResourceTemplateDefinition definition,
@@ -490,7 +499,8 @@ ToolHandle Server::tool(std::string name, std::string description, Handler&& han
         definition.input_schema = schema_of<Args>();
         definition.output_schema = detail::output_schema_of<detail::handler_value_t<detail::Input::typed, F>>();
         return add(std::move(definition),
-                   detail::make_body<detail::Input::typed, Args, F>(std::forward<Handler>(handler)));
+                   detail::make_body<detail::Input::typed, Args, F>(std::forward<Handler>(handler)),
+                   header_marks_of<Args>());
     }
 }
 

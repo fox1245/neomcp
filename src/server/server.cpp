@@ -260,7 +260,7 @@ public:
     // The options of a session on this server for the transport.
     SessionOptions session_options(profile::Transport transport, IdleCallback on_idle);
 
-    std::size_t add(ToolDefinition definition, Body body);
+    std::size_t add(ToolDefinition definition, Body body, std::vector<HeaderMark> marks);
     void edit(std::size_t index, const std::function<void(ToolDefinition&)>& change);
     const ToolDefinition& definition(std::size_t index) const { return definitions_.at(index); }
 
@@ -348,6 +348,8 @@ private:
     // Throws std::invalid_argument when the schema marks a parameter for a header against a rule of the revisions
     // served.
     void check_header_marks(const std::string& tool, const json& schema) const;
+    // Writes the keyword of each served revision on the property that each mark of a described struct names.
+    void write_header_marks(const std::string& tool, json& schema, const std::vector<HeaderMark>& marks) const;
     void ensure_registering(const std::string& label, std::string_view action) const;
     bool admits() const;  // with mutex_ held
 
@@ -585,7 +587,28 @@ void ServerCore::check_header_marks(const std::string& tool, const json& schema)
     }
 }
 
-std::size_t ServerCore::add(ToolDefinition definition, Body body) {
+void ServerCore::write_header_marks(const std::string& tool, json& schema, const std::vector<HeaderMark>& marks) const {
+    const auto child = [](json& object, std::string_view name) -> json* {
+        auto* members = object.get_ptr<json::object_t*>();
+        if (members == nullptr) return nullptr;
+        const auto found = members->find(std::string(name));
+        return found == members->end() ? nullptr : &found->second;
+    };
+    for (const HeaderMark& mark : marks) {
+        json* property = &schema;
+        for (const std::string& step : mark.path) {
+            json* properties = child(*property, "properties");
+            property = properties == nullptr ? nullptr : child(*properties, step);
+            if (property == nullptr || !property->is_object()) {
+                throw std::invalid_argument("neomcp: tool '" + tool + "': the schema has no property schema for the member '" +
+                                            step + "', which is marked to be mirrored into a header");
+            }
+        }
+        for (const std::string& keyword : argument_keywords_) (*property)[keyword] = json(mark.name);
+    }
+}
+
+std::size_t ServerCore::add(ToolDefinition definition, Body body, std::vector<HeaderMark> marks) {
     const std::string name = definition.name;
     ensure_registering("tool '" + name + "'", "registered");
     if (name.empty()) throw std::invalid_argument("neomcp: a tool needs a name");
@@ -595,6 +618,7 @@ std::size_t ServerCore::add(ToolDefinition definition, Body body) {
     if (definition.meta && !definition.meta->is_object()) {
         throw std::invalid_argument("neomcp: tool '" + name + "': _meta must be an object");
     }
+    write_header_marks(name, definition.input_schema, marks);
     auto entry = std::make_unique<ToolEntry>(options_, std::move(body), "tool '" + name + "'");
     entry->input = compile(name, "input", definition.input_schema);
     check_header_marks(name, definition.input_schema);
@@ -1651,8 +1675,8 @@ Server::Server(ServerOptions options) : core_(std::make_shared<detail::ServerCor
 
 Server::~Server() { core_->shutdown(); }
 
-ToolHandle Server::add(ToolDefinition definition, detail::Body body) {
-    return ToolHandle(core_.get(), core_->add(std::move(definition), std::move(body)));
+ToolHandle Server::add(ToolDefinition definition, detail::Body body, std::vector<HeaderMark> marks) {
+    return ToolHandle(core_.get(), core_->add(std::move(definition), std::move(body), std::move(marks)));
 }
 
 std::variant<std::unique_ptr<Session>, CreateError> Server::connect(Sink sink, IdleCallback on_idle) {
