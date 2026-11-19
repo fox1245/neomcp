@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.22)
 project(neomcp VERSION 0.0.1 LANGUAGES CXX)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
@@ -19,6 +19,7 @@ option(NEOMCP_TEST_TIME_BOUNDS
     ON)
 
 include(cmake/NeomcpNeojson.cmake)
+include(cmake/NeomcpRe2.cmake)
 
 # Language level and warnings for the targets of this project only; third-party targets keep their own settings.
 function(neomcp_configure_target target)

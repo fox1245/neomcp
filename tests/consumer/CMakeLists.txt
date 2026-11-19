@@ -5,7 +5,7 @@
 #
 # The two programs are the README's, kept as calc.cpp and calc_http.cpp; check_readme.py fails when either differs from
 # the README.
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.22)
 project(neomcp_consumer LANGUAGES CXX)
 
 set(NEOMCP_SOURCE_DIR "" CACHE PATH "The neomcp checkout to build against")
