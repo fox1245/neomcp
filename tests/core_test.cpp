@@ -904,6 +904,96 @@ TEST(Handshake, MalformedInitialize) {
     EXPECT_EQ(error_code_of(*bare), -32602);
 }
 
+TEST(Handshake, WhatItSaysAboutTheClientIsBoundedInBytesAndNotRepeated) {
+    const auto legacy = builtin("2025-11-25");
+    constexpr std::size_t bound = 512;
+    const auto info_of = [](std::size_t name_bytes) {
+        return json{{"name", std::string(name_bytes, 'n')}, {"version", "1"}};
+    };
+    const json capabilities = json{{"roots", json::object()}};
+    const std::size_t fixed = neomcp::serialize(info_of(0)).size() + neomcp::serialize(capabilities).size();
+    ASSERT_LT(fixed, bound);
+    for (const std::size_t over : {std::size_t{0}, std::size_t{1}}) {
+        SCOPED_TRACE(over);
+        FakeHost host;
+        neomcp::SessionOptions options = test_options();
+        options.max_client_info_bytes = bound;
+        Peer peer(host, options);
+        json request = Peer::initialize_request(*legacy, 1, capabilities);
+        const std::string name(bound - fixed + over, 'n');
+        request["params"]["clientInfo"] = info_of(name.size());
+        const auto answer = peer.request(request, patience);
+        ASSERT_TRUE(answer);
+        if (over == 0) {
+            EXPECT_TRUE(answer->contains("result")) << "at the bound: " << answer->dump().substr(0, 200);
+            continue;
+        }
+        EXPECT_EQ(error_code_of(*answer), -32602) << answer->dump().substr(0, 200);
+        EXPECT_EQ(answer->dump().find(name), std::string::npos) << "the answer repeats what the client said";
+        // No connection was opened: a second handshake within the bound is taken.
+        request["params"]["clientInfo"] = info_of(1);
+        const auto again = peer.request(request, patience);
+        ASSERT_TRUE(again);
+        EXPECT_TRUE(again->contains("result")) << again->dump().substr(0, 200);
+    }
+}
+
+TEST(Handshake, EveryCallSeesWhatTheHandshakeSaidAboutTheClient) {
+    FakeHost host;
+    Peer peer(host, test_options());
+    const auto legacy = builtin("2025-11-25");
+    const json capabilities = json{{"roots", json::object()}};
+    ASSERT_TRUE(peer.request(Peer::initialize_request(*legacy, "init", capabilities), patience));
+    for (const char* id : {"c1", "c2", "c3"}) {
+        peer.notify(Peer::make_request(*legacy, id, "tools/call", {{"name", "gated"}}));
+    }
+    std::vector<FakeHost::Parked> parked;
+    for (int i = 0; i < 3; ++i) {
+        auto next = host.wait_parked(patience);
+        ASSERT_TRUE(next);
+        parked.push_back(*next);
+    }
+    for (const auto& call : parked) {
+        EXPECT_EQ(call.control.client_info().at("name"), "neomcp-test-peer");
+        EXPECT_EQ(call.control.client_capabilities(), capabilities);
+        // Every call refers to the one object the connection keeps.
+        EXPECT_EQ(&call.control.client_info(), &parked.front().control.client_info());
+    }
+    for (const auto& call : parked) call.done(text_result("done"));
+}
+
+TEST(Progress, AStringProgressTokenIsBoundedInLength) {
+    neomcp::SessionOptions options = test_options();
+    constexpr std::size_t bound = 16;
+    options.max_token_bytes = bound;
+    for (const std::string& revision : std::vector<std::string>{"2025-11-25", modern_revision}) {
+        SCOPED_TRACE(revision);
+        Conversation conversation(revision, options);
+        const auto call = [&](const json& token) {
+            return conversation.ask("tools/call", {{"name", "progress"}, {"_meta", {{"progressToken", token}}}});
+        };
+        EXPECT_TRUE(call(std::string(bound, 't')).contains("result")) << "at the bound";
+        EXPECT_TRUE(call(json(1234567890123456789LL)).contains("result")) << "an integer has no length bound";
+        const std::string longer(bound + 1, 't');
+        const json refused = call(longer);
+        EXPECT_EQ(error_code_of(refused), -32602) << refused.dump();
+        EXPECT_EQ(refused.dump().find(longer), std::string::npos);
+    }
+}
+
+TEST(Creation, RejectsZeroBoundsOfWhatAClientMaySayAboutItself) {
+    FakeHost host;
+    for (int which = 0; which < 2; ++which) {
+        neomcp::SessionOptions options = test_options();
+        if (which == 0) options.max_client_info_bytes = 0;
+        if (which == 1) options.max_token_bytes = 0;
+        auto made = neomcp::Session::create(options, host, [](std::string) {});
+        ASSERT_TRUE(std::holds_alternative<neomcp::CreateError>(made)) << which;
+        const std::string& message = std::get<neomcp::CreateError>(made).message;
+        EXPECT_NE(message.find(which == 0 ? "max_client_info_bytes" : "max_token_bytes"), std::string::npos) << message;
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // server/discover
 

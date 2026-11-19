@@ -196,6 +196,8 @@ struct SessionDefaults {
     static constexpr std::size_t max_input_rounds = 10;
     static constexpr std::chrono::seconds request_state_ttl{600};
     static constexpr bool answers_need_state = false;
+    static constexpr std::size_t max_client_info_bytes = std::size_t{64} * 1024;
+    static constexpr std::size_t max_token_bytes = 1024;
 };
 
 // The defaults of the bounds of change notifications, which SessionOptions and ServerOptions both carry.
@@ -240,6 +242,18 @@ struct SessionOptions {
     // and errors never are), so that a tool reporting faster than the client reads cannot grow the queue without
     // limit. Zero is an error. Default 1024.
     std::size_t max_queued_notifications = SessionDefaults::max_queued_notifications;
+
+    // The bytes of what a handshake says about the client, which the connection keeps for its whole life: its
+    // clientInfo and capabilities objects, as serialized. A handshake that says more is refused with Invalid params.
+    // Zero is an error. Default 64 KiB: a name, a version, a title, a website and a few icons take a few KiB, and
+    // icons given inline as data take tens of KiB.
+    std::size_t max_client_info_bytes = SessionDefaults::max_client_info_bytes;
+
+    // The longest string a client may give as a progress token, or as the id of a request that opens a subscription
+    // (subscriptions/listen): the session repeats it in every notification of the call or of the subscription, for as
+    // long as it lasts. A request with a longer one is refused with Invalid params. Zero is an error. Default 1 KiB,
+    // far above the numbers and identifiers clients use.
+    std::size_t max_token_bytes = SessionDefaults::max_token_bytes;
 
     // Whether the internal error that answers a HostFailure carries the host's message. Off: the message is fixed,
     // so that nothing about the server's internals reaches the client.

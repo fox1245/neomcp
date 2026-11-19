@@ -164,6 +164,13 @@ const std::string* cancel_name(const profile::Profile& profile, profile::Transpo
     return nullptr;
 }
 
+// What a request that says nothing about its client has: no clientInfo, no capabilities. One shared object, so that
+// a request and a call hold a pointer and never a copy of what a client said.
+std::shared_ptr<const ClientIdentity> no_client() {
+    static const auto nobody = std::make_shared<const ClientIdentity>();
+    return nobody;
+}
+
 Output make_output(std::string line, OutputKind kind, bool last, RefusalReason refusal, profile::ProfilePtr profile) {
     Output output;
     output.line = std::move(line);
@@ -206,7 +213,8 @@ struct Claims {
 
 // Where a request's client and log level come from.
 struct Origin {
-    ClientIdentity client;
+    // Shared with the connection, or made for the one request: never copied per request or per call.
+    std::shared_ptr<const ClientIdentity> client = no_client();
     std::optional<LogLevel> log_level;  // fixed for the request
     bool connection = false;            // served under the connection's handshake
 };
@@ -274,7 +282,7 @@ struct CallState {
     RequestId id;
     profile::ProfilePtr profile;
     const Served* served = nullptr;  // owned by the core; read only while the core is alive
-    ClientIdentity client;
+    std::shared_ptr<const ClientIdentity> client = no_client();  // never null
     json progress_token;  // null: the request asked for no progress
     std::optional<LogLevel> fixed_log_level;
     bool follows_connection_level = false;
@@ -379,7 +387,7 @@ private:
 
     struct Connection {
         const Served* served = nullptr;
-        ClientIdentity client;
+        std::shared_ptr<const ClientIdentity> client = no_client();  // never null; bounded by max_client_info_bytes
         LogLevel log_level = LogLevel::info;
         // Under a change feed that delivers to the connection: whether the client said it is ready, and the
         // resources whose updates it watches.
@@ -653,6 +661,8 @@ std::variant<std::shared_ptr<SessionCore>, CreateError> SessionCore::create(Sess
     if (options.max_input_rounds == 0) problem("max_input_rounds is zero");
     if (options.max_watched_resources == 0) problem("max_watched_resources is zero");
     if (options.max_watched_uri_bytes == 0) problem("max_watched_uri_bytes is zero");
+    if (options.max_client_info_bytes == 0) problem("max_client_info_bytes is zero");
+    if (options.max_token_bytes == 0) problem("max_token_bytes is zero");
     if (options.max_watched_bytes == 0) problem("max_watched_bytes is zero");
     if (options.max_subscriptions == 0) problem("max_subscriptions is zero");
     if (options.request_state_ttl <= std::chrono::seconds::zero()) problem("request_state_ttl is not positive");
@@ -1106,7 +1116,7 @@ std::optional<Answer> SessionCore::serve_named(Message request, const OpenMechan
     }
     auto& found = std::get<RequestScope>(scope);
     Origin origin;
-    origin.client = std::move(found.client);
+    origin.client = std::make_shared<const ClientIdentity>(std::move(found.client));
     origin.log_level = found.log_level;
     return serve(std::move(request), *chosen, std::move(origin), place);
 }
@@ -1149,6 +1159,14 @@ Answer SessionCore::open_connection(const Message& request, const OpenMechanism&
                       RefusalReason::none, nullptr};
     }
     const profile::Profile& profile = *served->profile;
+    // What the connection keeps of the client for its whole life is bounded; the text is not repeated.
+    if (serialize(handshake.client.info).size() + serialize(handshake.client.capabilities).size() >
+        options_.max_client_info_bytes) {
+        return Answer{make_error(id, error_code::invalid_params,
+                                 "Invalid params: initialize: params.clientInfo and params.capabilities take at most " +
+                                     std::to_string(options_.max_client_info_bytes) + " bytes"),
+                      RefusalReason::none, served->profile};
+    }
 
     json body = json::object();
     body["protocolVersion"] = profile.revision();
@@ -1161,7 +1179,7 @@ Answer SessionCore::open_connection(const Message& request, const OpenMechanism&
         const std::lock_guard<std::mutex> lock(mutex_);
         Connection connection;
         connection.served = served;
-        connection.client = std::move(handshake.client);
+        connection.client = std::make_shared<const ClientIdentity>(std::move(handshake.client));
         connection.log_level = options_.default_log_level;
         connection_ = std::move(connection);
     }
@@ -1303,6 +1321,15 @@ std::variant<json, Answer> SessionCore::progress_token_of(const Message& request
                                                    "integer"),
                                         served));
         }
+        // Every progress notification of the call repeats it.
+        const auto* text = token->get_ptr<const std::string*>();
+        if (text != nullptr && text->size() > options_.max_token_bytes) {
+            return Result(std::in_place_index<1>,
+                          served_answer(make_error(*request.id, error_code::invalid_params,
+                                                   "Invalid params: params._meta.progressToken has at most " +
+                                                       std::to_string(options_.max_token_bytes) + " bytes"),
+                                        served));
+        }
         return Result(std::in_place_index<0>, *token);
     }
     return Result(std::in_place_index<0>, json(nullptr));
@@ -1318,7 +1345,7 @@ std::shared_ptr<CallState> SessionCore::begin_call(CallKind kind, const RequestI
     call->kind = kind;
     call->profile = served.profile;
     call->served = &served;
-    call->client = std::move(origin.client);
+    call->client = origin.client;
     call->progress_token = std::move(progress_token);
     call->fixed_log_level = origin.log_level;
     if (origin.connection) {
@@ -1836,6 +1863,14 @@ std::optional<Answer> SessionCore::on_listen(const Message& request, const FeedR
         !(reported.tools_list || reported.prompts_list || reported.resources_list || reported.resource_updates)) {
         return method_not_found(request, served);
     }
+    // Every message of the subscription carries its request's id, for as long as it is open.
+    const json tag = id.to_json();
+    if (const auto* text = tag.get_ptr<const std::string*>(); text != nullptr && text->size() > options_.max_token_bytes) {
+        return served_answer(make_error(id, error_code::invalid_params,
+                                        "Invalid params: the id of a subscription request has at most " +
+                                            std::to_string(options_.max_token_bytes) + " bytes"),
+                             served);
+    }
     // Its answer comes only when it ends, which a batch's answer cannot wait for.
     if (place.batch) {
         return served_answer(make_error(id, error_code::invalid_request,
@@ -1907,7 +1942,7 @@ std::optional<Answer> SessionCore::on_listen(const Message& request, const FeedR
     call->kind = CallKind::subscription;
     call->profile = served.profile;
     call->served = &served;
-    call->client = std::move(origin.client);
+    call->client = origin.client;
     call->unit = place.unit;
     call->filter = std::move(honoured);
     std::unique_lock<std::mutex> lock(mutex_);
@@ -2455,7 +2490,7 @@ std::optional<Answer> SessionCore::take_retry(const Message& request, const Serv
 bool SessionCore::client_supports(const CallState& call, const InputRequest& request) const {
     const Served& served = *call.served;
     return served.input != nullptr &&
-           input_supported(request, call.client.capabilities, *call.profile, *served.input);
+           input_supported(request, call.client->capabilities, *call.profile, *served.input);
 }
 
 void SessionCore::fail_call(const std::shared_ptr<CallState>& call, const std::string& text, json data) {
@@ -2491,7 +2526,7 @@ void SessionCore::ask(const std::shared_ptr<CallState>& call, InputRequired aske
     json missing = json::object();
     for (const auto& [key, request] : asked.requests) {
         if (mechanism.carries(profile, method_of(request)) &&
-            capabilities_declare(request, call->client.capabilities)) {
+            capabilities_declare(request, call->client->capabilities)) {
             continue;
         }
         merge_objects(missing, required_capabilities(request));
@@ -3163,8 +3198,8 @@ std::stop_token InputWait::ended() const noexcept { return state_->ended.get_tok
 void InputWait::expire() const {
     if (auto core = state_->core.lock()) core->expire(state_);
 }
-const json& CallControl::client_info() const noexcept { return state_->client.info; }
-const json& CallControl::client_capabilities() const noexcept { return state_->client.capabilities; }
+const json& CallControl::client_info() const noexcept { return state_->client->info; }
+const json& CallControl::client_capabilities() const noexcept { return state_->client->capabilities; }
 
 void Completion::operator()(CallOutcome outcome) const {
     if (!state_ || state_->called.exchange(true)) return;

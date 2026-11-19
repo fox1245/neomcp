@@ -926,6 +926,26 @@ TEST(SubscriptionFeed, TheUrisOfASubscriptionAreBoundedInLengthAndInBytes) {
     EXPECT_EQ(client.peer.next_notification(patience), acknowledged(5, {{"resourceSubscriptions", fit}}));
 }
 
+TEST(SubscriptionFeed, TheIdOfASubscriptionRequestIsBoundedInLength) {
+    FeedHost host;
+    neomcp::SessionOptions options = options_for(modern_revision);
+    constexpr std::size_t bound = 24;
+    options.max_token_bytes = bound;
+    Client client(host, modern_revision, std::move(options));
+    const std::string longer(bound + 1, 'i');
+    const json too_long = Peer::make_request(*client.profile, longer, "subscriptions/listen",
+                                       listen_params({{"toolsListChanged", true}}));
+    const auto answer = client.peer.request(too_long, patience);
+    ASSERT_TRUE(answer);
+    ASSERT_TRUE(answer->contains("error")) << answer->dump();
+    EXPECT_EQ(answer->at("error").at("code"), neomcp::error_code::invalid_params);
+    EXPECT_EQ(host.watchers(), 0u) << "a refused subscription registers nothing";
+    const std::string fit(bound, 'i');
+    client.peer.notify(Peer::make_request(*client.profile, fit, "subscriptions/listen",
+                                          listen_params({{"toolsListChanged", true}})));
+    EXPECT_EQ(client.peer.next_notification(patience), acknowledged(fit, {{"toolsListChanged", true}})) << "at the bound";
+}
+
 TEST(FeedBounds, ASessionIsNotCreatedWithAZeroByteBound) {
     FeedHost host;
     for (int which = 0; which < 2; ++which) {
