@@ -89,6 +89,8 @@
     {"pattern": "^\\u{1F600}$", "texts": [{"text": "\ud83d\ude00", "match": true}]},
     {"pattern": "^\\cj$", "texts": [{"text": "\n", "match": true}]},
     {"pattern": "^[\\w-]$", "texts": [{"text": "-", "match": true}, {"text": "\u00e9", "match": false}]},
+    {"note": "A non-boundary lies between two characters, never inside the bytes of one.", "pattern": "\\B", "texts": [{"text": "a\u00e9b", "match": false}, {"text": "ab", "match": true}, {"text": "", "match": true}, {"text": "\u00e9", "match": true}, {"text": "a\u00e9", "match": true}]},
+    {"pattern": "\\B.", "texts": [{"text": "a\u00e9b", "match": false}, {"text": "ab", "match": true}]},
     {"pattern": "^a*?$", "texts": [{"text": "aaa", "match": true}, {"text": "b", "match": false}]},
     {"pattern": "^a{2,3}?$", "texts": [{"text": "aaa", "match": true}, {"text": "a", "match": false}]},
     {"pattern": "^(?:a|ab)(?:c|bcd)$", "texts": [{"text": "abcd", "match": true}, {"text": "abc", "match": true}, {"text": "acd", "match": false}, {"text": "ab", "match": false}]},

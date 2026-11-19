@@ -6,6 +6,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -22,6 +23,11 @@ constexpr std::size_t max_repeat = 1000;
 constexpr std::size_t saturated_count = 1'000'000;
 // How much of the pattern a message quotes for one construct.
 constexpr std::size_t quoted_bytes = 24;
+// What a pattern that contains "\B" starts with. The engine searches a text byte by byte, so an expression that can
+// match without consuming a character may begin inside the bytes of a character, and there "\B" holds, since both
+// neighbours are bytes of a character that is not an ASCII word character. ECMA-262 asks "\B" only between two code
+// points. Reading whole characters from the start of the text makes every place where the expression begins one.
+constexpr std::string_view from_a_character_boundary = "^[\\x{0}-\\x{10ffff}]*?(?:";
 
 struct Range {
     Rune lo;
@@ -248,6 +254,7 @@ public:
         } catch (PatternRefusal& refusal) {
             return std::move(refusal);
         }
+        if (non_boundary_) return std::string(from_a_character_boundary) + out_ + ")";
         return std::move(out_);
     }
 
@@ -527,6 +534,7 @@ private:
                 return assertion("\\b");
             case U'B':
                 if (in_class) refuse(start, "\\B inside a character class");
+                non_boundary_ = true;
                 return assertion("\\B");
             case U'f': return character(0x0C);
             case U'n': return character(0x0A);
@@ -647,6 +655,7 @@ private:
     std::string_view pattern_;
     std::size_t pos_ = 0;
     std::string out_;
+    bool non_boundary_ = false;  // "\B" occurs
     Previous previous_ = Previous::nothing;
     std::vector<std::size_t> opened_;  // where each open group begins
     std::set<std::string> names_;

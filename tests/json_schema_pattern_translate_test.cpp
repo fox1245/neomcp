@@ -39,7 +39,10 @@ TEST(PatternTranslate, EveryConstructBecomesTheExpressionWithTheSameMeaning) {
         {"snake_case9", "snake_case9"},
         // Assertions.
         {"^a$", "^a$"},
-        {"\\bfoo\\B", "\\bfoo\\B"},
+        {"\\bfoo", "\\bfoo"},
+        // "\\B" holds only between two characters, so the expression is read from a character boundary.
+        {"\\B", "^[\\x{0}-\\x{10ffff}]*?(?:\\B)"},
+        {"a\\B|\\bb", "^[\\x{0}-\\x{10ffff}]*?(?:a\\B|\\bb)"},
         // The dot is every character but the line terminators.
         {"a.b", "a[^\\x{a}\\x{d}\\x{2028}-\\x{2029}]b"},
         // Class escapes: ASCII digits and word characters, the white space and line terminators of ECMA-262.
