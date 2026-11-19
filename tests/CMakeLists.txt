@@ -301,6 +301,12 @@ target_link_libraries(neomcp_http_session_table_test PRIVATE neomcp::http neomcp
 neomcp_configure_target(neomcp_http_session_table_test)
 gtest_discover_tests(neomcp_http_session_table_test DISCOVERY_TIMEOUT 120)
 
+# Sessions nobody used at the edges of their bound and timeout, and handshakes racing.
+add_executable(neomcp_http_unused_session_test http_unused_session_test.cpp)
+target_link_libraries(neomcp_http_unused_session_test PRIVATE neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_http_unused_session_test)
+gtest_discover_tests(neomcp_http_unused_session_test DISCOVERY_TIMEOUT 120)
+
 # The server the official conformance runner tests (the CI job `conformance`). It is neither installed nor an example.
 add_executable(neomcp_conformance_fixture conformance/everything_server.cpp)
 target_link_libraries(neomcp_conformance_fixture PRIVATE neomcp::http Threads::Threads)
