@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <string_view>
 
-#include "neomcp/stdio.h"
+#include "neomcp/byte_stream.h"
 
 namespace neomcp::detail {
 
