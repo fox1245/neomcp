@@ -273,6 +273,12 @@ target_link_libraries(neomcp_http_slow_body_test PRIVATE neomcp::http neomcp_htt
 neomcp_configure_target(neomcp_http_slow_body_test)
 gtest_discover_tests(neomcp_http_slow_body_test DISCOVERY_TIMEOUT 120)
 
+# The body deadline at its edges, with peers that write raw bytes on a plain socket.
+add_executable(neomcp_http_body_deadline_test http_body_deadline_test.cpp)
+target_link_libraries(neomcp_http_body_deadline_test PRIVATE neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_http_body_deadline_test)
+gtest_discover_tests(neomcp_http_body_deadline_test DISCOVERY_TIMEOUT 120)
+
 # ---- The Streamable HTTP endpoint ------------------------------------------------------------------------------------
 
 # Real sockets on the loopback interface, with the HTTP library's client as the peer. The test reaches the endpoint's

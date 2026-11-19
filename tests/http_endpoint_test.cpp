@@ -1280,6 +1280,7 @@ TEST(HttpServerOptionsDefaults, ANamedObjectBuiltWithDesignatedInitializersKeeps
     EXPECT_EQ(options.worker_idle_timeout, listener.worker_idle_timeout);
     EXPECT_EQ(options.max_queued_connections, listener.max_queued_connections);
     EXPECT_EQ(options.read_timeout, listener.read_timeout);
+    EXPECT_EQ(options.body_timeout, listener.body_timeout);
     EXPECT_EQ(options.write_timeout, listener.write_timeout);
     EXPECT_EQ(options.idle_connection_timeout, listener.idle_connection_timeout);
     EXPECT_EQ(options.keep_alive_interval, listener.keep_alive_interval);
