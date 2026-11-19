@@ -206,7 +206,9 @@ TEST(ReadRequest, EveryRequestAServerWritesIsReadBack) {
                         const bool made_id = std::holds_alternative<ElicitationUrl>(original) &&
                                              !std::get<ElicitationUrl>(original).elicitation_id &&
                                              allows(profile->type("ElicitRequestURLParams"), "elicitationId");
-                        if (!made_id) EXPECT_EQ(std::get<json>(again), *params);
+                        if (!made_id) {
+                            EXPECT_EQ(std::get<json>(again), *params);
+                        }
                         ++round_trips;
                     }
                 }
