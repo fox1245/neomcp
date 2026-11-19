@@ -202,6 +202,8 @@ struct SessionDefaults {
 struct FeedDefaults {
     static constexpr std::size_t max_watched_resources = 256;
     static constexpr std::size_t max_subscriptions = 16;
+    static constexpr std::size_t max_watched_uri_bytes = std::size_t{8} * 1024;
+    static constexpr std::size_t max_watched_bytes = std::size_t{128} * 1024;
 };
 
 struct SessionOptions {
@@ -249,6 +251,15 @@ struct SessionOptions {
     // at once; one more is refused. Under the mechanism of subscriptions (subscriptions_listen): the resources one
     // subscription may name; a request that names more is refused. Zero is an error. Default 256.
     std::size_t max_watched_resources = FeedDefaults::max_watched_resources;
+    // The bytes of one resource URI a client asks to be told of: a resources/subscribe of a longer URI is refused as
+    // the count above is, and so is a subscription whose filter names one (with Invalid params), before the URI
+    // reaches the host. Zero is an error. Default 8 KiB: twice the longest file path most systems allow, with room for
+    // a scheme and a query.
+    std::size_t max_watched_uri_bytes = FeedDefaults::max_watched_uri_bytes;
+    // The bytes of the URIs a connection watches at once (the sum of their lengths; an unsubscribed URI gives its
+    // bytes back), and of the URIs one subscription names: a URI that would exceed it is refused as the count above
+    // is. Zero is an error. Default 128 KiB: the default number of URIs (256) at 512 bytes each.
+    std::size_t max_watched_bytes = FeedDefaults::max_watched_bytes;
     // Under the mechanism of subscriptions: the subscriptions a session keeps open at once; one more is refused. Zero
     // is an error. Default 16.
     std::size_t max_subscriptions = FeedDefaults::max_subscriptions;

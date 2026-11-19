@@ -110,8 +110,12 @@ TEST(HttpWatchBytes, WatchingLongUrisKeepsABoundedNumberOfBytes) {
         const auto answered = post(port, session, rpc(10 + i, "resources/subscribe", json{{"uri", uri}}));
         ASSERT_TRUE(answered);
         ASSERT_EQ(answered->status, 200);
+        // Watched, or refused for the bound (a URI this long is longer than one watched URI may be): either keeps the
+        // memory bounded, and nothing else is a right answer.
         const json message = json::parse(answered->body);
-        ASSERT_TRUE(message.contains("result")) << message.dump().substr(0, 300);
+        const bool refused_for_bound = message.contains("error") && message.at("error").contains("data") &&
+                                       message.at("error").at("data").value("reason", std::string()) == "limit";
+        ASSERT_TRUE(message.contains("result") || refused_for_bound) << message.dump().substr(0, 300);
     }
     const std::size_t after = *heap_in_use();
     const std::size_t kept = after > before ? after - before : 0;

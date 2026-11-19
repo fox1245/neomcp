@@ -385,6 +385,7 @@ private:
         // resources whose updates it watches.
         bool ready = false;
         std::set<std::string, std::less<>> watched;
+        std::size_t watched_bytes = 0;  // the sum of the lengths of `watched`
     };
 
     // Where the session stands with the host's changes. Only the reading thread registers.
@@ -651,6 +652,8 @@ std::variant<std::shared_ptr<SessionCore>, CreateError> SessionCore::create(Sess
     if (options.max_queued_notifications == 0) problem("max_queued_notifications is zero");
     if (options.max_input_rounds == 0) problem("max_input_rounds is zero");
     if (options.max_watched_resources == 0) problem("max_watched_resources is zero");
+    if (options.max_watched_uri_bytes == 0) problem("max_watched_uri_bytes is zero");
+    if (options.max_watched_bytes == 0) problem("max_watched_bytes is zero");
     if (options.max_subscriptions == 0) problem("max_subscriptions is zero");
     if (options.request_state_ttl <= std::chrono::seconds::zero()) problem("request_state_ttl is not positive");
     for (const auto& key : options.request_state_keys) {
@@ -1756,6 +1759,14 @@ std::optional<Answer> SessionCore::on_watch(const Message& request, const FeedRe
         return method_not_found(request, served);
     }
     if (asked.action == FeedRequest::Action::watch) {
+        // Bounded before the URI reaches the host, or an answer that would repeat it. A longer URI is never watched,
+        // so unwatching one changes nothing and needs no bound.
+        if (asked.uri.size() > options_.max_watched_uri_bytes) {
+            return limit_refusal(id,
+                                 "Internal error: a resource URI to watch has at most " +
+                                     std::to_string(options_.max_watched_uri_bytes) + " bytes",
+                                 served);
+        }
         // A URI that names nothing the host offers is refused as a read of it would be: the pages require a server
         // to validate every resource URI and name the error for a resource that does not exist.
         bool offered = false;
@@ -1773,19 +1784,28 @@ std::optional<Answer> SessionCore::on_watch(const Message& request, const FeedRe
         }
     }
     std::size_t full = 0;  // the bound, when the URI would exceed it
+    bool too_many_bytes = false;
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         if (connection_) {
             auto& watched = connection_->watched;
+            std::size_t& bytes = connection_->watched_bytes;
             if (asked.action == FeedRequest::Action::unwatch) {
                 // Removing a URI the connection does not watch changes nothing, and is not an error.
                 const auto found = watched.find(asked.uri);
-                if (found != watched.end()) watched.erase(found);
+                if (found != watched.end()) {
+                    bytes -= found->size();
+                    watched.erase(found);
+                }
             } else if (watched.find(asked.uri) == watched.end()) {
                 if (watched.size() >= options_.max_watched_resources) {
                     full = options_.max_watched_resources;
+                } else if (bytes > options_.max_watched_bytes ||
+                           asked.uri.size() > options_.max_watched_bytes - bytes) {
+                    too_many_bytes = true;
                 } else {
                     watched.insert(asked.uri);
+                    bytes += asked.uri.size();
                 }
             }
         }
@@ -1794,6 +1814,12 @@ std::optional<Answer> SessionCore::on_watch(const Message& request, const FeedRe
         return limit_refusal(id,
                              "Internal error: the connection watches " + std::to_string(full) +
                                  " resources already, the most it may",
+                             served);
+    }
+    if (too_many_bytes) {
+        return limit_refusal(id,
+                             "Internal error: the URIs the connection watches would take more than " +
+                                 std::to_string(options_.max_watched_bytes) + " bytes, the most they may",
                              served);
     }
     json body = json::object();
@@ -1820,6 +1846,23 @@ std::optional<Answer> SessionCore::on_listen(const Message& request, const FeedR
         return served_answer(make_error(id, error_code::invalid_params,
                                         "Invalid params: a subscription names at most " +
                                             std::to_string(options_.max_watched_resources) + " resources"),
+                             served);
+    }
+    // The URIs are kept for as long as the subscription is open: bounded in bytes too, before they reach the host.
+    std::size_t filter_bytes = 0;
+    for (const auto& uri : asked.filter.resources) {
+        if (uri.size() > options_.max_watched_uri_bytes) {
+            return served_answer(make_error(id, error_code::invalid_params,
+                                            "Invalid params: a resource URI of a subscription has at most " +
+                                                std::to_string(options_.max_watched_uri_bytes) + " bytes"),
+                                 served);
+        }
+        filter_bytes += uri.size();  // at most the count bound times the length bound
+    }
+    if (filter_bytes > options_.max_watched_bytes) {
+        return served_answer(make_error(id, error_code::invalid_params,
+                                        "Invalid params: the resource URIs of a subscription take at most " +
+                                            std::to_string(options_.max_watched_bytes) + " bytes"),
                              served);
     }
     // What is honoured: the kinds of change the server reports and the revision has a notification for, and of the
