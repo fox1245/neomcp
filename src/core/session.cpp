@@ -191,6 +191,8 @@ struct Served {
     // What the profile's entry for the transport says about headers; views into the profile.
     std::span<const profile::RequestHeader> request_headers;
     const profile::EncodedHeaderValue* encoded = nullptr;
+    // The headers that mirror tool arguments, where the profile defines them for the transport.
+    const profile::ArgumentHeaders* argument_headers = nullptr;
 };
 
 // What the header fields of an input unit claim, found through the served profiles' data.
@@ -719,6 +721,7 @@ std::variant<std::shared_ptr<SessionCore>, CreateError> SessionCore::create(Sess
             const profile::StreamableHttpTransport& http = *profile->streamable_http();
             served.request_headers = http.request_headers;
             if (http.encoded_header_value) served.encoded = &*http.encoded_header_value;
+            if (http.argument_headers) served.argument_headers = &*http.argument_headers;
             std::vector<std::string_view> names;
             if (http.version_header) names.push_back(http.version_header->name);
             for (const auto& header : http.request_headers) {
@@ -1365,6 +1368,21 @@ std::optional<Answer> SessionCore::on_tools_call(Message& request, const Served&
     }
     if (tool == tools.end()) {
         return served_answer(make_error(id, error_code::invalid_params, "Unknown tool: " + *tool_name), served);
+    }
+
+    // What the headers claim about the arguments is checked before the arguments are checked against the schema: a
+    // header that contradicts the body is refused as such, whatever else is wrong with the call.
+    if (served.argument_headers != nullptr) {
+        if (auto failure = check_argument_headers(arguments, tool->input_schema, place.claims->fields,
+                                                  *served.argument_headers, served.encoded)) {
+            if (failure->defect) {
+                return served_answer(make_error(id, error_code::internal_error,
+                                                "Internal error: the tool " + tool->name + " cannot be called: " +
+                                                    failure->message),
+                                     served);
+            }
+            return header_mismatch(id, std::move(failure->message), {&served});
+        }
     }
 
     if (options_.check_arguments) {

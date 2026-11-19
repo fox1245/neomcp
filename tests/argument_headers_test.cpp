@@ -535,3 +535,398 @@ TEST(DescribedHeaderMarks, MarksThatBreakARuleRefuseTheTool) {
 }
 
 }  // namespace
+
+namespace {
+
+// ---- The check of a call -----------------------------------------------------------------------------------------
+
+using Fields = std::vector<std::pair<std::string, std::string>>;
+
+// Collects the outputs of a session by unit and waits for a unit's last one.
+class Recorder {
+public:
+    void operator()(neomcp::Output output) {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        const neomcp::UnitId unit = output.unit.value_or(0);
+        const bool last = output.last;
+        units_[unit].push_back(std::move(output));
+        if (last) ended_[unit] = true;
+        changed_.notify_all();
+    }
+
+    std::vector<neomcp::Output> wait(neomcp::UnitId unit) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!changed_.wait_for(lock, std::chrono::seconds(30), [&] { return ended_[unit]; })) {
+            throw std::runtime_error("unit " + std::to_string(unit) + " did not end");
+        }
+        return units_[unit];
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    std::map<neomcp::UnitId, std::vector<neomcp::Output>> units_;
+    std::map<neomcp::UnitId, bool> ended_;
+};
+
+// What a tools/call came to.
+struct Outcome {
+    json message;                                  // the one message the call was answered with
+    neomcp::RefusalReason refusal = neomcp::RefusalReason::none;
+    int status = 0;                                // the status the profile prescribes for the refusal; 0 for none
+
+    bool refused() const { return message.contains("error"); }
+    int code() const { return refused() ? message.at("error").at("code").get<int>() : 0; }
+    std::string text() const { return refused() ? message.at("error").at("message").get<std::string>() : std::string(); }
+    // A tool result with isError set, or an error answer.
+    bool failed() const {
+        return refused() || (message.at("result").contains("isError") && message.at("result").at("isError").get<bool>());
+    }
+};
+
+const char* const spanner_schema = R"({
+    "type": "object",
+    "properties": {
+        "region": {"type": "string", "x-mcp-header": "Region"},
+        "priority": {"type": ["integer", "null"], "minimum": 0, "maximum": 100, "x-mcp-header": "Priority"},
+        "verbose": {"type": ["boolean", "null"], "x-mcp-header": "Verbose"},
+        "place": {"type": ["object", "null"], "properties": {"city": {"type": ["string", "null"], "x-mcp-header": "City"}}},
+        "query": {"type": "string"}
+    },
+    "required": ["region"]
+})";
+
+class CallRig {
+public:
+    explicit CallRig(neomcp::profile::Transport transport = neomcp::profile::Transport::streamable_http)
+        : server({.name = "t", .version = "1"}) {
+        neomcp::ToolDefinition spanner = tool_of("spanner", parsed(spanner_schema));
+        server.tool(spanner, [this](const json&) {
+            ++runs;
+            return neomcp::ToolResult{};
+        });
+        neomcp::ToolDefinition plain = tool_of("plain", parsed(R"({"type":"object","properties":{"query":{"type":"string"}}})"));
+        server.tool(plain, [this](const json&) {
+            ++runs;
+            return neomcp::ToolResult{};
+        });
+        auto made = server.connect_tagged(transport, [this](neomcp::Output output) { recorder(std::move(output)); });
+        session = std::move(std::get<std::unique_ptr<neomcp::Session>>(made));
+    }
+
+    // A tools/call of the 2026-07-28 revision, with the standard headers and `extra`.
+    Outcome call(const std::string& tool, const json& arguments, const Fields& extra, bool standard = true) {
+        const auto modern = neomcp::profile::builtin(modern_revision);
+        const json request = neomcp::testing::Peer::make_request(*modern, neomcp::RequestId(next_id),
+                                                                 "tools/call", json{{"name", tool}, {"arguments", arguments}});
+        Fields fields;
+        if (standard) fields = {{"MCP-Protocol-Version", modern_revision}, {"Mcp-Method", "tools/call"}, {"Mcp-Name", tool}};
+        fields.insert(fields.end(), extra.begin(), extra.end());
+        return send(request, fields);
+    }
+
+    Outcome send(const json& request, const Fields& fields) {
+        const neomcp::UnitId unit = next_id++;
+        std::vector<neomcp::HeaderField> headers;
+        for (const auto& [name, value] : fields) headers.push_back(neomcp::HeaderField{name, value});
+        session->receive(unit, request.dump(), headers);
+        const auto outputs = recorder.wait(unit);
+        Outcome outcome;
+        for (const auto& output : outputs) {
+            if (output.kind != neomcp::OutputKind::response) continue;
+            outcome.message = json::parse(output.line);
+            outcome.refusal = output.refusal;
+            if (output.profile && output.profile->streamable_http()) {
+                outcome.status = output.profile->streamable_http()->status_for(neomcp::to_string(output.refusal)).value_or(0);
+            }
+        }
+        return outcome;
+    }
+
+    neomcp::Server server;
+    Recorder recorder;
+    std::unique_ptr<neomcp::Session> session;
+    std::atomic<int> runs{0};
+    int next_id = 1;
+};
+
+// The header the pages give for a region.
+Fields region(const std::string& value) { return {{"Mcp-Param-Region", value}}; }
+
+struct CallCase {
+    std::string name;
+    json arguments;
+    Fields headers;
+    std::string refused;  // empty: the call runs; else a part of the refusal's message
+};
+
+TEST(ArgumentHeaderCall, StringsAreComparedExactlyAndTheEncodedFormIsDecodedFirst) {
+    const std::vector<CallCase> cases{
+        {"a plain value", {{"region", "us-west1"}}, region("us-west1"), ""},
+        {"the empty string", {{"region", ""}}, region(""), ""},
+        {"a name in other cases", {{"region", "us"}}, {{"mcp-param-REGION", "us"}}, ""},
+        {"non-ASCII text in the encoded form", {{"region", "Hello, \xe4\xb8\x96\xe7\x95\x8c"}},
+         region("=?base64?SGVsbG8sIOS4lueVjA==?="), ""},
+        {"padding in the encoded form", {{"region", " padded "}}, region("=?base64?IHBhZGRlZCA=?="), ""},
+        {"a line break in the encoded form", {{"region", "line1\nline2"}}, region("=?base64?bGluZTEKbGluZTI=?="), ""},
+        {"a value that looks encoded, encoded", {{"region", "=?base64?literal?="}},
+         region("=?base64?PT9iYXNlNjQ/bGl0ZXJhbD89?="), ""},
+        {"digits of Base64 without the wrapper are literal", {{"region", "SGVsbG8="}}, region("SGVsbG8="), ""},
+        {"a prefix without the suffix is literal", {{"region", "=?base64?SGVsbG8="}}, region("=?base64?SGVsbG8="), ""},
+        {"a suffix without the prefix is literal", {{"region", "SGVsbG8=?="}}, region("SGVsbG8=?="), ""},
+        {"a space inside", {{"region", "a b"}}, region("a b"), ""},
+        {"the header is missing", {{"region", "us"}}, {}, "lacks the Mcp-Param-Region"},
+        {"the header differs", {{"region", "us"}}, region("eu"), "does not match"},
+        {"the header differs in case", {{"region", "us"}}, region("US"), "does not match"},
+        {"the header holds the encoded digits of the value", {{"region", "Hello"}}, region("SGVsbG8="), "does not match"},
+        {"the encoded header differs", {{"region", "Hello"}}, region("=?base64?SGVsbG8h?="), "does not match"},
+        {"the value has outer whitespace the header lost", {{"region", " us "}}, region("us"), "does not match"},
+        {"the padding of the encoded form is missing", {{"region", "Hello"}}, region("=?base64?SGVsbG8?="), "encoded form"},
+        {"the encoded form has characters outside the alphabet", {{"region", "Hello"}}, region("=?base64?SGVs!!!bG8=?="),
+         "encoded form"},
+        {"the encoded form is the URL-safe alphabet", {{"region", "~~~"}}, region("=?base64?fn5-?="), "encoded form"},
+        {"the encoded form in the standard alphabet", {{"region", "~~~"}}, region("=?base64?fn5+?="), ""},
+        {"the encoded form has stray bits", {{"region", "Hello"}}, region("=?base64?SGVsbG9=?="), "encoded form"},
+        {"the header is twice there", {{"region", "us"}}, {{"Mcp-Param-Region", "us"}, {"mcp-param-region", "us"}},
+         "more than once"},
+        {"a control character in a plain value", {{"region", "a\x01" "b"}}, region(std::string("a\x01" "b")), "character"},
+        {"a delete character in a plain value", {{"region", "a\x7f" "b"}}, region("a\x7f" "b"), "character"},
+        {"a byte above ASCII in a plain value", {{"region", "Hello, \xe4\xb8\x96"}}, region("Hello, \xe4\xb8\x96"),
+         "character"},
+        {"a line break in a plain value", {{"region", "a\nb"}}, region("a\nb"), "character"},
+    };
+    for (const auto& item : cases) {
+        SCOPED_TRACE(item.name);
+        CallRig rig;
+        const Outcome outcome = rig.call("spanner", item.arguments, item.headers);
+        if (item.refused.empty()) {
+            EXPECT_FALSE(outcome.failed()) << outcome.message.dump();
+            EXPECT_EQ(rig.runs.load(), 1);
+            continue;
+        }
+        EXPECT_EQ(outcome.code(), -32020) << outcome.message.dump();
+        EXPECT_EQ(outcome.refusal, neomcp::RefusalReason::header_mismatch);
+        EXPECT_EQ(outcome.status, 400);
+        EXPECT_NE(outcome.text().find(item.refused), std::string::npos) << outcome.text();
+        EXPECT_EQ(rig.runs.load(), 0) << "the tool did not run";
+    }
+}
+
+TEST(ArgumentHeaderCall, IntegersAreComparedAsNumbersAndBooleansAsWords) {
+    const json region_only = {{"region", "us"}};
+    const auto with = [&](const char* name, json value) {
+        json arguments = region_only;
+        arguments[name] = std::move(value);
+        return arguments;
+    };
+    const auto both = [](Fields first, Fields second) {
+        first.insert(first.end(), second.begin(), second.end());
+        return first;
+    };
+    const Fields r = region("us");
+    const std::vector<CallCase> cases{
+        {"an integer", with("priority", 42), both(r, {{"Mcp-Param-Priority", "42"}}), ""},
+        {"zero", with("priority", 0), both(r, {{"Mcp-Param-Priority", "0"}}), ""},
+        {"a header that spells a whole number with a fraction", with("priority", 42), both(r, {{"Mcp-Param-Priority", "42.0"}}), ""},
+        {"a header with more zeros than needed", with("priority", 7), both(r, {{"Mcp-Param-Priority", "007.000"}}), ""},
+        {"minus zero", with("priority", 0), both(r, {{"Mcp-Param-Priority", "-0"}}), ""},
+        {"an argument written with a fraction of zero", with("priority", json(42.0)), both(r, {{"Mcp-Param-Priority", "42"}}), ""},
+        {"an integer in the encoded form", with("priority", 42), both(r, {{"Mcp-Param-Priority", "=?base64?NDI=?="}}), ""},
+        {"a different integer", with("priority", 42), both(r, {{"Mcp-Param-Priority", "43"}}), "does not match"},
+        {"a fraction that is not zero", with("priority", 42), both(r, {{"Mcp-Param-Priority", "42.5"}}), "does not match"},
+        {"an exponent", with("priority", 100), both(r, {{"Mcp-Param-Priority", "1e2"}}), "does not match"},
+        {"a hexadecimal number", with("priority", 42), both(r, {{"Mcp-Param-Priority", "0x2a"}}), "does not match"},
+        {"a plus sign", with("priority", 42), both(r, {{"Mcp-Param-Priority", "+42"}}), "does not match"},
+        {"a leading space", with("priority", 42), both(r, {{"Mcp-Param-Priority", " 42"}}), "does not match"},
+        {"a trailing dot", with("priority", 42), both(r, {{"Mcp-Param-Priority", "42."}}), "does not match"},
+        {"an empty value", with("priority", 42), both(r, {{"Mcp-Param-Priority", ""}}), "does not match"},
+        {"only a sign", with("priority", 42), both(r, {{"Mcp-Param-Priority", "-"}}), "does not match"},
+        {"a word", with("priority", 42), both(r, {{"Mcp-Param-Priority", "forty-two"}}), "does not match"},
+        {"the opposite sign", with("priority", -5), both(r, {{"Mcp-Param-Priority", "5"}}), "does not match"},
+        {"a header past the range of a header number", with("priority", 7),
+         both(r, {{"Mcp-Param-Priority", "99999999999999999999999999"}}), "does not match"},
+        {"the integer is missing its header", with("priority", 42), r, "lacks the Mcp-Param-Priority"},
+        {"an integer past the safe range cannot be mirrored", with("priority", 9007199254740993LL),
+         both(r, {{"Mcp-Param-Priority", "9007199254740993"}}), "cannot mirror"},
+        {"a number that is not whole cannot be mirrored", with("priority", 4.5), both(r, {{"Mcp-Param-Priority", "4.5"}}), "cannot mirror"},
+        {"an object cannot be mirrored", with("priority", json::object()), both(r, {{"Mcp-Param-Priority", "{}"}}), "cannot mirror"},
+        {"an array cannot be mirrored", with("priority", json::array()), both(r, {{"Mcp-Param-Priority", "[]"}}), "cannot mirror"},
+        {"true", with("verbose", true), both(r, {{"Mcp-Param-Verbose", "true"}}), ""},
+        {"false", with("verbose", false), both(r, {{"Mcp-Param-Verbose", "false"}}), ""},
+        {"true against false", with("verbose", true), both(r, {{"Mcp-Param-Verbose", "false"}}), "does not match"},
+        {"a capital", with("verbose", true), both(r, {{"Mcp-Param-Verbose", "True"}}), "does not match"},
+        {"one", with("verbose", true), both(r, {{"Mcp-Param-Verbose", "1"}}), "does not match"},
+        {"a boolean without its header", with("verbose", false), r, "lacks the Mcp-Param-Verbose"},
+        {"a boolean given as a string is compared as the string it is", with("verbose", "true"),
+         both(r, {{"Mcp-Param-Verbose", "true"}}), ""},
+    };
+    for (const auto& item : cases) {
+        SCOPED_TRACE(item.name);
+        CallRig rig;
+        const Outcome outcome = rig.call("spanner", item.arguments, item.headers);
+        if (item.refused.empty()) {
+            // Whether the schema accepts the arguments is not this test's question: they were not refused for a header.
+            EXPECT_NE(outcome.code(), -32020) << outcome.message.dump();
+            EXPECT_EQ(outcome.refusal, neomcp::RefusalReason::none);
+            continue;
+        }
+        EXPECT_EQ(outcome.code(), -32020) << outcome.message.dump();
+        EXPECT_EQ(outcome.status, 400);
+        EXPECT_NE(outcome.text().find(item.refused), std::string::npos) << outcome.text();
+        EXPECT_EQ(rig.runs.load(), 0);
+    }
+}
+
+TEST(ArgumentHeaderCall, NestedParametersAreReadAtTheirPath) {
+    CallRig rig;
+    const json arguments = {{"region", "us"}, {"place", {{"city", "Oslo"}}}};
+    Outcome outcome = rig.call("spanner", arguments, {{"Mcp-Param-Region", "us"}, {"Mcp-Param-City", "Oslo"}});
+    EXPECT_FALSE(outcome.failed()) << outcome.message.dump();
+    outcome = rig.call("spanner", arguments, {{"Mcp-Param-Region", "us"}, {"Mcp-Param-City", "Rome"}});
+    EXPECT_EQ(outcome.code(), -32020);
+    EXPECT_NE(outcome.text().find("params.arguments.place.city"), std::string::npos) << outcome.text();
+    outcome = rig.call("spanner", arguments, {{"Mcp-Param-Region", "us"}});
+    EXPECT_EQ(outcome.code(), -32020);
+    EXPECT_NE(outcome.text().find("Mcp-Param-City"), std::string::npos) << outcome.text();
+    EXPECT_EQ(rig.runs.load(), 1);
+}
+
+TEST(ArgumentHeaderCall, AnArgumentThatIsAbsentOrNullHasNoHeaderToExpect) {
+    CallRig rig;
+    const Fields r = region("us");
+    // Absent, and null, and a parent that is not an object: the header is not expected.
+    for (const json& arguments :
+         {json{{"region", "us"}}, json{{"region", "us"}, {"priority", nullptr}, {"verbose", nullptr}},
+          json{{"region", "us"}, {"place", nullptr}}, json{{"region", "us"}, {"place", {{"city", nullptr}}}}}) {
+        SCOPED_TRACE(arguments.dump());
+        const Outcome outcome = rig.call("spanner", arguments, r);
+        EXPECT_FALSE(outcome.failed()) << outcome.message.dump();
+    }
+    // Its presence is ignored when the header is well formed ...
+    Fields extra = r;
+    extra.emplace_back("Mcp-Param-Priority", "5");
+    Outcome outcome = rig.call("spanner", json{{"region", "us"}}, extra);
+    EXPECT_FALSE(outcome.failed()) << outcome.message.dump();
+    extra.back().second = "not even a number";
+    outcome = rig.call("spanner", json{{"region", "us"}, {"priority", nullptr}}, extra);
+    EXPECT_FALSE(outcome.failed()) << outcome.message.dump();
+    // ... and a header that is malformed is refused whether or not the argument is there.
+    extra.back().second = "=?base64?!!!!?=";
+    outcome = rig.call("spanner", json{{"region", "us"}}, extra);
+    EXPECT_EQ(outcome.code(), -32020);
+    EXPECT_NE(outcome.text().find("encoded form"), std::string::npos) << outcome.text();
+    extra.back().second = "a\x01";
+    outcome = rig.call("spanner", json{{"region", "us"}}, extra);
+    EXPECT_EQ(outcome.code(), -32020);
+    extra.back().second = "5";
+    extra.emplace_back("Mcp-Param-Priority", "5");
+    outcome = rig.call("spanner", json{{"region", "us"}}, extra);
+    EXPECT_EQ(outcome.code(), -32020);
+    EXPECT_NE(outcome.text().find("more than once"), std::string::npos) << outcome.text();
+}
+
+TEST(ArgumentHeaderCall, TheHeadersAreCheckedBeforeTheArgumentsAreCheckedAgainstTheSchema) {
+    CallRig rig;
+    // The priority is out of the range the schema allows, and the header says something else: the header is refused.
+    Outcome outcome = rig.call("spanner", json{{"region", "us"}, {"priority", 500}},
+                               {{"Mcp-Param-Region", "us"}, {"Mcp-Param-Priority", "7"}});
+    EXPECT_EQ(outcome.code(), -32020) << outcome.message.dump();
+    EXPECT_EQ(outcome.status, 400);
+    // The header agrees: the arguments are then refused by the schema, as a result that says so.
+    outcome = rig.call("spanner", json{{"region", "us"}, {"priority", 500}},
+                       {{"Mcp-Param-Region", "us"}, {"Mcp-Param-Priority", "500"}});
+    EXPECT_EQ(outcome.code(), 0) << outcome.message.dump();
+    EXPECT_TRUE(outcome.failed());
+    EXPECT_EQ(outcome.refusal, neomcp::RefusalReason::none);
+    EXPECT_EQ(rig.runs.load(), 0);
+}
+
+TEST(ArgumentHeaderCall, AMessageNamesTheHeaderAndEchoesNoValue) {
+    CallRig rig;
+    const std::string secret(4000, 's');
+    Outcome outcome = rig.call("spanner", json{{"region", secret}}, region(secret + "x"));
+    EXPECT_EQ(outcome.code(), -32020);
+    EXPECT_NE(outcome.text().find("Mcp-Param-Region"), std::string::npos);
+    EXPECT_EQ(outcome.text().find("ssss"), std::string::npos) << "no part of a value is repeated";
+    EXPECT_LT(outcome.text().size(), 300U);
+    outcome = rig.call("spanner", json{{"region", "us"}}, region(std::string(4000, '\x01')));
+    EXPECT_EQ(outcome.code(), -32020);
+    EXPECT_LT(outcome.text().size(), 300U);
+    outcome = rig.call("spanner", json{{"region", "us"}}, region("=?base64?" + std::string(4000, '!') + "?="));
+    EXPECT_EQ(outcome.code(), -32020);
+    EXPECT_LT(outcome.text().size(), 300U);
+}
+
+TEST(ArgumentHeaderCall, AToolWithoutMarksNeedsNoHeader) {
+    CallRig rig;
+    const Outcome outcome = rig.call("plain", json{{"query", "x"}}, {{"Mcp-Param-Query", "different"}});
+    EXPECT_FALSE(outcome.failed()) << outcome.message.dump();
+    EXPECT_EQ(rig.runs.load(), 1) << "a header no mark names is not examined";
+}
+
+TEST(ArgumentHeaderCall, UnderALegacyRevisionNothingIsExpected) {
+    CallRig rig;
+    const auto legacy = neomcp::profile::builtin("2025-11-25");
+    rig.session->receive(1, neomcp::testing::Peer::initialize_request(*legacy, 100).dump(), {});
+    rig.recorder.wait(1);
+    rig.next_id = 2;
+    const json request = neomcp::testing::Peer::make_request(*legacy, neomcp::RequestId(7), "tools/call",
+                                                             json{{"name", "spanner"}, {"arguments", json{{"region", "us"}}}});
+    Outcome outcome = rig.send(request, {{"MCP-Protocol-Version", "2025-11-25"}});
+    EXPECT_FALSE(outcome.failed()) << outcome.message.dump();
+    // A header that contradicts the body is not looked at either.
+    outcome = rig.send(request, {{"MCP-Protocol-Version", "2025-11-25"}, {"Mcp-Param-Region", "eu"}});
+    EXPECT_FALSE(outcome.failed()) << outcome.message.dump();
+    EXPECT_EQ(rig.runs.load(), 2);
+}
+
+TEST(ArgumentHeaderCall, OverStdioNoHeaderExists) {
+    CallRig rig(neomcp::profile::Transport::stdio);
+    const auto modern = neomcp::profile::builtin(modern_revision);
+    const json request = neomcp::testing::Peer::make_request(*modern, neomcp::RequestId(7), "tools/call",
+                                                             json{{"name", "spanner"}, {"arguments", json{{"region", "us"}}}});
+    const Outcome outcome = rig.send(request, {});
+    EXPECT_FALSE(outcome.failed()) << outcome.message.dump();
+    EXPECT_EQ(rig.runs.load(), 1);
+}
+
+// A host that never checked the marks of its tools.
+class UncheckedHost : public neomcp::ToolHost {
+public:
+    UncheckedHost() {
+        definitions_.push_back(tool_of("bad", parsed(R"({"type":"object","properties":{"l":{"type":"array","items":{"type":"string","x-mcp-header":"H"}}}})")));
+    }
+    std::span<const neomcp::ToolDefinition> tools() const override { return definitions_; }
+    void call(const neomcp::CallRequest&, neomcp::CallControl, neomcp::Completion done) override {
+        ++runs;
+        done(neomcp::ToolResult{});
+    }
+    std::atomic<int> runs{0};
+
+private:
+    std::vector<neomcp::ToolDefinition> definitions_;
+};
+
+TEST(ArgumentHeaderCall, AToolWhoseMarksAreInvalidIsNotCalled) {
+    UncheckedHost host;
+    Recorder recorder;
+    neomcp::SessionOptions options;
+    options.transport = neomcp::profile::Transport::streamable_http;
+    auto made = neomcp::Session::create_tagged(options, host, [&](neomcp::Output output) { recorder(std::move(output)); });
+    auto session = std::move(std::get<std::unique_ptr<neomcp::Session>>(made));
+    const auto modern = neomcp::profile::builtin(modern_revision);
+    const json request = neomcp::testing::Peer::make_request(*modern, neomcp::RequestId(7), "tools/call", json{{"name", "bad"}});
+    const Fields fields{{"MCP-Protocol-Version", modern_revision}, {"Mcp-Method", "tools/call"}, {"Mcp-Name", "bad"}};
+    std::vector<neomcp::HeaderField> headers;
+    for (const auto& [name, value] : fields) headers.push_back(neomcp::HeaderField{name, value});
+    session->receive(1, request.dump(), headers);
+    const auto outputs = recorder.wait(1);
+    ASSERT_FALSE(outputs.empty());
+    const json answer = json::parse(outputs[0].line);
+    ASSERT_TRUE(answer.contains("error")) << answer.dump();
+    EXPECT_EQ(answer.at("error").at("code"), -32603);
+    EXPECT_NE(answer.at("error").at("message").get<std::string>().find("bad"), std::string::npos);
+    EXPECT_EQ(host.runs.load(), 0);
+}
+
+}  // namespace

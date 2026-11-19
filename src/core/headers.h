@@ -8,6 +8,8 @@
 #include <string>
 #include <string_view>
 
+#include "neomcp/argument_headers.h"
+#include "neomcp/json.h"
 #include "neomcp/jsonrpc.h"
 #include "neomcp/profile.h"
 #include "neomcp/session.h"
@@ -39,6 +41,30 @@ std::optional<std::string> check_request_headers(const Message& request, std::sp
                                                  std::span<const profile::RequestHeader> headers,
                                                  const profile::EncodedHeaderValue* encoded,
                                                  std::string_view revision);
+
+// What is wrong with the headers that mirror the arguments of a tool call.
+struct ArgumentHeaderFailure {
+    // The message of the refusal (it begins with header_mismatch_prefix) or, when `defect`, a description of the
+    // tool's schema.
+    std::string message;
+    // The headers cannot be checked because the tool's own input schema marks its parameters wrongly: a defect of
+    // the server, not a mismatch of the request.
+    bool defect = false;
+};
+
+// Checks the headers that mirror the arguments of a tool call against the arguments. `fields` are the header fields
+// of the call, `input_schema` the tool's input schema and `headers` the profile's description of argument headers.
+//
+// For every parameter the schema marks whose argument is present and not null, the header (the profile's prefix and
+// the mark's name) must be present exactly once, hold only the characters a plain value may hold (or be in the
+// encoded form, which must decode), and equal the argument: a string exactly, a boolean as `true` or `false`, an
+// integer numerically. For an argument that is absent or null the header is not expected; when it is there anyway
+// it must still be a single field of a valid form. The message never holds a value of a header or of an argument.
+// Returns empty when all hold.
+std::optional<ArgumentHeaderFailure> check_argument_headers(const json& arguments, const json& input_schema,
+                                                            std::span<const HeaderField> fields,
+                                                            const profile::ArgumentHeaders& headers,
+                                                            const profile::EncodedHeaderValue* encoded);
 
 // The prefix of every message about a header that fails its rule.
 inline constexpr std::string_view header_mismatch_prefix = "Header mismatch: ";
