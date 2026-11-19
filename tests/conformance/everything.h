@@ -43,6 +43,11 @@ struct MessageArgument {
     std::string message;
 };
 
+// The field of the form that asks the user for a name.
+struct UserName {
+    std::string name;
+};
+
 // The parameters of the tool whose parameters are mirrored into headers: a region (a string), a priority and a verbose
 // flag (the latter two may be left out).
 struct HeaderParameters {
@@ -69,6 +74,7 @@ NEOMCP_DESCRIBE(conformance::ResourceArgument, resourceUri, "the URI of the reso
 NEOMCP_DESCRIBE(conformance::TemplateVariable, id, "the identifier")
 NEOMCP_DESCRIBE(conformance::PromptArgument, prompt, "the prompt to send to the client's model")
 NEOMCP_DESCRIBE(conformance::MessageArgument, message, "the message to show the user")
+NEOMCP_DESCRIBE(conformance::UserName, name, "")
 
 namespace conformance {
 
@@ -199,8 +205,10 @@ inline void register_schema_tools(neomcp::Server& server) {
 
 // ---- Asking the client ----------------------------------------------------------------------------------------------
 //
-// A handler that needs something only the client can give returns what it asks for, and is entered again with the
-// answers by the keys it chose. The library asks the client in the way the revision of the call prescribes.
+// A handler that needs something only the client can give either declares it after itself and takes the answers, or
+// returns what it asks for and is entered again with the answers by the keys it chose. One tool here declares its
+// inputs and the others ask by themselves, so that both forms are served. The library asks the client in the way the
+// revision of the call prescribes.
 
 // What a handler of a tool or a prompt returns: its text, or a request for input.
 using Outcome = std::variant<std::string, neomcp::InputRequired>;
@@ -315,23 +323,14 @@ inline void register_input_tools(neomcp::Server& server) {
         return std::string("Confirmed, state-ok");
     });
 
-    // Every request that is still unanswered is asked together.
-    server.tool("test_input_required_result_multiple_inputs", "Ask a form, the model and the roots at once", [](neomcp::Context& call) -> Outcome {
-        constexpr const char* state = "awaiting-three-answers";
-        const auto* name = answer_to<neomcp::ElicitationAnswer>(call, name_key);
-        const auto* greeting = answer_to<neomcp::SamplingAnswer>(call, greeting_key);
-        const auto* roots = answer_to<neomcp::RootsAnswer>(call, roots_key);
-        if (name != nullptr && greeting != nullptr && roots != nullptr &&
-            call.request_state() == std::optional<std::string>(state)) {
-            return "All three answers came: " + text_in(greeting->content);
-        }
-        neomcp::InputRequired ask;
-        ask.state = std::string(state);
-        ask.requests.emplace(name_key, form_of_string("What is your name?", "name"));
-        ask.requests.emplace(greeting_key, sampling_of("Generate a greeting", 50));
-        ask.requests.emplace(roots_key, neomcp::RootsRequest{});
-        return ask;
-    });
+    // Three inputs declared after the handler, asked together; the handler runs once, when all three are answered.
+    server.tool(
+        "test_input_required_result_multiple_inputs", "Ask a form, the model and the roots at once",
+        [](const neomcp::Answer<UserName>&, const neomcp::Answer<neomcp::SamplingAnswer>& greeting,
+           const neomcp::Answer<neomcp::RootsAnswer>&) { return "All three answers came: " + text_in(greeting->content); },
+        neomcp::elicit<UserName>(name_key, [] { return std::string("What is your name?"); }),
+        neomcp::sample(greeting_key, [] { return sampling_of("Generate a greeting", 50); }),
+        neomcp::roots(roots_key));
 
     // Two rounds, each with a state of its own.
     server.tool("test_input_required_result_multi_round", "Ask in two rounds", [](neomcp::Context& call) -> Outcome {

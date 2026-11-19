@@ -1005,6 +1005,47 @@ TEST_F(ModernInput, AServerThatNeedsTheStateAsksAgainForAnswersWithoutIt) {
     EXPECT_EQ(first_text(with_state.at("result")), "Hello, Alice!");
 }
 
+TEST_F(ModernInput, TheToolWithDeclaredInputsAsksAFormBuiltFromItsStructAndChecksTheAnswer) {
+    const json first = call_tool("test_input_required_result_multiple_inputs");
+    ASSERT_TRUE(first.contains("result")) << first.dump();
+    ASSERT_TRUE(asks(first.at("result")));
+    const json& requests = first.at("result").at("inputRequests");
+    EXPECT_EQ(requests.at("user_name").at("params").at("requestedSchema"),
+              json::parse(R"({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]})"));
+    EXPECT_EQ(requests.at("user_name").at("params").at("message"), "What is your name?");
+    EXPECT_EQ(requests.at("greeting").at("params").at("maxTokens").get<std::int64_t>(), 50);
+
+    json answers = json::object();
+    for (const auto& item : requests.items()) {
+        const json asked_params = item.value().contains("params") ? item.value().at("params") : json::object();
+        answers[item.key()] = user_answer(item.value().at("method").get<std::string>(), asked_params);
+    }
+    // A name that is not a string does not fit the form.
+    json wrong = answers;
+    wrong["user_name"]["content"]["name"] = 5;
+    const json refused = call_tool("test_input_required_result_multiple_inputs",
+                                   json{{"inputResponses", wrong}, {"requestState", first.at("result").at("requestState")}});
+    ASSERT_TRUE(refused.contains("error")) << refused.dump();
+    EXPECT_EQ(refused.at("error").at("code"), -32602);
+
+    // Two answers now, the third in the next round: the first two are kept in the state.
+    json two = answers;
+    two.erase("client_roots");
+    const json second = call_tool("test_input_required_result_multiple_inputs",
+                                  json{{"inputResponses", two}, {"requestState", first.at("result").at("requestState")}});
+    ASSERT_TRUE(second.contains("result")) << second.dump();
+    ASSERT_TRUE(asks(second.at("result")));
+    EXPECT_EQ(second.at("result").at("inputRequests").size(), 1U);
+    EXPECT_TRUE(second.at("result").at("inputRequests").contains("client_roots"));
+    const json third = call_tool(
+        "test_input_required_result_multiple_inputs",
+        json{{"inputResponses", {{"client_roots", answers.at("client_roots")}}},
+             {"requestState", second.at("result").at("requestState")}});
+    ASSERT_TRUE(third.contains("result")) << third.dump();
+    EXPECT_FALSE(asks(third.at("result")));
+    EXPECT_EQ(first_text(third.at("result")), "All three answers came: The capital of France is Paris.");
+}
+
 TEST_F(ModernInput, AnswersOfTheWrongShapeAreNeverTakenForAComplete) {
     // A number for the answer, and a null for the whole of them: without a state, the number is the answer of no
     // request.
