@@ -990,14 +990,16 @@ TEST(SubscriptionFeed, AConnectionWhoseClientIsNotReadyHearsNothingWhileASubscri
 // every delay in turn, so that it falls between the check that the feed is still live and the subscription entering
 // the calls in flight.
 TEST(SubscriptionFeed, ASubscriptionOpenedAsTheFeedEndsIsEndedOrRefused) {
-    constexpr int rounds = 3000;
+    // Rounds run for a bounded time: an instrumented build is slower, and does fewer of them.
+    constexpr int rounds = 20000;
+    const auto stop_at = std::chrono::steady_clock::now() + 3s;
     std::mt19937 delays(20260101);
-    for (int round = 0; round < rounds; ++round) {
+    for (int round = 0; round < rounds && std::chrono::steady_clock::now() < stop_at; ++round) {
         FeedHost host;
         Tagged client(host);
         ASSERT_TRUE(client.send(1, "first", "subscriptions/listen", listen_params({{"toolsListChanged", true}})));
         std::atomic<bool> go{false};
-        const auto delay = std::chrono::nanoseconds(delays() % 60000);
+        const auto delay = std::chrono::nanoseconds(delays() % 300000);
         std::thread ender([&] {
             while (!go.load(std::memory_order_acquire)) {
             }
