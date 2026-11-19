@@ -22,6 +22,26 @@ target_link_libraries(neomcp_describe_test PRIVATE neomcp::describe neojson::neo
 neomcp_configure_target(neomcp_describe_test)
 gtest_discover_tests(neomcp_describe_test DISCOVERY_TIMEOUT 120)
 
+# Descriptions whose names are not unique must not compile when they are converted. Each case is an object library
+# that is not part of the build; a test builds it. The control case must build, the others must not.
+function(neomcp_compile_case case expect_failure)
+    set(target neomcp_compile_check_${case})
+    add_library(${target} OBJECT EXCLUDE_FROM_ALL compile_check/describe_names.cpp)
+    target_compile_definitions(${target} PRIVATE NEOMCP_CASE=${case})
+    target_link_libraries(${target} PRIVATE neomcp::describe neojson::neojson)
+    neomcp_configure_target(${target})
+    add_test(NAME CompileCheck.DescribeNames${case}
+             COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --config $<CONFIG> --target ${target})
+    if(expect_failure)
+        set_tests_properties(CompileCheck.DescribeNames${case} PROPERTIES WILL_FAIL TRUE)
+    endif()
+endfunction()
+neomcp_compile_case(0 FALSE)
+neomcp_compile_case(1 TRUE)
+neomcp_compile_case(2 TRUE)
+neomcp_compile_case(3 TRUE)
+neomcp_compile_case(4 TRUE)
+
 # ---- JSON Schema validator -------------------------------------------------------------------------------------------
 
 # The official JSON Schema test suite, used as data only: the tests parse its JSON files and nothing of it is built.
