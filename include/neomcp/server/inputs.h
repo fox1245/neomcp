@@ -804,6 +804,21 @@ private:
     InputSet<Decls...> set_;
 };
 
+// The outcome of a round that asks, for a coroutine body: built in a function that is never inlined. Built inside the
+// coroutine, GCC 13 with optimization reports the destructor of the outcome's other alternative as reading memory
+// that was never written (-Wmaybe-uninitialized), which it never does; that would fail the build of a user who turns
+// warnings into errors.
+#if defined(_MSC_VER)
+#define NEOMCP_DETAIL_NOINLINE __declspec(noinline)
+#else
+#define NEOMCP_DETAIL_NOINLINE __attribute__((noinline))
+#endif
+template <class Outcome>
+NEOMCP_DETAIL_NOINLINE Outcome asking_outcome(InputRequired asked) {
+    return Outcome(std::in_place_index<1>, std::move(asked));
+}
+#undef NEOMCP_DETAIL_NOINLINE
+
 template <class Args, class F, class... Decls>
 class DeclaredToolCoroutineBody final : public CoroutineBody {
 public:
@@ -817,7 +832,7 @@ public:
         Args args = decode_arguments<Args>(arguments);
         AnswersOf<Decls...> answers;
         std::optional<InputRequired> asked = settle_inputs(set_, args, context, answers);
-        if (asked) co_return ToolOutcome(std::in_place_index<1>, std::move(*asked));
+        if (asked) co_return asking_outcome<ToolOutcome>(std::move(*asked));
         auto started = invoke_declared(handler_, args, answers, context, std::index_sequence_for<Decls...>{});
         if constexpr (std::is_void_v<R>) {
             co_await std::move(started);
@@ -867,7 +882,7 @@ public:
         Inputs<A> inputs = Kind::template decode<A>(invocation);
         AnswersOf<Decls...> answers;
         std::optional<InputRequired> asked = settle_inputs(set_, inputs.args, context, answers);
-        if (asked) co_return Produced<typename Kind::Out>(std::in_place_index<1>, std::move(*asked));
+        if (asked) co_return asking_outcome<Produced<typename Kind::Out>>(std::move(*asked));
         auto started = invoke_declared(handler_, inputs.args, answers, context, std::index_sequence_for<Decls...>{});
         R produced = co_await std::move(started);
         co_return produce<Kind>(std::move(produced), invocation);

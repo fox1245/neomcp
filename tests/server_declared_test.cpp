@@ -388,8 +388,8 @@ TEST(FormSchema, EveryMemberIsWrittenWithTheKeywordsOfItsShape) {
         for (const auto& keyword : item.value().items()) {
             EXPECT_TRUE(type->has_property(keyword.key())) << item.key() << ": " << keyword.key() << " in " << type->name;
         }
-        for (const std::string& required : type->required) {
-            EXPECT_TRUE(item.value().contains(required)) << item.key() << " lacks " << required;
+        for (const std::string& needed : type->required) {
+            EXPECT_TRUE(item.value().contains(needed)) << item.key() << " lacks " << needed;
         }
     }
 
