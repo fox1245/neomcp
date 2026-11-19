@@ -1871,6 +1871,13 @@ std::optional<Answer> SessionCore::on_listen(const Message& request, const FeedR
     if (closed_) return std::nullopt;
     // A unit abandoned while it was read has nobody to read the subscription.
     if (place.unit && place.unit->abandoned) return std::nullopt;
+    // The host's feed may have ended since the registration above: its end ended the subscriptions then in flight,
+    // and nothing would end this one.
+    if (watch_ != Watch::registered) {
+        lock.unlock();
+        return served_answer(
+            make_error(id, error_code::internal_error, "Internal error: the server reports no changes now"), served);
+    }
     if (listening_ >= options_.max_subscriptions) {
         lock.unlock();
         return limit_refusal(id,
