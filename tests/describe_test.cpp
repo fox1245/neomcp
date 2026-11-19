@@ -1,15 +1,18 @@
 // Tests of describing types, the schemas that follow from the descriptions, and conversion.
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "neomcp/describe.h"
+#include "neomcp/json_schema.h"
 
 using neomcp::json;
 
@@ -333,6 +336,7 @@ static_assert(neomcp::detail::has_schema<int>());
 static_assert(neomcp::detail::has_schema<std::vector<std::map<std::string, std::vector<dt::Color>>>>());
 static_assert(!neomcp::detail::has_schema<char>());
 static_assert(!neomcp::detail::has_schema<char32_t>());
+static_assert(!neomcp::detail::has_schema<long double>());  // refused at compile time, not published with a wrong range
 static_assert(!neomcp::detail::has_schema<std::optional<int>>());
 static_assert(!neomcp::detail::has_schema<std::vector<std::optional<int>>>());
 static_assert(!neomcp::detail::has_schema<std::map<int, int>>());
@@ -346,7 +350,8 @@ static_assert(neomcp::detail::has_schema<neomcp::json>());
 
 TEST(DescribeSchema, ScalarTypes) {
     expect_json(neomcp::schema_of<bool>(), R"({"type":"boolean"})");
-    expect_json(neomcp::schema_of<float>(), R"({"type":"number"})");
+    expect_json(neomcp::schema_of<float>(),
+                R"({"type":"number","minimum":-3.4028234663852886e+38,"maximum":3.4028234663852886e+38})");
     expect_json(neomcp::schema_of<double>(), R"({"type":"number"})");
     expect_json(neomcp::schema_of<std::string>(), R"({"type":"string"})");
     expect_json(neomcp::schema_of<neomcp::json>(), R"({})");
@@ -362,6 +367,34 @@ TEST(DescribeSchema, IntegerTypesCarryTheirRange) {
     expect_json(neomcp::schema_of<std::uint32_t>(), R"({"type":"integer","minimum":0,"maximum":4294967295})");
     expect_json(neomcp::schema_of<std::int64_t>(), R"({"type":"integer"})");
     expect_json(neomcp::schema_of<std::uint64_t>(), R"({"type":"integer","minimum":0})");
+}
+
+// The schema of a float refuses what the conversion would refuse, and accepts what it converts.
+TEST(DescribeSchema, AFloatMemberIsHeldToTheRangeOfAFloatBeforeItIsConverted) {
+    const auto compiled = neomcp::json_schema::Validator::compile(neomcp::schema_of<float>());
+    const auto* validator = std::get_if<neomcp::json_schema::Validator>(&compiled);
+    ASSERT_NE(validator, nullptr);
+    const double largest = static_cast<double>(std::numeric_limits<float>::max());
+    const double beyond = std::nextafter(largest, std::numeric_limits<double>::infinity());
+    ASSERT_GT(beyond, largest);
+
+    // The ends of the range are accepted and convert.
+    for (const double end : {largest, -largest, 0.0, 1e-30}) {
+        EXPECT_FALSE(validator->validate(json(end)).has_value()) << end;
+        EXPECT_EQ(neomcp::from_json<float>(json(end)), static_cast<float>(end));
+    }
+    // A value just outside, and one far outside, are refused by the schema: the check before a handler runs sees it.
+    for (const double outside : {beyond, -beyond, 1e40, -1e300}) {
+        const auto issue = validator->validate(json(outside));
+        ASSERT_TRUE(issue.has_value()) << outside;
+        EXPECT_EQ(issue->instance_pointer, "");
+        EXPECT_THROW(static_cast<void>(neomcp::from_json<float>(json(outside))), neomcp::DecodeError) << outside;
+    }
+    // A double has no bound.
+    const auto wide = neomcp::json_schema::Validator::compile(neomcp::schema_of<double>());
+    const auto* wide_validator = std::get_if<neomcp::json_schema::Validator>(&wide);
+    ASSERT_NE(wide_validator, nullptr);
+    EXPECT_FALSE(wide_validator->validate(json(1e300)).has_value());
 }
 
 TEST(DescribeSchema, ContainersAndEnums) {
@@ -405,7 +438,8 @@ TEST(DescribeSchema, EveryIntegerWidthAsMember) {
                 R"("i32":{"type":"integer","minimum":-2147483648,"maximum":2147483647},)"
                 R"("u32":{"type":"integer","minimum":0,"maximum":4294967295},)"
                 R"("i64":{"type":"integer"},"u64":{"type":"integer","minimum":0},)"
-                R"("f":{"type":"number"},"d":{"type":"number"}},)"
+                R"("f":{"type":"number","minimum":-3.4028234663852886e+38,"maximum":3.4028234663852886e+38},)"
+                R"("d":{"type":"number"}},)"
                 R"("required":["i8","u8","i16","u16","i32","u32","i64","u64","f","d"],"additionalProperties":false})");
 }
 

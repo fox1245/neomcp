@@ -4,7 +4,8 @@
 //   bool                                   {"type":"boolean"}
 //   integer types                          {"type":"integer"} with the type's range when it is narrower than 64 bits
 //                                          (and minimum 0 for unsigned 64-bit); character types have no schema
-//   float, double                          {"type":"number"}
+//   float                                  {"type":"number"} with the finite range of a float
+//   double                                 {"type":"number"}
 //   std::string                            {"type":"string"}
 //   std::vector<T>                         {"type":"array","items":<T>}
 //   std::map<std::string, T>               {"type":"object","additionalProperties":<T>}
@@ -153,6 +154,19 @@ json integer_schema() {
     return schema;
 }
 
+// A float publishes the range it can hold, as the narrow integer types do, so that a number the schema accepts is
+// always one the conversion accepts. A double has no bound to publish: every finite JSON number converts.
+template <class T>
+json floating_schema() {
+    json schema = json::object();
+    set_keyword(schema, "type", json("number"));
+    if constexpr (std::is_same_v<T, float>) {
+        set_keyword(schema, "minimum", number_json(std::numeric_limits<T>::lowest()));
+        set_keyword(schema, "maximum", number_json(std::numeric_limits<T>::max()));
+    }
+    return schema;
+}
+
 template <class T>
 json enum_schema() {
     static_assert(unique_enum_names(DescribedEnum<T>::values), "neomcp: two enumerators of a described enum have the same name");
@@ -285,8 +299,7 @@ json schema_of() {
         } else if constexpr (kind == detail::Kind::integer) {
             return detail::integer_schema<T>();
         } else if constexpr (kind == detail::Kind::floating) {
-            detail::set_keyword(schema, "type", json("number"));
-            return schema;
+            return detail::floating_schema<T>();
         } else if constexpr (kind == detail::Kind::string) {
             detail::set_keyword(schema, "type", json("string"));
             return schema;
