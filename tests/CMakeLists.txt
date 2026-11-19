@@ -84,12 +84,27 @@ target_link_libraries(neomcp_json_schema_pattern_time_test PRIVATE neomcp::schem
 neomcp_configure_target(neomcp_json_schema_pattern_time_test)
 gtest_discover_tests(neomcp_json_schema_pattern_time_test DISCOVERY_TIMEOUT 120)
 
+# What a pattern means in the dialect of JSON Schema, what is refused, and the bound on the memory of a pattern.
+add_executable(neomcp_json_schema_pattern_test json_schema_pattern_test.cpp)
+target_link_libraries(neomcp_json_schema_pattern_test PRIVATE neomcp::schema neojson::neojson GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_json_schema_pattern_test)
+gtest_discover_tests(neomcp_json_schema_pattern_test DISCOVERY_TIMEOUT 120)
+
 # The translation of a pattern to the syntax of the regular expression engine; the test reaches the internal header.
 add_executable(neomcp_json_schema_pattern_translate_test json_schema_pattern_translate_test.cpp)
 target_link_libraries(neomcp_json_schema_pattern_translate_test PRIVATE neomcp::schema GTest::gtest_main Threads::Threads)
 target_include_directories(neomcp_json_schema_pattern_translate_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 neomcp_configure_target(neomcp_json_schema_pattern_translate_test)
 gtest_discover_tests(neomcp_json_schema_pattern_translate_test DISCOVERY_TIMEOUT 120)
+
+# The time of a check grows in proportion to the string. Like the other tests of how cost grows with size, it is
+# registered only with NEOMCP_TEST_TIME_BOUNDS.
+if(NEOMCP_TEST_TIME_BOUNDS)
+    add_executable(neomcp_json_schema_pattern_linear_test json_schema_pattern_linear_test.cpp)
+    target_link_libraries(neomcp_json_schema_pattern_linear_test PRIVATE neomcp::schema neojson::neojson GTest::gtest_main Threads::Threads)
+    neomcp_configure_target(neomcp_json_schema_pattern_linear_test)
+    gtest_discover_tests(neomcp_json_schema_pattern_linear_test DISCOVERY_TIMEOUT 120 PROPERTIES TIMEOUT 300)
+endif()
 
 add_executable(neomcp_crypto_test crypto_test.cpp)
 target_link_libraries(neomcp_crypto_test PRIVATE neomcp::crypto GTest::gtest_main Threads::Threads)

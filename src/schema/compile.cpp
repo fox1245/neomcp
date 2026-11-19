@@ -17,7 +17,7 @@
 #include <vector>
 
 #include "schema/internal.h"
-#include "schema/pattern_scan.h"
+#include "schema/pattern.h"
 #include "schema/uri.h"
 #include "schema/value.h"
 
@@ -176,17 +176,11 @@ private:
                               " bytes long, longer than the limit max_pattern_length (" +
                               std::to_string(limits_.max_pattern_length) + ")");
         }
-        if (const auto construct = find_unsupported_construct(source)) {
-            fail(pointer, "pattern " + quote(source) + " uses " + *construct +
-                              ", which the ECMAScript 3 grammar of std::regex does not have");
+        auto compiled = compile_pattern_text(source, limits_);
+        if (const auto* reason = std::get_if<std::string>(&compiled)) {
+            fail(pointer, "pattern " + quote(source) + " " + *reason);
         }
-        auto pattern = std::make_shared<Pattern>();
-        pattern->source = source;
-        try {
-            pattern->regex = std::regex(source, std::regex::ECMAScript);
-        } catch (const std::regex_error&) {
-            fail(pointer, "pattern " + quote(source) + " is not a supported regular expression");
-        }
+        auto pattern = std::get<std::shared_ptr<const Pattern>>(std::move(compiled));
         patterns_.emplace(source, pattern);
         return pattern;
     }

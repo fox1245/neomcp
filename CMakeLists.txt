@@ -92,11 +92,11 @@ target_include_directories(neomcp_describe INTERFACE $<BUILD_INTERFACE:${CMAKE_C
 target_link_libraries(neomcp_describe INTERFACE neojson::neojson)
 target_compile_features(neomcp_describe INTERFACE cxx_std_20)
 
-# JSON Schema 2020-12 validation. It depends on the JSON value type only.
+# JSON Schema 2020-12 validation. It depends on the JSON value type and, for patterns, on RE2 (not visible in the headers).
 add_library(neomcp_schema
     src/schema/compile.cpp
     src/schema/evaluate.cpp
-    src/schema/pattern_scan.cpp
+    src/schema/pattern.cpp
     src/schema/pattern_translate.cpp
     src/schema/uri.cpp
     src/schema/validator.cpp
@@ -105,7 +105,7 @@ add_library(neomcp::schema ALIAS neomcp_schema)
 target_include_directories(neomcp_schema
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(neomcp_schema PUBLIC neojson::neojson)
+target_link_libraries(neomcp_schema PUBLIC neojson::neojson PRIVATE re2::re2)
 target_compile_features(neomcp_schema PUBLIC cxx_std_20)
 neomcp_configure_target(neomcp_schema)
 

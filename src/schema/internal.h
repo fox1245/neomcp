@@ -7,7 +7,6 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <regex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -16,6 +15,7 @@
 
 #include "neomcp/json.h"
 #include "neomcp/json_schema.h"
+#include "schema/pattern.h"
 
 namespace neomcp::json_schema::detail {
 
@@ -29,12 +29,6 @@ inline constexpr std::uint8_t number = 16;
 inline constexpr std::uint8_t integer = 32;
 inline constexpr std::uint8_t string = 64;
 }  // namespace type_bit
-
-// A regular expression with the text it was compiled from.
-struct Pattern {
-    std::string source;
-    std::regex regex;
-};
 
 struct Node;
 

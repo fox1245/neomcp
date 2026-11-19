@@ -590,23 +590,23 @@ TEST(JsonSchema, PatternsThatCannotCompileAreRefusedAtTheKeyword) {
     EXPECT_EQ(refusal(parse(R"({"pattern":3})")).schema_pointer, "/pattern");
 }
 
-TEST(JsonSchema, RegexConstructsOfNewerEcmaScriptAreRefusedOnEveryPlatform) {
+TEST(JsonSchema, RegexConstructsThatCannotBeMatchedExactlyAreRefused) {
     const std::vector<std::pair<std::string, std::string>> cases = {
-        {R"(\p{L})", "Unicode property escape"},
-        {R"(^\P{Lu}+$)", "Unicode property escape"},
-        {R"([\p{L}0-9])", "Unicode property escape"},
-        {R"(\u{1F600})", "code point escape"},
+        {R"(\p{Script=Greek})", "not a general category"},
+        {R"([\p{Alphabetic}0-9])", "not a general category"},
         {R"(a(?<=b)c)", "lookbehind"},
         {R"(a(?<!b)c)", "lookbehind"},
-        {R"((?<year>[0-9]+))", "named group"},
-        {R"((?<n>a)\k<n>)", "named group"},
+        {R"(a(?=b))", "lookahead"},
+        {R"(a(?!b))", "lookahead"},
+        {R"((?<n>a)\k<n>)", "named back-reference"},
         {R"(\k<n>)", "named back-reference"},
+        {R"((a)\1)", "back-reference"},
     };
     for (const auto& [pattern, construct] : cases) {
         const Issue in_pattern = refusal(json{{"properties", json{{"a", json{{"pattern", pattern}}}}}});
         EXPECT_EQ(in_pattern.schema_pointer, "/properties/a/pattern") << pattern;
         EXPECT_TRUE(contains(in_pattern.message, construct)) << pattern << ": " << in_pattern.message;
-        EXPECT_TRUE(contains(in_pattern.message, "does not have")) << pattern;
+        EXPECT_TRUE(contains(in_pattern.message, "cannot be matched exactly")) << pattern;
         const Issue in_key = refusal(json{{"patternProperties", json{{pattern, true}}}});
         EXPECT_EQ(in_key.schema_pointer, "/patternProperties/" + pattern) << pattern;
         EXPECT_TRUE(contains(in_key.message, construct)) << pattern;
@@ -620,9 +620,9 @@ TEST(JsonSchema, TheSameCharactersInAHarmlessPlaceAreNotRefused) {
         R"([(?<x])",    // inside a character class
         R"([\\]p)",     // the class ends at the first unescaped bracket
         R"(\(?<a)",     // an optional escaped parenthesis
-        R"((?=a)b)",    // lookahead exists in the grammar
-        R"((?!a)b)",
         R"((?:a)b)",
+        R"(\p{Lu}\u{1F600})",  // constructs that newer ECMAScript has and that are translated
+        R"((?<year>[0-9]+))",
     };
     for (const std::string& pattern : patterns) {
         EXPECT_TRUE(compiled(json{{"pattern", pattern}})) << pattern;
@@ -630,19 +630,10 @@ TEST(JsonSchema, TheSameCharactersInAHarmlessPlaceAreNotRefused) {
     }
 }
 
-TEST(JsonSchema, ARangeThatEnginesReadDifferentlyIsRefusedOrHarmless) {
-    // ECMAScript rejects the reversed range [z-a]; libstdc++ does too, libc++ accepts it. What holds on every
-    // platform: the schema is refused at the keyword, or it compiles and validation answers without a crash.
-    const json schema = parse(R"({"properties":{"a":{"pattern":"[z-a]"}}})");
-    auto result = Validator::compile(schema);
-    if (const auto* issue = std::get_if<Issue>(&result)) {
-        EXPECT_EQ(issue->schema_pointer, "/properties/a/pattern");
-        return;
-    }
-    const Validator validator = std::get<Validator>(result);
-    for (const char* text : {"", "a", "m", "z", "-"}) {
-        (void)validator.validate(json{{"a", text}});
-    }
+TEST(JsonSchema, AReversedRangeIsRefusedAtTheKeyword) {
+    const Issue issue = refusal(parse(R"({"properties":{"a":{"pattern":"[z-a]"}}})"));
+    EXPECT_EQ(issue.schema_pointer, "/properties/a/pattern");
+    EXPECT_TRUE(contains(issue.message, "end is before its start")) << issue.message;
 }
 
 TEST(JsonSchema, KeywordsOfTheWrongShapeAreRefused) {

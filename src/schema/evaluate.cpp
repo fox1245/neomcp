@@ -1,8 +1,8 @@
 // Checking a value against the nodes of a compiled schema.
 //
-// A check that cannot be completed because it ran into a limit, or because the regular expression engine gave up,
-// is not a schema that "does not match": it ends the whole validation (see Run::stop). Otherwise `not`, `anyOf`,
-// `oneOf`, `if` and `contains` would turn a failure to look into a pass.
+// A check that cannot be completed because it ran into a limit is not a schema that "does not match": it ends the
+// whole validation (see Run::stop). Otherwise `not`, `anyOf`, `oneOf`, `if` and `contains` would turn a failure to
+// look into a pass.
 #include <algorithm>
 #include <cstddef>
 #include <exception>
@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "schema/internal.h"
+#include "schema/pattern_translate.h"
 #include "schema/value.h"
 
 namespace neomcp::json_schema::detail {
@@ -120,7 +121,7 @@ public:
     }
 
 private:
-    enum class Match { found, absent, too_long, gave_up };
+    enum class Match { found, absent, too_long, not_utf8 };
 
     std::string instance_pointer() const {
         std::string out;
@@ -262,20 +263,17 @@ private:
 
     Match search(const Pattern& pattern, const std::string& text) const {
         if (text.size() > limits_.max_pattern_input) return Match::too_long;
-        try {
-            return std::regex_search(text, pattern.regex) ? Match::found : Match::absent;
-        } catch (const std::regex_error&) {
-            return Match::gave_up;
-        }
+        if (!is_valid_utf8(text)) return Match::not_utf8;
+        return pattern.search(text) ? Match::found : Match::absent;
     }
 
     // The reason a pattern could not be tried, which ends the validation.
     bool stop_for_pattern(const Node& node, std::string_view keyword, Match match, std::string_view what) {
-        if (match == Match::too_long) {
-            return stop(node, keyword, std::string(what) + " is longer than the limit max_pattern_input (" +
-                                            std::to_string(limits_.max_pattern_input) + " bytes)");
+        if (match == Match::not_utf8) {
+            return stop(node, keyword, std::string(what) + " is not valid UTF-8, which a pattern is matched against");
         }
-        return stop(node, keyword, "the regular expression engine gave up on " + std::string(what));
+        return stop(node, keyword, std::string(what) + " is longer than the limit max_pattern_input (" +
+                                       std::to_string(limits_.max_pattern_input) + " bytes)");
     }
 
     bool check_string(const Node& node, const json& value, Issue* issue) {
@@ -413,7 +411,7 @@ private:
             for (const PatternProperty& entry : node.pattern_properties) {
                 const Match match = search(*entry.pattern, key);
                 if (match == Match::found) by_pattern.push_back(entry.schema);
-                if (match == Match::too_long || match == Match::gave_up) {
+                if (match == Match::too_long || match == Match::not_utf8) {
                     return stop_for_pattern(node, "patternProperties", match, "the property name " + quote(key));
                 }
             }
