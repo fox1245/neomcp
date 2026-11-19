@@ -6,7 +6,7 @@
 #include <string>
 #include <string_view>
 
-namespace neomcp::json_schema::detail {
+namespace neomcp::detail {
 
 struct Uri {
     std::optional<std::string> scheme;
@@ -31,4 +31,4 @@ std::string without_fragment(const Uri& uri);
 // Replace each "%XX" with the byte it stands for. A '%' that does not start two hexadecimal digits stays.
 std::string percent_decode(std::string_view text);
 
-}  // namespace neomcp::json_schema::detail
+}  // namespace neomcp::detail

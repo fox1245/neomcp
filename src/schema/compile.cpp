@@ -23,6 +23,13 @@
 
 namespace neomcp::json_schema::detail {
 
+// The RFC 3986 code is the protocol core's, in neomcp::detail.
+using neomcp::detail::parse_uri;
+using neomcp::detail::percent_decode;
+using neomcp::detail::resolve_uri;
+using neomcp::detail::Uri;
+using neomcp::detail::without_fragment;
+
 std::string escape_token(std::string_view token) {
     std::string out;
     out.reserve(token.size());

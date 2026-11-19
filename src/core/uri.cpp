@@ -3,7 +3,7 @@
 #include <string_view>
 #include <utility>
 
-namespace neomcp::json_schema::detail {
+namespace neomcp::detail {
 
 namespace {
 
@@ -162,4 +162,4 @@ std::string percent_decode(std::string_view text) {
     return out;
 }
 
-}  // namespace neomcp::json_schema::detail
+}  // namespace neomcp::detail
