@@ -629,6 +629,24 @@ TEST(InputRequiredResult, ExtraAnswersAreIgnored) {
     EXPECT_TRUE(asks(client.call(tool, params)));
 }
 
+TEST(InputRequiredResult, ADeclinedOrCancelledElicitationCarriesNoContent) {
+    Modern client;
+    const std::string tool = "test_input_required_result_elicitation";
+    for (const char* action : {"decline", "cancel"}) {
+        const json first = client.call(tool);
+        json answer = json::object();
+        answer["action"] = action;
+        answer["content"] = J(R"({"name":"Ada"})");
+        const json second = client.retry(tool, first, one("user_name", answer));
+        ASSERT_FALSE(second.contains("error")) << action << " " << second.dump();
+        const auto entry = client.host.last(tool);
+        ASSERT_TRUE(entry) << action;
+        const auto* elicitation = elicited(entry->answers, "user_name");
+        ASSERT_NE(elicitation, nullptr) << action;
+        EXPECT_EQ(elicitation->content, json::object()) << action << ": the content of an answer that is not an acceptance is empty";
+    }
+}
+
 TEST(InputRequiredResult, MalformedAnswersAreRefused) {
     Modern client;
     const std::string tool = "test_input_required_result_elicitation";
