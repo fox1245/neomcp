@@ -234,6 +234,18 @@ endif()
 target_compile_features(neomcp_http PUBLIC cxx_std_20)
 neomcp_configure_target(neomcp_http)
 
+# Targets that live in their own file. Every cmake/targets/*.cmake is included here, in the order of its name, after the
+# targets above have been defined, so that a file can link them and the ones above can name its targets (names with
+# "::" are resolved when the build system is generated). A file defines its targets and nothing that another file
+# defines; adding a target is adding a file. As for the profiles, a file added later is found at the next build with
+# generators that support CONFIGURE_DEPENDS, and at the next configure with the others.
+file(GLOB NEOMCP_TARGET_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/targets/*.cmake")
+list(SORT NEOMCP_TARGET_FILES)
+foreach(neomcp_target_file IN LISTS NEOMCP_TARGET_FILES)
+    include("${neomcp_target_file}")
+endforeach()
+unset(neomcp_target_file)
+
 if(NEOMCP_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)

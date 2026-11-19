@@ -294,3 +294,22 @@ add_executable(neomcp_conformance_fixture_test conformance/fixture_test.cpp)
 target_link_libraries(neomcp_conformance_fixture_test PRIVATE neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)
 neomcp_configure_target(neomcp_conformance_fixture_test)
 gtest_discover_tests(neomcp_conformance_fixture_test DISCOVERY_TIMEOUT 120)
+
+# ---- Test suites that live in a folder of their own ------------------------------------------------------------------
+
+# A folder tests/<name>/ with its own CMakeLists.txt is a suite. It is added when a file tests/suites/<name>.suite
+# exists (its content is free: a line saying what the suite checks), so that a suite is one folder and one file, and
+# tests/consumer, which is a project of its own, is never added by accident. The suites are added in the order of their
+# names, after everything above, and may use the targets and the function neomcp_configure_target. A listed suite
+# without the folder is an error.
+file(GLOB NEOMCP_TEST_SUITE_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/suites/*.suite")
+list(SORT NEOMCP_TEST_SUITE_FILES)
+foreach(neomcp_suite_file IN LISTS NEOMCP_TEST_SUITE_FILES)
+    get_filename_component(neomcp_suite "${neomcp_suite_file}" NAME_WE)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${neomcp_suite}/CMakeLists.txt")
+        message(FATAL_ERROR "neomcp: tests/suites/${neomcp_suite}.suite lists a suite, but tests/${neomcp_suite}/CMakeLists.txt does not exist")
+    endif()
+    add_subdirectory("${neomcp_suite}")
+endforeach()
+unset(neomcp_suite_file)
+unset(neomcp_suite)
