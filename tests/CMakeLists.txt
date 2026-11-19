@@ -78,6 +78,12 @@ else()
 endif()
 
 # SHA-256, HMAC-SHA-256 and the random source; the test reaches the internal headers of the primitives.
+# The time a `pattern` takes on short strings, for patterns whose repeated group can match one text in many ways.
+add_executable(neomcp_json_schema_pattern_time_test json_schema_pattern_time_test.cpp)
+target_link_libraries(neomcp_json_schema_pattern_time_test PRIVATE neomcp::schema neojson::neojson GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_json_schema_pattern_time_test)
+gtest_discover_tests(neomcp_json_schema_pattern_time_test DISCOVERY_TIMEOUT 120)
+
 add_executable(neomcp_crypto_test crypto_test.cpp)
 target_link_libraries(neomcp_crypto_test PRIVATE neomcp::crypto GTest::gtest_main Threads::Threads)
 target_include_directories(neomcp_crypto_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
@@ -208,6 +214,12 @@ target_link_libraries(neomcp_http_endpoint_test PRIVATE neomcp::http neomcp_http
 target_include_directories(neomcp_http_endpoint_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 neomcp_configure_target(neomcp_http_endpoint_test)
 gtest_discover_tests(neomcp_http_endpoint_test DISCOVERY_TIMEOUT 120)
+
+# A tool call whose argument a schema `pattern` checks, next to another client's request, on a listener with one worker.
+add_executable(neomcp_http_pattern_check_test http_pattern_check_test.cpp)
+target_link_libraries(neomcp_http_pattern_check_test PRIVATE neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_http_pattern_check_test)
+gtest_discover_tests(neomcp_http_pattern_check_test DISCOVERY_TIMEOUT 120)
 
 # The server the official conformance runner tests (the CI job `conformance`). It is neither installed nor an example.
 add_executable(neomcp_conformance_fixture conformance/everything_server.cpp)
