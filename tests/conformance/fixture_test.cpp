@@ -102,8 +102,12 @@ public:
     const json& opening() const { return opening_; }
 
     // Sends a request and returns the whole JSON-RPC answer, a result or an error.
-    json call(const std::string& method, json params = json::object()) {
+    json call(const std::string& method, json params = json::object()) { return call_with(method, std::move(params), {}); }
+
+    // The same, with `extra` beside the headers the client sends on its own.
+    json call_with(const std::string& method, json params, const httplib::Headers& extra) {
         httplib::Headers headers = modern() ? modern_headers(method, params) : legacy_headers();
+        for (const auto& field : extra) headers.emplace(field.first, field.second);
         if (modern()) params["_meta"] = modern_meta(params);
         const auto answer = http_.Post(path, headers, rpc(next_id_++, method, std::move(params)), json_type);
         if (!answer) throw std::runtime_error(method + " was not answered");
@@ -1104,5 +1108,127 @@ TEST_F(LegacyInput, TheThreeRequestsOfOneRoundAreSentTogether) {
     ASSERT_TRUE(trip.answer.contains("result")) << trip.answer.dump();
 }
 
+// ---- Tools whose parameters are mirrored into headers, and the schema with the keywords of 2020-12 --------------------
+
+TEST_P(FixtureScenarios, TheSchemaWithTheKeywordsOfJsonSchema2020_12IsListedAsItWasWritten) {
+    // The scenario reads $schema, $defs (with the anchor in address), additionalProperties, the composition and the
+    // condition from the listing; the whole schema must arrive as registered, in every revision.
+    const json tools = client.result("tools/list").at("tools");
+    const json found = entry_of(tools, "name", "json_schema_2020_12_tool");
+    ASSERT_FALSE(found.is_null());
+    const json& schema = found.at("inputSchema");
+    EXPECT_EQ(schema, conformance::json_schema_2020_12_input());
+    EXPECT_EQ(schema.at("$schema"), "https://json-schema.org/draft/2020-12/schema");
+    EXPECT_TRUE(schema.at("$defs").at("address").contains("$anchor"));
+    EXPECT_EQ(schema.at("additionalProperties"), false);
+    EXPECT_TRUE(schema.at("allOf").at(0).contains("anyOf"));
+    EXPECT_TRUE(schema.contains("if") && schema.contains("then") && schema.contains("else"));
+}
+
+TEST_P(FixtureScenarios, TheToolWithMirroredParametersIsListedWithTheirMarks) {
+    // The scenario looks for the first tool whose properties carry the mark, and in it for a string.
+    const json tools = client.result("tools/list").at("tools");
+    const json found = entry_of(tools, "name", "test_header_parameters");
+    ASSERT_FALSE(found.is_null());
+    const json& properties = found.at("inputSchema").at("properties");
+    EXPECT_EQ(properties.at("region").at("type"), "string");
+    EXPECT_EQ(properties.at("region").at("x-mcp-header"), "Region");
+    EXPECT_EQ(properties.at("priority").at("x-mcp-header"), "Priority");
+    EXPECT_EQ(properties.at("verbose").at("x-mcp-header"), "Verbose");
+    EXPECT_EQ(found.at("inputSchema").at("required"), json::array({"region"}));
+    int marked = 0;
+    for (const json& tool : tools) {
+        const json& schema = tool.at("inputSchema");
+        if (!schema.contains("properties")) continue;
+        for (const auto& property : schema.at("properties").items()) {
+            if (property.value().contains("x-mcp-header")) ++marked;
+        }
+    }
+    EXPECT_EQ(marked, 3) << "no other tool carries a mark";
+}
+
+class ModernHeaders : public ::testing::Test {
+protected:
+    ModernHeaders() : client(fixture.port, modern_revision) {}
+
+    // The call the scenario makes: the tool, the arguments with the string it varies, and the header it sends.
+    json call_region(const std::string& body_value, const std::optional<std::string>& header_value) {
+        httplib::Headers extra;
+        if (header_value) extra.emplace("Mcp-Param-Region", *header_value);
+        return client.call_with("tools/call", json{{"name", "test_header_parameters"}, {"arguments", json{{"region", body_value}}}},
+                                extra);
+    }
+
+    // Whether the answer is the refusal the scenario wants: status 400 and the code of a header mismatch.
+    void expect_rejected(const json& answer) {
+        EXPECT_EQ(client.last_status(), 400);
+        ASSERT_TRUE(answer.contains("error")) << answer.dump();
+        EXPECT_EQ(answer.at("error").at("code"), -32020);
+    }
+    void expect_accepted(const json& answer) {
+        EXPECT_EQ(client.last_status(), 200);
+        ASSERT_TRUE(answer.contains("result")) << answer.dump();
+        EXPECT_FALSE(failed(answer.at("result")));
+    }
+
+    Fixture fixture;
+    Client client;
+};
+
+TEST_F(ModernHeaders, ABase64ValueIsDecodedAndMatchedAgainstTheBody) {
+    expect_accepted(call_region("Hello", "=?base64?SGVsbG8=?="));
+}
+
+TEST_F(ModernHeaders, Base64WithoutItsPaddingIsRejected) {
+    expect_rejected(call_region("Hello", "=?base64?SGVsbG8?="));
+}
+
+TEST_F(ModernHeaders, Base64WithCharactersOutsideTheAlphabetIsRejected) {
+    expect_rejected(call_region("Hello", "=?base64?SGVs!!!bG8=?="));
+}
+
+TEST_F(ModernHeaders, AValueWithoutThePrefixOrTheSuffixIsTakenLiterally) {
+    const std::string digits = "SGVsbG8=";
+    expect_accepted(call_region(digits, digits));
+    expect_accepted(call_region("=?base64?" + digits, "=?base64?" + digits));
+    expect_rejected(call_region("Hello", digits));
+}
+
+TEST_F(ModernHeaders, AHeaderLeftOutWhileTheBodyHasTheValueIsRejected) {
+    expect_rejected(call_region("test-value", std::nullopt));
+}
+
+TEST_F(ModernHeaders, AHeaderThatDiffersFromTheBodyIsRejected) {
+    expect_rejected(call_region("us-west1", "us-east1"));
+}
+
+TEST_F(ModernHeaders, ThePlainValueMatchesAndOtherParametersAreMirroredToo) {
+    httplib::Headers extra{{"Mcp-Param-Region", "us-west1"}, {"Mcp-Param-Priority", "42.0"}, {"Mcp-Param-Verbose", "true"}};
+    json params{{"name", "test_header_parameters"},
+                {"arguments", json{{"region", "us-west1"}, {"priority", 42}, {"verbose", true}}}};
+    expect_accepted(client.call_with("tools/call", params, extra));
+    extra = {{"Mcp-Param-Region", "us-west1"}, {"Mcp-Param-Priority", "43"}, {"Mcp-Param-Verbose", "true"}};
+    expect_rejected(client.call_with("tools/call", params, extra));
+    extra = {{"Mcp-Param-Region", "us-west1"}, {"Mcp-Param-Priority", "42"}};
+    expect_rejected(client.call_with("tools/call", params, extra));
+}
+
+TEST_F(ModernHeaders, ACallWithoutTheOptionalParametersNeedsOnlyTheRegionHeader) {
+    expect_accepted(call_region("us-west1", "us-west1"));
+}
+
+TEST(LegacyHeaders, ARevisionBeforeTheOnesThatDefineThemLooksAtNoParameterHeader) {
+    Fixture fixture;
+    Client client(fixture.port, legacy_revision);
+    const json params{{"name", "test_header_parameters"}, {"arguments", json{{"region", "us-west1"}}}};
+    json answer = client.call("tools/call", params);
+    ASSERT_TRUE(answer.contains("result")) << answer.dump();
+    EXPECT_EQ(client.last_status(), 200);
+    EXPECT_FALSE(failed(answer.at("result")));
+    answer = client.call_with("tools/call", params, httplib::Headers{{"Mcp-Param-Region", "somewhere-else"}});
+    ASSERT_TRUE(answer.contains("result")) << answer.dump();
+    EXPECT_EQ(client.last_status(), 200);
+    EXPECT_FALSE(failed(answer.at("result")));
+}
 
 }  // namespace

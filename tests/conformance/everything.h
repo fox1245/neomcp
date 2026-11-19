@@ -43,7 +43,26 @@ struct MessageArgument {
     std::string message;
 };
 
+// The parameters of the tool whose parameters are mirrored into headers: a region (a string), a priority and a verbose
+// flag (the latter two may be left out).
+struct HeaderParameters {
+    std::string region;
+    std::optional<std::int32_t> priority;
+    std::optional<bool> verbose;
+};
+
 }  // namespace conformance
+
+template <>
+struct neomcp::Described<conformance::HeaderParameters> {
+    static constexpr auto fields = neomcp::fields(
+        neomcp::field(&conformance::HeaderParameters::region, "region", "The region to run in",
+                      neomcp::mirror_in_header("Region")),
+        neomcp::field(&conformance::HeaderParameters::priority, "priority", "How urgent the work is",
+                      neomcp::mirror_in_header("Priority"), neomcp::minimum(0), neomcp::maximum(100)),
+        neomcp::field(&conformance::HeaderParameters::verbose, "verbose", "Whether to be chatty",
+                      neomcp::mirror_in_header("Verbose")));
+};
 
 NEOMCP_DESCRIBE(conformance::TwoArguments, arg1, "the first argument", arg2, "the second argument")
 NEOMCP_DESCRIBE(conformance::ResourceArgument, resourceUri, "the URI of the resource to embed")
@@ -76,6 +95,34 @@ inline neomcp::TextContent text(std::string value) {
     neomcp::TextContent block;
     block.text = std::move(value);
     return block;
+}
+
+// The input schema of the tool that carries the keywords of JSON Schema 2020-12: the dialect, definitions with an
+// anchor, a reference, a composition, a condition and a closed object.
+inline neomcp::json json_schema_2020_12_input() {
+    return neomcp::json::parse(R"({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "$defs": {
+            "address": {
+                "$anchor": "addressDef",
+                "type": "object",
+                "properties": {"street": {"type": "string"}, "city": {"type": "string"}}
+            }
+        },
+        "properties": {
+            "name": {"type": "string"},
+            "address": {"$ref": "#/$defs/address"},
+            "contactMethod": {"type": "string", "enum": ["phone", "email"]},
+            "phone": {"type": "string"},
+            "email": {"type": "string"}
+        },
+        "allOf": [{"anyOf": [{"required": ["phone"]}, {"required": ["email"]}]}],
+        "if": {"properties": {"contactMethod": {"const": "phone"}}, "required": ["contactMethod"]},
+        "then": {"required": ["phone"]},
+        "else": {"required": ["email"]},
+        "additionalProperties": false
+    })");
 }
 
 inline neomcp::ServerOptions server_options() {
@@ -133,6 +180,21 @@ inline void register_tools(neomcp::Server& server) {
     };
     server.tool("test_tool_with_logging", "Log three messages, then answer", logging);
     server.tool("test_logging_tool", "Log three messages, then answer", logging);
+}
+
+// A tool whose parameters a client mirrors into headers (the scenario that sends it values in the encoded form, and
+// leaves a header out), and the tool whose input schema has the keywords of JSON Schema 2020-12 that must reach the
+// client as they were written. Both are registered for every revision: the older ones list the schemas as they are
+// and look at no header.
+inline void register_schema_tools(neomcp::Server& server) {
+    server.tool<HeaderParameters>("test_header_parameters", "A tool whose parameters are mirrored into headers",
+                                  [](const HeaderParameters& parameters) { return "Ran in " + parameters.region; });
+
+    neomcp::ToolDefinition schema_tool;
+    schema_tool.name = "json_schema_2020_12_tool";
+    schema_tool.description = "Tool with JSON Schema 2020-12 features";
+    schema_tool.input_schema = json_schema_2020_12_input();
+    server.tool(schema_tool, [](const neomcp::json&) { return neomcp::ToolResult{}; });
 }
 
 // ---- Asking the client ----------------------------------------------------------------------------------------------
@@ -479,6 +541,7 @@ inline void register_changes(neomcp::Server& server) {
 
 inline void register_everything(neomcp::Server& server) {
     register_tools(server);
+    register_schema_tools(server);
     register_input_tools(server);
     register_resources(server);
     register_prompts(server);
