@@ -21,8 +21,8 @@
 #include <utility>
 #include <variant>
 
-#include "stdio/fd_streams.h"
-#include "stdio/line_splitter.h"
+#include "io/fd_streams.h"
+#include "io/line_splitter.h"
 
 namespace neomcp {
 namespace {

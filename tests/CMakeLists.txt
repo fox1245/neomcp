@@ -213,7 +213,7 @@ gtest_discover_tests(neomcp_server_declared_test DISCOVERY_TIMEOUT 120)
 # ---- The stdio transport ---------------------------------------------------------------------------------------------
 
 add_executable(neomcp_stdio_test stdio_test.cpp)
-target_link_libraries(neomcp_stdio_test PRIVATE neomcp::stdio GTest::gtest_main Threads::Threads)
+target_link_libraries(neomcp_stdio_test PRIVATE neomcp::stdio neomcp::io GTest::gtest_main Threads::Threads)
 # The test reaches the transport's internal pieces (the line splitter and the descriptor streams).
 target_include_directories(neomcp_stdio_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 neomcp_configure_target(neomcp_stdio_test)

@@ -33,11 +33,11 @@
 
 #include <gtest/gtest.h>
 
+#include "io/fd_streams.h"
+#include "io/line_splitter.h"
 #include "neomcp/server.h"
 #include "neomcp/stdio.h"
 #include "neomcp/testing/peer.h"
-#include "stdio/fd_streams.h"
-#include "stdio/line_splitter.h"
 
 namespace {
 

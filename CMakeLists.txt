@@ -196,13 +196,12 @@ neomcp_configure_target(neomcp_server)
 
 # The stdio transport: serve one client on standard input and output (or on any pair of byte streams).
 add_library(neomcp_stdio
-    src/stdio/stdio.cpp
-    src/stdio/fd_streams.cpp)
+    src/stdio/stdio.cpp)
 add_library(neomcp::stdio ALIAS neomcp_stdio)
 target_include_directories(neomcp_stdio
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(neomcp_stdio PUBLIC neomcp::server)
+target_link_libraries(neomcp_stdio PUBLIC neomcp::server PRIVATE neomcp::io)
 target_compile_features(neomcp_stdio PUBLIC cxx_std_20)
 neomcp_configure_target(neomcp_stdio)
 
