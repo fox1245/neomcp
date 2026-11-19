@@ -14,8 +14,8 @@
 // - Every call has its own stop source. A stop callback forwards the session's stop (cancellation or close) to it,
 //   and the destructor requests it directly. For a coroutine handler a second callback posts a terminal
 //   cancellation to the io thread, which cancels the asynchronous operation the coroutine awaits.
-// - The destructor sets the stopping flag (so nothing new is admitted), answers the calls still queued, requests
-//   stop on every call in flight while holding no lock, joins the workers, cancels the input timers, lets the
+// - The destructor sets the stopping flag (so nothing new is admitted), requests stop on every call in flight
+//   and then answers the calls still queued, both while holding no lock, joins the workers, cancels the input timers, lets the
 //   io_context run out of work and joins its thread. It cannot deadlock on a handler that waits for its stop token:
 //   the stop is requested before any join, from a thread that holds nothing a handler or a stop callback needs.
 // - A call that asked for input is entered again as a new call of the same thing; nothing of the earlier run is
