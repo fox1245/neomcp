@@ -3,7 +3,7 @@
 What is done, what is in progress and what has not been started. The README's Status section says what a user can
 rely on today; this file is the list of work.
 
-Last updated: 2026-11-19.
+Last updated: 2026-11-20.
 
 ## Done
 
@@ -25,15 +25,16 @@ Last updated: 2026-11-19.
   lists of expected failures; the official Python SDK's client is run against the stdio and HTTP servers.
 - **Build preparation for the client**: the targets `neomcp::io` and `neomcp::http_base` hold what a client shares
   with the server.
+- **Shared declarations for the client**: `ByteReader`/`ByteWriter` (`neomcp/byte_stream.h`), `Headers`
+  (`neomcp/http/headers.h`) and the authority parser (`neomcp/http/authority.h`) in headers that include nothing of
+  the server.
+- **The reading half of the wire code** (`neomcp/wire_read.h`): readers for everything a server writes, the inverses
+  for input requests, and the encoder for mirrored parameter headers. Its tests have not yet been checked by
+  breaking the code on purpose.
 
 ## In progress
 
-Work that exists on a branch and is not on `main` yet.
-
-| Branch | Content | State |
-|---|---|---|
-| `refactor/shared-headers` | `ByteReader`/`ByteWriter`, `Headers` and the authority parser in headers of their own; the URI code in `neomcp::detail` | complete; waits for CI on every platform |
-| `feat/client-readers` (on top of the one above) | `neomcp/wire_read.h`: readers for everything a server writes; the inverses for input requests (`read_request`, `write_answer`); `encode_header_value` for mirrored parameters | code and tests written; not yet built on every compiler |
+Nothing is on a branch that is not on `main`.
 
 ## Not started: the client without authorization
 
