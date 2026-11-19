@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <deque>
 #include <future>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -292,6 +293,12 @@ TEST(LineSplitter, TerminatorsAndEmptyLines) {
     EXPECT_EQ(split(1000, by_byte(input), true), (std::vector<std::string>{"one", "two", "three\r", "four"}));
     EXPECT_TRUE(split(1000, {"\r"}, true).empty());
     EXPECT_TRUE(split(1000, {""}, true).empty());
+}
+
+TEST(LineSplitter, ALimitThatCannotBeExceededKeepsEveryLine) {
+    const std::size_t no_limit = std::numeric_limits<std::size_t>::max();
+    EXPECT_EQ(split(no_limit, {"ab\ncd\n"}, false), (std::vector<std::string>{"ab", "cd"}));
+    EXPECT_EQ(split(no_limit, {"tail"}, true), (std::vector<std::string>{"tail"}));
 }
 
 TEST(LineSplitter, ALineIsWhatLiesBetweenTerminatorsWhateverTheChunks) {
@@ -780,6 +787,27 @@ TEST(Descriptors, AWriterToAClosedPipeFailsInsteadOfEndingTheProcess) {
     const neomcp::detail::SigpipeGuard guard(true);
     neomcp::detail::FdWriter writer(pipe.write_end);
     EXPECT_FALSE(writer.write("lost\n"));
+}
+
+TEST(Descriptors, OverlappingSigpipeGuardsRestoreTheDispositionWhenTheLastIsGone) {
+    struct sigaction handler = {};
+    handler.sa_handler = [](int) {};
+    sigemptyset(&handler.sa_mask);
+    struct sigaction original = {};
+    ASSERT_EQ(::sigaction(SIGPIPE, &handler, &original), 0);
+    const auto disposition = [] {
+        struct sigaction current = {};
+        ::sigaction(SIGPIPE, nullptr, &current);
+        return current.sa_handler;
+    };
+    auto first = std::make_unique<neomcp::detail::SigpipeGuard>(true);
+    auto second = std::make_unique<neomcp::detail::SigpipeGuard>(true);
+    EXPECT_EQ(disposition(), SIG_IGN);
+    first.reset();  // the transport of the second guard still runs: its writes must not end the process
+    EXPECT_EQ(disposition(), SIG_IGN);
+    second.reset();
+    EXPECT_EQ(disposition(), handler.sa_handler);
+    ::sigaction(SIGPIPE, &original, nullptr);
 }
 
 TEST(Descriptors, ServeOverTwoPipes) {
