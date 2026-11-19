@@ -19,7 +19,8 @@ namespace neomcp::detail {
 
 #ifdef _WIN32
 
-FdReader::FdReader(int fd) : fd_(fd) {}
+// There is no private pipe here: a read is ended by the flag that interrupt() sets, so both forms make the same reader.
+FdReader::FdReader(int fd, bool) : fd_(fd) {}
 FdReader::~FdReader() = default;
 
 std::size_t FdReader::read(char* buffer, std::size_t capacity) {
