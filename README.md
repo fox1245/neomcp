@@ -34,11 +34,18 @@ What exists now:
   of 2026-07-28, to the same program.
 - A Streamable HTTP server that serves both eras on one endpoint: sessions for the revisions that have them, the
   per-request form of 2026-07-28 without one.
+- Asking the client for input while a call is served (a form, a completion from its model, its roots): a handler
+  returns what it needs and is entered again with the answers, and the library carries that in the way each
+  revision defines. The state that travels between the rounds is signed by the server.
+- Telling clients of changes: tools, prompts and resources can be switched on and off while the server serves, a
+  resource can be reported as updated, and clients hear of it in the way their revision defines.
+- The server is run in CI against the official conformance suite for the revisions 2025-11-25 and 2026-07-28, and
+  against the official Python SDK's client over stdio and HTTP.
 
 Still planned:
 
-- Asking the client for input (forms, sampling), and notifications of changes to tools, prompts and resources.
 - The client.
+- Authorization.
 
 ## Build
 
