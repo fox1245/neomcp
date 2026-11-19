@@ -33,6 +33,7 @@
 //   leaves.
 #include "neomcp/server.h"
 
+#include "neomcp/argument_headers.h"
 #include "neomcp/feature_host.h"
 #include "neomcp/uri_template.h"
 
@@ -78,6 +79,22 @@ bool is_object_schema(const json& schema) {
 
 std::string describe_issue(std::string_view subject, const json_schema::Issue& issue) {
     return std::string(subject) + issue.instance_pointer + " " + issue.message;
+}
+
+// The schema keywords that mark a tool's parameters for headers in the revisions the options serve (every built-in
+// revision when none is named), each once. A revision that defines no argument headers adds none.
+std::vector<std::string> argument_keywords(const std::vector<profile::ProfilePtr>& named) {
+    std::vector<profile::ProfilePtr> served = named;
+    if (served.empty()) {
+        for (const std::string_view revision : profile::builtin_revisions()) served.push_back(profile::builtin(revision));
+    }
+    std::vector<std::string> keywords;
+    for (const profile::ProfilePtr& entry : served) {
+        if (!entry || !entry->streamable_http() || !entry->streamable_http()->argument_headers) continue;
+        const std::string& keyword = entry->streamable_http()->argument_headers->schema_keyword;
+        if (std::find(keywords.begin(), keywords.end(), keyword) == keywords.end()) keywords.push_back(keyword);
+    }
+    return keywords;
 }
 
 ToolResult error_result(std::string text) {
@@ -328,6 +345,9 @@ private:
     void on_timer(const std::shared_ptr<InputTimer>& timer, const std::error_code& error);
 
     json_schema::Validator compile(const std::string& tool, std::string_view which, const json& schema) const;
+    // Throws std::invalid_argument when the schema marks a parameter for a header against a rule of the revisions
+    // served.
+    void check_header_marks(const std::string& tool, const json& schema) const;
     void ensure_registering(const std::string& label, std::string_view action) const;
     bool admits() const;  // with mutex_ held
 
@@ -351,6 +371,7 @@ private:
 
     // Immutable once serving began.
     ServerOptions options_;
+    std::vector<std::string> argument_keywords_;  // see argument_keywords()
     std::vector<ToolDefinition> definitions_;
     std::vector<std::unique_ptr<ToolEntry>> entries_;
     std::map<std::string, std::size_t, std::less<>> by_name_;
@@ -432,7 +453,8 @@ void TimerCancel::operator()() const noexcept { core->cancel_timer(timer); }
 // ---------------------------------------------------------------------------------------------------------------
 // Lifetime
 
-ServerCore::ServerCore(ServerOptions options) : options_(std::move(options)) {
+ServerCore::ServerCore(ServerOptions options)
+    : options_(std::move(options)), argument_keywords_(argument_keywords(options_.profiles)) {
     if (options_.max_concurrent_calls == 0) {
         throw std::invalid_argument("neomcp: ServerOptions::max_concurrent_calls is zero");
     }
@@ -553,6 +575,16 @@ json_schema::Validator ServerCore::compile(const std::string& tool, std::string_
     return std::get<json_schema::Validator>(std::move(compiled));
 }
 
+void ServerCore::check_header_marks(const std::string& tool, const json& schema) const {
+    for (const std::string& keyword : argument_keywords_) {
+        const auto marks = header_parameters(schema, keyword);
+        if (const auto* issue = std::get_if<HeaderMarkIssue>(&marks)) {
+            throw std::invalid_argument("neomcp: tool '" + tool + "': the mark '" + keyword + "' at \"" +
+                                        issue->pointer + "\" breaks a rule: " + issue->rule);
+        }
+    }
+}
+
 std::size_t ServerCore::add(ToolDefinition definition, Body body) {
     const std::string name = definition.name;
     ensure_registering("tool '" + name + "'", "registered");
@@ -565,6 +597,7 @@ std::size_t ServerCore::add(ToolDefinition definition, Body body) {
     }
     auto entry = std::make_unique<ToolEntry>(options_, std::move(body), "tool '" + name + "'");
     entry->input = compile(name, "input", definition.input_schema);
+    check_header_marks(name, definition.input_schema);
     if (definition.output_schema) entry->output = compile(name, "output", *definition.output_schema);
     const std::size_t index = definitions_.size();
     definitions_.push_back(std::move(definition));

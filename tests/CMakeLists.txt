@@ -94,6 +94,12 @@ target_link_libraries(neomcp_server_test PRIVATE neomcp::server GTest::gtest_mai
 neomcp_configure_target(neomcp_server_test)
 gtest_discover_tests(neomcp_server_test DISCOVERY_TIMEOUT 120)
 
+# Argument headers: the marks of a tool's input schema, their rules at registration, and the check of a call's headers.
+add_executable(neomcp_argument_headers_test argument_headers_test.cpp)
+target_link_libraries(neomcp_argument_headers_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_argument_headers_test)
+gtest_discover_tests(neomcp_argument_headers_test DISCOVERY_TIMEOUT 120)
+
 add_executable(neomcp_server_features_test server_features_test.cpp)
 target_link_libraries(neomcp_server_features_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
 neomcp_configure_target(neomcp_server_features_test)

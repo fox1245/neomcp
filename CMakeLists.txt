@@ -153,6 +153,7 @@ target_compile_features(neomcp_crypto PUBLIC cxx_std_20)
 neomcp_configure_target(neomcp_crypto)
 
 add_library(neomcp_core
+    src/core/argument_headers.cpp
     src/core/base64.cpp
     src/core/change.cpp
     src/core/headers.cpp
