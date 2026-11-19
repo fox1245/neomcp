@@ -12,8 +12,7 @@
 //     of them; it gets no answer until a worker is free. So at most max_worker_threads + max_queued_connections
 //     connections are open at once, and a connection that arrives beyond that is closed at once.
 //   - A worker also serves a request while it arrives: the request line and header fields within one read timeout,
-//     the body within ListenerOptions::body_timeout. A peer that sends slowly holds its worker no longer than that
-//     and one read timeout more.
+//     the body within ListenerOptions::body_timeout. A peer that sends slowly holds its worker no longer than that.
 //
 // The peer's disconnect is noticed by polling (ListenerOptions::disconnect_poll_interval), because a blocking
 // socket gives the worker no wake-up: a client that went away is noticed within about one interval. While a stream is
@@ -87,12 +86,11 @@ struct ListenerOptions {
     std::chrono::milliseconds write_timeout = ListenerDefaults::write_timeout;
 
     // How long the body of one request may take to arrive, counted from the end of its header fields, whatever the
-    // pace of the single reads. A request whose body is not complete by then is answered 408 without the handler being
-    // called, and its connection is closed. The listener looks at the time whenever bytes of the body arrive, so a
-    // worker that reads a body too slowly is free again at most one read timeout after this time. Must be positive.
-    // A body must be framed by Content-Length: one in the chunked transfer coding is answered 411 before it is read
-    // (the time between its pieces of data could not be bounded). GET, HEAD and OPTIONS requests take no body: one
-    // that frames a body is answered 400 before it is read.
+    // pace of the single reads and however it is framed (by Content-Length, or in the chunked transfer coding, whose
+    // chunk lines and trailer fields count too). A request whose body is not complete by then is answered 408 without
+    // the handler being called, and its connection is closed; its worker is free again at about this time. Must be
+    // positive. GET, HEAD and OPTIONS requests take no body: the library would read one before the listener sees the
+    // request, where this time cannot be set, so one that frames a body is answered 400 before it is read.
     //
     // Default 2 minutes: the largest body allowed by default (8 MiB) then needs an average of about 0.56 Mbit/s, so an
     // honest client on a slow link (1 Mbit/s takes about 67 s for 8 MiB) still has twice the time it needs. A server

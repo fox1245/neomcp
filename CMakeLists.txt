@@ -228,6 +228,8 @@ target_include_directories(neomcp_http
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(neomcp_http PUBLIC neomcp::server neomcp::http_base neomcp::crypto Threads::Threads PRIVATE neomcp_httplib asio::asio)
+# The version the listener checks the library's header against (see cmake/NeomcpHttplib.cmake).
+target_compile_definitions(neomcp_http PRIVATE "NEOMCP_HTTPLIB_VERSION=\"${NEOMCP_HTTPLIB_VERSION}\"")
 if(WIN32)
     target_link_libraries(neomcp_http PRIVATE ws2_32)
 endif()

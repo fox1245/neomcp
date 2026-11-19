@@ -17,6 +17,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <unordered_set>
@@ -36,7 +37,6 @@ constexpr int highest_status = 599;
 constexpr int lowest_error_status = 400;
 constexpr int bad_request_status = 400;
 constexpr int request_timeout_status = 408;
-constexpr int length_required_status = 411;
 constexpr int content_too_large_status = 413;
 constexpr int internal_error_status = 500;
 constexpr int unavailable_status = 503;
@@ -63,15 +63,11 @@ bool takes_body(const std::string& method) {
     return method == post_method || method == put_method || method == patch_method || method == delete_method;
 }
 
-// Whether the request's body comes in a transfer coding (the library takes only `chunked`).
-bool transfer_coded(const httplib::Request& incoming) {
-    return incoming.has_header(std::string(transfer_encoding_field));
-}
-
-// Whether the request's framing announces a body: a transfer coding, or a Content-Length above zero (the library
-// refused a malformed one before routing).
+// Whether the request's framing announces a body: a transfer coding (the library takes only `chunked`), or a
+// Content-Length above zero (the library refused a malformed one before routing).
 bool frames_body(const httplib::Request& incoming) {
-    return transfer_coded(incoming) || incoming.get_header_value_u64(std::string(content_length_field)) > 0;
+    return incoming.has_header(std::string(transfer_encoding_field)) ||
+           incoming.get_header_value_u64(std::string(content_length_field)) > 0;
 }
 
 // The answer a worker waits for: filled once, by the responder, by the destruction of the last responder copy, or by
@@ -100,6 +96,63 @@ private:
     std::mutex mutex_;
     std::condition_variable settled_;
     std::optional<Response> response_;
+};
+
+// The stream of the connection the worker thread serves now; null outside a request. The whole of one request is
+// processed on one worker thread (DeadlineServer below), so a handler finds its connection here.
+thread_local httplib::Stream* serving_stream = nullptr;
+
+// The library's server, with what the body deadline needs: a handler reaches the stream of its connection, whose total
+// time limit (Stream::set_max_timeout) also covers the chunk-size lines, chunk extensions and trailer fields of a
+// chunked body, where a content reader is never called; and every read of the connection gives up once the listener
+// stops (Stream::set_read_interrupt), so stop() does not wait for a peer that sends slowly.
+//
+// process_and_close_socket is copied from httplib::Server::process_and_close_socket of the cpp-httplib version named by
+// NEOMCP_HTTPLIB_VERSION in cmake/NeomcpHttplib.cmake; the copy differs only in the lines marked as additions. When
+// that version changes, compare this function with the library's again: the static_assert below stops the build until
+// the version named there is the header's.
+static_assert(std::string_view(CPPHTTPLIB_VERSION) == std::string_view(NEOMCP_HTTPLIB_VERSION),
+              "the pinned cpp-httplib changed: compare DeadlineServer::process_and_close_socket in "
+              "src/http/listener.cpp with httplib::Server::process_and_close_socket of the new version, then set "
+              "NEOMCP_HTTPLIB_VERSION in cmake/NeomcpHttplib.cmake to it");
+
+class DeadlineServer final : public httplib::Server {
+public:
+    explicit DeadlineServer(const std::atomic<bool>& closing) : closing_(closing) {}
+
+private:
+    bool process_and_close_socket(socket_t sock) override {
+        std::string remote_addr;
+        int remote_port = 0;
+        httplib::detail::get_remote_ip_and_port(sock, remote_addr, remote_port);
+
+        std::string local_addr;
+        int local_port = 0;
+        httplib::detail::get_local_ip_and_port(sock, local_addr, local_port);
+
+        bool websocket_upgraded = false;
+        auto ret = serve_guarded([&]() {
+            return httplib::detail::process_server_socket(
+                svr_sock_, sock, keep_alive_max_count_, keep_alive_timeout_sec_, read_timeout_sec_, read_timeout_usec_,
+                write_timeout_sec_, write_timeout_usec_,
+                [&](httplib::Stream& strm, bool close_connection, bool& connection_closed) {
+                    // The additions: the stream is marked for the request on this thread, and its reads end once the
+                    // listener stops.
+                    strm.set_read_interrupt([&closing = closing_] { return closing.load(); });
+                    serving_stream = &strm;
+                    struct Unmark {
+                        ~Unmark() { serving_stream = nullptr; }
+                    } unmark;
+                    return process_request(strm, remote_addr, remote_port, local_addr, local_port, close_connection,
+                                           connection_closed, nullptr, &websocket_upgraded);
+                });
+        });
+
+        httplib::detail::drain_and_close_socket(sock);
+        return ret;
+    }
+
+    const std::atomic<bool>& closing_;
 };
 
 // The library's pool refuses a connection when its list of jobs not yet taken by a worker is full, which also happens
@@ -205,7 +258,7 @@ Outcome<std::uint16_t> Listener::Impl::start() {
     }
     if (!handler) return Outcome<std::uint16_t>::failure("the handler is empty");
 
-    auto candidate = std::make_unique<httplib::Server>();
+    auto candidate = std::make_unique<DeadlineServer>(closing);
     candidate->set_payload_max_length(options.max_body_bytes);
     candidate->set_read_timeout(options.read_timeout);
     candidate->set_write_timeout(options.write_timeout);
@@ -229,18 +282,12 @@ Outcome<std::uint16_t> Listener::Impl::start() {
     };
 
     // The library reads a body it routes to an ordinary handler before the handler runs, with a bound on each read
-    // only. So the methods that take a body are routed to a handler that reads it in pieces (receive), which bounds
-    // its total time, and a request of another method that frames a body is refused before that body is read. A
-    // body in the chunked coding is refused too (411): between its pieces of data the library reads chunk lines and
-    // trailer fields, during which the reader is never called, so their time could not be bounded.
+    // only, and the deadline cannot be set for it. So the methods that take a body are routed to a handler that reads
+    // it itself (receive), under the deadline, and a request of another method (GET, HEAD, OPTIONS) that frames a body
+    // is refused before that body is read.
     candidate->set_pre_request_handler([](const httplib::Request& incoming, httplib::Response& outgoing) {
-        if (transfer_coded(incoming)) {
-            outgoing.status = length_required_status;
-        } else if (!takes_body(incoming.method) && frames_body(incoming)) {
-            outgoing.status = bad_request_status;
-        } else {
-            return httplib::Server::HandlerResponse::Unhandled;
-        }
+        if (takes_body(incoming.method) || !frames_body(incoming)) return httplib::Server::HandlerResponse::Unhandled;
+        outgoing.status = bad_request_status;
         outgoing.set_header(std::string(connection_field), std::string(close_token));
         return httplib::Server::HandlerResponse::Handled;
     });
@@ -319,30 +366,50 @@ void Listener::Impl::receive(const httplib::Request& incoming, httplib::Response
     using clock = std::chrono::steady_clock;
     // The time runs from the end of the header fields, which the library read within one read timeout.
     const clock::time_point deadline = clock::now() + options.body_timeout;
+    // Every read of the body, its framing included, waits no longer than what is left of that time. The stream is
+    // always there (DeadlineServer serves every connection); without it the deadline could not hold, so the request
+    // is refused.
+    httplib::Stream* const stream = serving_stream;
+    if (stream == nullptr) {
+        outgoing.status = internal_error_status;
+        outgoing.set_header(std::string(connection_field), std::string(close_token));
+        return;
+    }
     enum class Cut { none, late, too_large, stopping };
     Cut cut = Cut::none;
     std::string body;
-    const bool complete = reader([&](const char* data, std::size_t size) {
-        // stop() joins the workers: a body that is still arriving does not keep it waiting.
-        if (closing.load()) {
-            cut = Cut::stopping;
-            return false;
-        }
-        // Looked at for every piece, the last one included: a body that is not complete by the deadline is refused
-        // however much of it came in time.
-        if (clock::now() >= deadline) {
-            cut = Cut::late;
-            return false;
-        }
-        // The library bounds the body as well; this keeps the bound where the bytes are kept. body.size() never
-        // exceeds max_body_bytes, so the difference does not wrap.
-        if (size > options.max_body_bytes - body.size()) {
-            cut = Cut::too_large;
-            return false;
-        }
-        body.append(data, size);
-        return true;
-    });
+    bool complete = false;
+    {
+        // At least one millisecond: zero means no limit.
+        const auto limit = std::max<std::chrono::milliseconds::rep>(options.body_timeout.count(), 1);
+        stream->set_max_timeout(static_cast<time_t>(limit));
+        // Cleared once the body is read, whatever ended it: the rest of the exchange has the library's own limits.
+        struct Unlimit {
+            httplib::Stream& limited;
+            ~Unlimit() { limited.set_max_timeout(0); }
+        } unlimit{*stream};
+        complete = reader([&](const char* data, std::size_t size) {
+            // stop() joins the workers: a body that is still arriving does not keep it waiting.
+            if (closing.load()) {
+                cut = Cut::stopping;
+                return false;
+            }
+            // Looked at for every piece, the last one included: a body that is not complete by the deadline is
+            // refused however much of it came in time.
+            if (clock::now() >= deadline) {
+                cut = Cut::late;
+                return false;
+            }
+            // The library bounds the body as well; this keeps the bound where the bytes are kept. body.size() never
+            // exceeds max_body_bytes, so the difference does not wrap.
+            if (size > options.max_body_bytes - body.size()) {
+                cut = Cut::too_large;
+                return false;
+            }
+            body.append(data, size);
+            return true;
+        });
+    }
     if (!complete) {
         // The handler is not called. An error status closes the connection after the answer (the rest of the body
         // cannot be told from a next request); the field says so to the peer as well.
@@ -351,8 +418,15 @@ void Listener::Impl::receive(const httplib::Request& incoming, httplib::Response
             case Cut::too_large: outgoing.status = content_too_large_status; break;
             case Cut::stopping: outgoing.status = unavailable_status; break;
             case Cut::none:
-                // The library's own reason (a body over the bound, a malformed chunk, a read that timed out).
-                if (outgoing.status < lowest_error_status) outgoing.status = bad_request_status;
+                if (closing.load()) {
+                    outgoing.status = unavailable_status;  // a read the listener's stop interrupted
+                } else if (clock::now() >= deadline) {
+                    // A read the time limit ended: between pieces of data too, in a chunk line or a trailer field.
+                    outgoing.status = request_timeout_status;
+                } else if (outgoing.status < lowest_error_status) {
+                    // The library's own reason (a body over the bound, a malformed chunk, a read that timed out).
+                    outgoing.status = bad_request_status;
+                }
                 break;
         }
         outgoing.set_header(std::string(connection_field), std::string(close_token));

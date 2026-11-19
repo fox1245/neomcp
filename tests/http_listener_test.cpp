@@ -373,7 +373,7 @@ TEST(HttpListener, OtherPathsGet404AndTheHandlerIsNotCalled) {
     EXPECT_EQ(hit->body, "/mcp|a=b");
 }
 
-TEST(HttpListener, ABodyOverTheBoundGets413AChunkedBody411AndTheHandlerIsNotCalled) {
+TEST(HttpListener, ABodyOverTheBoundGets413AndTheHandlerIsNotCalled) {
     std::atomic<int> calls{0};
     ListenerOptions options = defaults();
     options.max_body_bytes = 1024;
@@ -394,27 +394,23 @@ TEST(HttpListener, ABodyOverTheBoundGets413AChunkedBody411AndTheHandlerIsNotCall
     EXPECT_EQ(exact->body, "1024");
     EXPECT_EQ(calls, 1);
 
-    // A body without a declared length (the chunked coding) is refused before it is read, whatever its size: the
-    // listener bounds the time a body takes only for one framed by Content-Length.
-    for (const std::size_t total : {std::size_t{512}, std::size_t{4096}}) {
-        SCOPED_TRACE(total);
-        std::size_t sent = 0;
-        auto chunked = make_client(server->port)->Post(
-            "/", httplib::Headers(),
-            [&](std::size_t, httplib::DataSink& sink) {
-                if (sent >= total) {
-                    sink.done();
-                    return true;
-                }
-                const std::string piece(512, 'y');
-                sink.write(piece.data(), piece.size());
-                sent += piece.size();
+    // A body without a declared length is bounded too.
+    std::size_t sent = 0;
+    auto chunked = client->Post(
+        "/", httplib::Headers(),
+        [&](std::size_t, httplib::DataSink& sink) {
+            if (sent >= 4096) {
+                sink.done();
                 return true;
-            },
-            "text/plain");
-        if (chunked) {  // the connection may also be cut before the answer is read
-            EXPECT_EQ(chunked->status, 411);
-        }
+            }
+            const std::string piece(512, 'y');
+            sink.write(piece.data(), piece.size());
+            sent += piece.size();
+            return true;
+        },
+        "text/plain");
+    if (chunked) {  // the connection may also be cut before the answer is read
+        EXPECT_EQ(chunked->status, 413);
     }
     EXPECT_EQ(calls, 1);
 }
