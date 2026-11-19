@@ -165,13 +165,18 @@ stream open besides its requests, so allow one worker per such client plus the r
 Three bounds keep a client from holding these resources longer than it uses them:
 
 - A request body must arrive within `body_timeout` (default 2 minutes, enough for the largest body over a slow
-  link) of its headers, framed by `Content-Length`; a slower one is answered 408 and its worker is free again.
+  link) of its headers, whether it has a `Content-Length` or comes in chunks; a slower one is answered 408 and its
+  worker is free again.
 - Of the sessions kept for session-based revisions (`endpoint.max_sessions`, default 1024), one that nobody used
   after its handshake ends after `endpoint.unused_session_timeout` (default 30 seconds), and gives its place to a
   new handshake when the table is full; a session that was used keeps its place.
 - The resource URIs a session watches may be at most 8 KiB each and 128 KiB together
   (`SessionOptions::max_watched_uri_bytes` and `max_watched_bytes`; a `Server`'s sessions keep these defaults); a
   longer one is refused.
+
+These bounds limit how long one connection holds a worker, not how many connections arrive. A server that clients
+outside its own machine or network reach belongs behind a reverse proxy that buffers request bodies and limits
+connections, as it does for TLS.
 
 ## Asking the client
 
