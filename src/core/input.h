@@ -35,6 +35,20 @@ std::variant<json, std::string> write_params(const InputRequest& request, const 
 bool input_supported(const InputRequest& request, const json& capabilities, const profile::Profile& profile,
                      const InputMechanism& mechanism);
 
+// The request a server asked with, read from its params: the inverse of write_params. `method` is the request's method
+// and `params` its params (null when it has none). Every member the revision's params require must be there; members
+// that the revision's params do not have are not read; an `elicitation/create` request without a mode is a form. An
+// error says what is wrong: a method or a mode the revision does not define, a member that is missing or of the wrong
+// kind, a content block of a kind that sampling does not carry.
+std::variant<InputRequest, std::string> read_request(std::string_view method, const json& params,
+                                                     const profile::Profile& profile, const InputMechanism& mechanism);
+
+// The result a client answers a request with: the inverse of read_answer. Only the members the revision's result type
+// has are written, and every member it requires is there; the fields of an elicitation are written for an acceptance
+// only. An error when the revision does not carry the request or the answer is malformed.
+std::variant<json, std::string> write_answer(const InputResponse& response, const profile::Profile& profile,
+                                             const InputMechanism& mechanism);
+
 // An answer to a request of `method`, read from the client's result: the answer, or what is wrong with its shape.
 std::variant<InputResponse, std::string> read_answer(std::string_view method, const json& result);
 

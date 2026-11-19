@@ -1,13 +1,15 @@
 #include "core/input.h"
 
 #include <algorithm>
-#include <initializer_list>
+#include <array>
 #include <span>
 #include <type_traits>
 #include <utility>
 
+#include "core/wire_names.h"
 #include "neomcp/random.h"
 #include "neomcp/wire.h"
+#include "neomcp/wire_read.h"
 
 namespace neomcp::detail {
 namespace {
@@ -49,6 +51,40 @@ constexpr std::string_view elicitation_id_member = "elicitationId";
 constexpr std::string_view tools_member = "tools";
 constexpr std::string_view tool_choice_member = "toolChoice";
 
+// Members of the params of the requests and of the results that answer them.
+constexpr std::string_view message_member = "message";
+constexpr std::string_view requested_schema_member = "requestedSchema";
+constexpr std::string_view url_member = "url";
+constexpr std::string_view messages_member = "messages";
+constexpr std::string_view max_tokens_member = "maxTokens";
+constexpr std::string_view system_prompt_member = "systemPrompt";
+constexpr std::string_view model_preferences_member = "modelPreferences";
+constexpr std::string_view hints_member = "hints";
+constexpr std::string_view name_member = "name";
+constexpr std::string_view cost_priority_member = "costPriority";
+constexpr std::string_view speed_priority_member = "speedPriority";
+constexpr std::string_view intelligence_priority_member = "intelligencePriority";
+constexpr std::string_view temperature_member = "temperature";
+constexpr std::string_view stop_sequences_member = "stopSequences";
+constexpr std::string_view include_context_member = "includeContext";
+constexpr std::string_view metadata_member = "metadata";
+constexpr std::string_view role_member = "role";
+constexpr std::string_view content_member = "content";
+constexpr std::string_view action_member = "action";
+constexpr std::string_view model_member = "model";
+constexpr std::string_view stop_reason_member = "stopReason";
+constexpr std::string_view roots_member = "roots";
+constexpr std::string_view uri_member = "uri";
+constexpr std::string_view meta_member = "_meta";
+constexpr std::string_view type_member = "type";
+
+constexpr std::string_view accept_action = "accept";
+constexpr std::string_view decline_action = "decline";
+constexpr std::string_view cancel_action = "cancel";
+
+// The root type and the result types of the answers, by name in the wire tables.
+constexpr std::string_view root_type = "Root";
+
 // Bytes of a URL elicitation id the session makes.
 constexpr std::size_t elicitation_id_bytes = 16;
 
@@ -75,13 +111,24 @@ json capability(std::string_view name, json inner = json::object()) {
     return out;
 }
 
+constexpr std::array<std::pair<IncludeContext, std::string_view>, 3> include_context_names{{
+    {IncludeContext::none, "none"},
+    {IncludeContext::this_server, "thisServer"},
+    {IncludeContext::all_servers, "allServers"},
+}};
+
 std::string_view to_wire(IncludeContext context) noexcept {
-    switch (context) {
-        case IncludeContext::none: return "none";
-        case IncludeContext::this_server: return "thisServer";
-        case IncludeContext::all_servers: return "allServers";
+    for (const auto& [value, name] : include_context_names) {
+        if (value == context) return name;
     }
     return {};
+}
+
+std::optional<IncludeContext> parse_include_context(std::string_view text) noexcept {
+    for (const auto& [value, name] : include_context_names) {
+        if (name == text) return value;
+    }
+    return std::nullopt;
 }
 
 bool uses_tools(const SamplingRequest& request) { return !request.tools.empty() || request.tool_choice.has_value(); }
@@ -105,8 +152,8 @@ Written write_elicitation_form(const ElicitationForm& form, const profile::Profi
     // The mode may be left out for a form (every revision reads a request without one as a form); it is written where
     // the revision's params have the member.
     if (type != nullptr && type->has_property(mode_member)) params[std::string(mode_member)] = std::string(form_mode);
-    params["message"] = form.message;
-    params["requestedSchema"] = form.requested_schema;
+    params[std::string(message_member)] = form.message;
+    params[std::string(requested_schema_member)] = form.requested_schema;
     return params;
 }
 
@@ -116,8 +163,8 @@ Written write_elicitation_url(const ElicitationUrl& url, const profile::Profile&
     if (type == nullptr) return std::string("the revision has no elicitation in URL mode");
     json params = json::object();
     params[std::string(mode_member)] = std::string(url_mode);
-    params["message"] = url.message;
-    params["url"] = url.url;
+    params[std::string(message_member)] = url.message;
+    params[std::string(url_member)] = url.url;
     if (type->has_property(elicitation_id_member)) {
         if (url.elicitation_id) {
             params[std::string(elicitation_id_member)] = *url.elicitation_id;
@@ -152,21 +199,21 @@ Written write_sampling(const SamplingRequest& sampling, const profile::Profile& 
             blocks.push_back(neomcp::to_wire(block, profile));
         }
         json entry = json::object();
-        entry["role"] = message.role == Role::user ? "user" : "assistant";
+        entry[std::string(role_member)] = std::string(wire::role_name(message.role));
         if (blocks.empty()) return std::string("a sampling message has no content");
         if (blocks.size() == 1) {
-            entry["content"] = std::move(blocks.front());
+            entry[std::string(content_member)] = std::move(blocks.front());
         } else if (arrays) {
-            entry["content"] = std::move(blocks);
+            entry[std::string(content_member)] = std::move(blocks);
         } else {
             return std::string("the revision takes one content block per sampling message");
         }
         messages.push_back(std::move(entry));
     }
     json params = json::object();
-    params["messages"] = std::move(messages);
-    params["maxTokens"] = sampling.max_tokens;
-    if (sampling.system_prompt) params["systemPrompt"] = *sampling.system_prompt;
+    params[std::string(messages_member)] = std::move(messages);
+    params[std::string(max_tokens_member)] = sampling.max_tokens;
+    if (sampling.system_prompt) params[std::string(system_prompt_member)] = *sampling.system_prompt;
     if (sampling.model_preferences) {
         const ModelPreferences& preferences = *sampling.model_preferences;
         json written = json::object();
@@ -174,24 +221,24 @@ Written write_sampling(const SamplingRequest& sampling, const profile::Profile& 
             json hints = json::array();
             for (const auto& hint : preferences.hints) {
                 json entry = json::object();
-                entry["name"] = hint;
+                entry[std::string(name_member)] = hint;
                 hints.push_back(std::move(entry));
             }
-            written["hints"] = std::move(hints);
+            written[std::string(hints_member)] = std::move(hints);
         }
-        if (preferences.cost_priority) written["costPriority"] = *preferences.cost_priority;
-        if (preferences.speed_priority) written["speedPriority"] = *preferences.speed_priority;
-        if (preferences.intelligence_priority) written["intelligencePriority"] = *preferences.intelligence_priority;
-        params["modelPreferences"] = std::move(written);
+        if (preferences.cost_priority) written[std::string(cost_priority_member)] = *preferences.cost_priority;
+        if (preferences.speed_priority) written[std::string(speed_priority_member)] = *preferences.speed_priority;
+        if (preferences.intelligence_priority) written[std::string(intelligence_priority_member)] = *preferences.intelligence_priority;
+        params[std::string(model_preferences_member)] = std::move(written);
     }
-    if (sampling.temperature) params["temperature"] = *sampling.temperature;
+    if (sampling.temperature) params[std::string(temperature_member)] = *sampling.temperature;
     if (!sampling.stop_sequences.empty()) {
         json sequences = json::array();
         for (const auto& sequence : sampling.stop_sequences) sequences.push_back(sequence);
-        params["stopSequences"] = std::move(sequences);
+        params[std::string(stop_sequences_member)] = std::move(sequences);
     }
-    if (sampling.include_context) params["includeContext"] = std::string(to_wire(*sampling.include_context));
-    if (sampling.metadata) params["metadata"] = *sampling.metadata;
+    if (sampling.include_context) params[std::string(include_context_member)] = std::string(to_wire(*sampling.include_context));
+    if (sampling.metadata) params[std::string(metadata_member)] = *sampling.metadata;
     if (!sampling.tools.empty()) {
         json tools = json::array();
         for (const auto& tool : sampling.tools) tools.push_back(neomcp::to_wire(tool, profile));
@@ -234,43 +281,53 @@ Written write(const InputRequest& request, const profile::Profile& profile, cons
     return written;
 }
 
-bool is_one_of(const std::string& text, std::initializer_list<std::string_view> values) {
-    for (const auto value : values) {
-        if (text == value) return true;
+// A content block as a client writes one: an object with a string `type`.
+bool is_block(const json& value) { return value.is_object() && text_member(value, type_member) != nullptr; }
+
+// What is wrong with the content of an elicitation result, or empty when it has the shape a form's answer has: an
+// object whose values are strings, numbers, booleans or arrays of strings.
+std::optional<std::string> elicitation_content_problem(const json& content) {
+    const auto* fields = content.get_ptr<const json::object_t*>();
+    if (fields == nullptr) return std::string("the content of an elicitation result is an object");
+    for (const auto& [name, value] : *fields) {
+        bool fits = value.is_string() || value.is_number() || value.is_boolean();
+        if (const auto* items = value.get_ptr<const json::array_t*>()) {
+            fits = true;
+            for (const auto& item : *items) fits = fits && item.is_string();
+        }
+        if (!fits) {
+            return "the field " + name +
+                   " of an elicitation result is not a string, a number, a boolean or an array of strings";
+        }
     }
-    return false;
+    return std::nullopt;
 }
 
-// A content block as a client writes one: an object with a string `type`.
-bool is_block(const json& value) { return value.is_object() && text_member(value, "type") != nullptr; }
+// Whether the value is a content block or a non-empty array of them, as a client writes them in a sampling result.
+bool is_block_or_blocks(const json& content) {
+    if (const auto* items = content.get_ptr<const json::array_t*>()) {
+        bool blocks = !items->empty();
+        for (const auto& item : *items) blocks = blocks && is_block(item);
+        return blocks;
+    }
+    return is_block(content);
+}
 
 std::variant<InputResponse, std::string> read_elicitation(const json& result) {
-    const std::string* action = text_member(result, "action");
+    const std::string* action = text_member(result, action_member);
     if (action == nullptr) return std::string("an elicitation result has a string action");
     ElicitationAnswer answer;
-    if (*action == "accept") {
+    if (*action == accept_action) {
         answer.action = ElicitationAction::accept;
-    } else if (*action == "decline") {
+    } else if (*action == decline_action) {
         answer.action = ElicitationAction::decline;
-    } else if (*action == "cancel") {
+    } else if (*action == cancel_action) {
         answer.action = ElicitationAction::cancel;
     } else {
         return std::string("the action of an elicitation result is accept, decline or cancel");
     }
-    if (const json* content = member(result, "content")) {
-        const auto* fields = content->get_ptr<const json::object_t*>();
-        if (fields == nullptr) return std::string("the content of an elicitation result is an object");
-        for (const auto& [name, value] : *fields) {
-            bool fits = value.is_string() || value.is_number() || value.is_boolean();
-            if (const auto* items = value.get_ptr<const json::array_t*>()) {
-                fits = true;
-                for (const auto& item : *items) fits = fits && item.is_string();
-            }
-            if (!fits) {
-                return "the field " + name +
-                       " of an elicitation result is not a string, a number, a boolean or an array of strings";
-            }
-        }
+    if (const json* content = member(result, content_member)) {
+        if (auto problem = elicitation_content_problem(*content)) return std::move(*problem);
         // Fields belong to an acceptance; what a client sends with a decline or a cancel is not passed on.
         if (answer.action == ElicitationAction::accept) answer.content = *content;
     }
@@ -278,24 +335,18 @@ std::variant<InputResponse, std::string> read_elicitation(const json& result) {
 }
 
 std::variant<InputResponse, std::string> read_sampling(const json& result) {
-    const std::string* role = text_member(result, "role");
-    const std::string* model = text_member(result, "model");
-    const json* content = member(result, "content");
-    if (role == nullptr || !is_one_of(*role, {"user", "assistant"})) {
-        return std::string("the role of a sampling result is user or assistant");
-    }
+    const std::string* role = text_member(result, role_member);
+    const std::string* model = text_member(result, model_member);
+    const json* content = member(result, content_member);
+    const std::optional<Role> parsed_role = role == nullptr ? std::nullopt : wire::parse_role(*role);
+    if (!parsed_role) return std::string("the role of a sampling result is user or assistant");
     if (model == nullptr) return std::string("a sampling result names its model");
-    bool blocks = content != nullptr && is_block(*content);
-    if (const auto* items = content == nullptr ? nullptr : content->get_ptr<const json::array_t*>()) {
-        blocks = !items->empty();
-        for (const auto& item : *items) blocks = blocks && is_block(item);
-    }
-    if (!blocks) return std::string("the content of a sampling result is a content block or an array of them");
+    if (content == nullptr || !is_block_or_blocks(*content)) return std::string("the content of a sampling result is a content block or an array of them");
     SamplingAnswer answer;
-    answer.role = *role == "user" ? Role::user : Role::assistant;
+    answer.role = *parsed_role;
     answer.content = *content;
     answer.model = *model;
-    if (const json* reason = member(result, "stopReason")) {
+    if (const json* reason = member(result, stop_reason_member)) {
         const auto* text = reason->get_ptr<const std::string*>();
         if (text == nullptr) return std::string("the stop reason of a sampling result is a string");
         answer.stop_reason = *text;
@@ -304,27 +355,325 @@ std::variant<InputResponse, std::string> read_sampling(const json& result) {
 }
 
 std::variant<InputResponse, std::string> read_roots(const json& result) {
-    const json* roots = member(result, "roots");
+    const json* roots = member(result, roots_member);
     const auto* items = roots == nullptr ? nullptr : roots->get_ptr<const json::array_t*>();
     if (items == nullptr) return std::string("a roots result has an array of roots");
     RootsAnswer answer;
     for (const auto& item : *items) {
-        const std::string* uri = text_member(item, "uri");
+        const std::string* uri = text_member(item, uri_member);
         if (uri == nullptr) return std::string("every root has a string uri");
         Root root;
         root.uri = *uri;
-        if (const json* name = member(item, "name")) {
+        if (const json* name = member(item, name_member)) {
             const auto* text = name->get_ptr<const std::string*>();
             if (text == nullptr) return std::string("the name of a root is a string");
             root.name = *text;
         }
-        if (const json* meta = member(item, "_meta")) {
+        if (const json* meta = member(item, meta_member)) {
             if (!meta->is_object()) return std::string("the _meta of a root is an object");
             root.meta = *meta;
         }
         answer.roots.push_back(std::move(root));
     }
     return InputResponse(std::move(answer));
+}
+
+// ---- Reading the params of a request
+
+// Each member reader returns what is wrong, or nothing. A member that is absent is left as it is.
+std::string read_text_member(const json& object, std::string_view name, std::optional<std::string>& out) {
+    const json* found = member(object, name);
+    if (found == nullptr) return {};
+    const auto* text = found->get_ptr<const std::string*>();
+    if (text == nullptr) return "the member " + std::string(name) + " must be a string";
+    out = *text;
+    return {};
+}
+
+std::string read_real_member(const json& object, std::string_view name, std::optional<double>& out) {
+    const json* found = member(object, name);
+    if (found == nullptr) return {};
+    if (!found->is_number()) return "the member " + std::string(name) + " must be a number";
+    out = found->get<double>();
+    return {};
+}
+
+std::string read_object_member(const json& object, std::string_view name, std::optional<json>& out) {
+    const json* found = member(object, name);
+    if (found == nullptr) return {};
+    if (!found->is_object()) return "the member " + std::string(name) + " must be an object";
+    out = *found;
+    return {};
+}
+
+// The members the type requires (where the profile has no type, the ones the mechanism names) that the params lack.
+std::optional<std::string> lacking_member(const json& params, const profile::Type* type,
+                                          std::span<const std::string> fallback) {
+    const std::span<const std::string> required =
+        type != nullptr ? std::span<const std::string>(type->required) : fallback;
+    for (const auto& name : required) {
+        if (member(params, name) == nullptr) {
+            return "the request lacks the member " + name + ", which the revision requires";
+        }
+    }
+    return std::nullopt;
+}
+
+// Whether the params type has the member; a revision without a type holds nothing back.
+bool allows(const profile::Type* type, std::string_view name) { return type == nullptr || type->has_property(name); }
+
+using ReadRequest = std::variant<InputRequest, std::string>;
+
+ReadRequest read_elicitation_request(const json& params, const profile::Profile& profile,
+                                     const InputMechanism& mechanism) {
+    const profile::Type* form_type = profile.type(form_params_type);
+    if (form_type == nullptr) form_type = object_type(profile, mechanism.params_type(profile, elicit_method));
+    const profile::Type* url_type = profile.type(url_params_type);
+    bool url = false;
+    // A request without a mode is a form in every revision; a mode is read where the revision's form params have it.
+    if (const json* mode = member(params, mode_member)) {
+        const auto* text = mode->get_ptr<const std::string*>();
+        if (text == nullptr) return std::string("the mode of an elicitation request must be a string");
+        if (form_type == nullptr || !form_type->has_property(mode_member)) {
+            return std::string("the revision defines no mode for an elicitation request");
+        }
+        if (*text == url_mode) {
+            if (url_type == nullptr) return std::string("the revision has no elicitation in URL mode");
+            url = true;
+        } else if (*text != form_mode) {
+            return std::string("the mode of an elicitation request is not one the revision defines");
+        }
+    }
+    if (url) {
+        if (auto lacking = lacking_member(params, url_type, {})) return std::move(*lacking);
+        ElicitationUrl request;
+        std::optional<std::string> message;
+        std::optional<std::string> address;
+        std::string problem = read_text_member(params, message_member, message);
+        if (problem.empty()) problem = read_text_member(params, url_member, address);
+        if (problem.empty() && url_type->has_property(elicitation_id_member)) {
+            problem = read_text_member(params, elicitation_id_member, request.elicitation_id);
+        }
+        if (!problem.empty()) return problem;
+        request.message = message.value_or(std::string());
+        request.url = address.value_or(std::string());
+        return InputRequest(std::move(request));
+    }
+    if (auto lacking = lacking_member(params, form_type, mechanism.params_required(profile, elicit_method))) {
+        return std::move(*lacking);
+    }
+    ElicitationForm request;
+    std::optional<std::string> message;
+    std::optional<json> schema;
+    std::string problem = read_text_member(params, message_member, message);
+    if (problem.empty()) problem = read_object_member(params, requested_schema_member, schema);
+    if (!problem.empty()) return problem;
+    request.message = message.value_or(std::string());
+    if (schema) request.requested_schema = std::move(*schema);
+    return InputRequest(std::move(request));
+}
+
+// One block of a sampling message, read for the profile; `where` names it for a message.
+std::string read_sampling_block(const json& block_wire, const profile::Profile& profile, const std::string& where,
+                                std::vector<ContentBlock>& out) {
+    auto block = from_wire<ContentBlock>(block_wire, profile, where);
+    if (auto* problem = std::get_if<std::string>(&block)) return std::move(*problem);
+    const ContentKind kind = kind_of(std::get<ContentBlock>(block));
+    if (kind != ContentKind::text && kind != ContentKind::image && kind != ContentKind::audio) {
+        return where + ": a sampling message holds a " + std::string(wire_name(kind)) +
+               " block; sampling carries text, image and audio";
+    }
+    out.push_back(std::move(std::get<ContentBlock>(block)));
+    return {};
+}
+
+ReadRequest read_sampling_request(const json& params, const profile::Profile& profile,
+                                  const InputMechanism& mechanism) {
+    const profile::Type* type = object_type(profile, mechanism.params_type(profile, sampling_method));
+    if (auto lacking = lacking_member(params, type, mechanism.params_required(profile, sampling_method))) {
+        return std::move(*lacking);
+    }
+    SamplingRequest request;
+    const bool arrays = profile.union_type(sampling_blocks_union) != nullptr;
+    if (allows(type, messages_member)) {
+        if (const json* messages = member(params, messages_member)) {
+            const auto* items = messages->get_ptr<const json::array_t*>();
+            if (items == nullptr) return std::string("the member messages must be an array");
+            for (std::size_t i = 0; i < items->size(); ++i) {
+                const json& item = (*items)[i];
+                const std::string where = "messages[" + std::to_string(i) + "]";
+                if (!item.is_object()) return where + " must be an object";
+                const std::string* role_name = text_member(item, role_member);
+                const std::optional<Role> role = role_name == nullptr ? std::nullopt : wire::parse_role(*role_name);
+                if (!role) return where + ".role must be user or assistant";
+                const json* content = member(item, content_member);
+                if (content == nullptr) return where + ".content is required";
+                SamplingMessage message;
+                message.role = *role;
+                if (const auto* blocks = content->get_ptr<const json::array_t*>()) {
+                    if (!arrays) return where + ".content: the revision takes one content block per sampling message";
+                    if (blocks->empty()) return where + ".content must not be empty";
+                    for (std::size_t j = 0; j < blocks->size(); ++j) {
+                        const std::string problem = read_sampling_block(
+                            (*blocks)[j], profile, where + ".content[" + std::to_string(j) + "]", message.content);
+                        if (!problem.empty()) return problem;
+                    }
+                } else {
+                    const std::string problem = read_sampling_block(*content, profile, where + ".content", message.content);
+                    if (!problem.empty()) return problem;
+                }
+                request.messages.push_back(std::move(message));
+            }
+        }
+    }
+    if (allows(type, max_tokens_member)) {
+        if (const json* tokens = member(params, max_tokens_member)) {
+            if (const auto* unsigned_tokens = tokens->get_ptr<const json::number_unsigned_t*>()) {
+                request.max_tokens = static_cast<std::uint64_t>(*unsigned_tokens);
+            } else if (const auto* signed_tokens = tokens->get_ptr<const json::number_integer_t*>();
+                       signed_tokens != nullptr && *signed_tokens >= 0) {
+                request.max_tokens = static_cast<std::uint64_t>(*signed_tokens);
+            } else {
+                return std::string("the member maxTokens must be a non-negative integer");
+            }
+        }
+    }
+    if (allows(type, system_prompt_member)) {
+        if (auto problem = read_text_member(params, system_prompt_member, request.system_prompt); !problem.empty()) {
+            return problem;
+        }
+    }
+    if (allows(type, model_preferences_member)) {
+        if (const json* found = member(params, model_preferences_member)) {
+            if (!found->is_object()) return std::string("the member modelPreferences must be an object");
+            ModelPreferences preferences;
+            if (const json* hints = member(*found, hints_member)) {
+                const auto* items = hints->get_ptr<const json::array_t*>();
+                if (items == nullptr) return std::string("the member hints of modelPreferences must be an array");
+                for (const auto& hint : *items) {
+                    if (!hint.is_object()) return std::string("a hint of modelPreferences must be an object");
+                    // A hint may leave out its name: it then says nothing, and there is nothing to keep.
+                    const json* hint_name = member(hint, name_member);
+                    if (hint_name == nullptr) continue;
+                    const auto* text = hint_name->get_ptr<const std::string*>();
+                    if (text == nullptr) return std::string("the name of a hint must be a string");
+                    preferences.hints.push_back(*text);
+                }
+            }
+            std::string problem = read_real_member(*found, cost_priority_member, preferences.cost_priority);
+            if (problem.empty()) problem = read_real_member(*found, speed_priority_member, preferences.speed_priority);
+            if (problem.empty()) {
+                problem = read_real_member(*found, intelligence_priority_member, preferences.intelligence_priority);
+            }
+            if (!problem.empty()) return problem;
+            request.model_preferences = std::move(preferences);
+        }
+    }
+    if (allows(type, temperature_member)) {
+        if (auto problem = read_real_member(params, temperature_member, request.temperature); !problem.empty()) {
+            return problem;
+        }
+    }
+    if (allows(type, stop_sequences_member)) {
+        if (const json* found = member(params, stop_sequences_member)) {
+            const auto* items = found->get_ptr<const json::array_t*>();
+            if (items == nullptr) return std::string("the member stopSequences must be an array");
+            for (const auto& item : *items) {
+                const auto* text = item.get_ptr<const std::string*>();
+                if (text == nullptr) return std::string("a stop sequence must be a string");
+                request.stop_sequences.push_back(*text);
+            }
+        }
+    }
+    if (allows(type, include_context_member)) {
+        std::optional<std::string> context;
+        if (auto problem = read_text_member(params, include_context_member, context); !problem.empty()) return problem;
+        if (context) {
+            request.include_context = parse_include_context(*context);
+            if (!request.include_context) {
+                return std::string("the member includeContext must be none, thisServer or allServers");
+            }
+        }
+    }
+    if (allows(type, metadata_member)) {
+        if (auto problem = read_object_member(params, metadata_member, request.metadata); !problem.empty()) return problem;
+    }
+    // Tools are read only where the revision's params have them, the way the writer carries them only there.
+    if (type != nullptr && type->has_property(tools_member)) {
+        if (const json* found = member(params, tools_member)) {
+            const auto* items = found->get_ptr<const json::array_t*>();
+            if (items == nullptr) return std::string("the member tools must be an array");
+            for (std::size_t i = 0; i < items->size(); ++i) {
+                auto tool = from_wire<ToolDefinition>((*items)[i], profile, "tools[" + std::to_string(i) + "]");
+                if (auto* problem = std::get_if<std::string>(&tool)) return std::move(*problem);
+                request.tools.push_back(std::move(std::get<ToolDefinition>(tool)));
+            }
+        }
+    }
+    if (type != nullptr && type->has_property(tool_choice_member)) {
+        if (auto problem = read_object_member(params, tool_choice_member, request.tool_choice); !problem.empty()) {
+            return problem;
+        }
+    }
+    return InputRequest(std::move(request));
+}
+
+// ---- Writing an answer
+
+using WrittenAnswer = std::variant<json, std::string>;
+
+WrittenAnswer write_elicitation_answer(const ElicitationAnswer& answer) {
+    json result = json::object();
+    std::string_view action = cancel_action;
+    switch (answer.action) {
+        case ElicitationAction::accept: action = accept_action; break;
+        case ElicitationAction::decline: action = decline_action; break;
+        case ElicitationAction::cancel: action = cancel_action; break;
+    }
+    result[std::string(action_member)] = std::string(action);
+    // Fields belong to an acceptance, as read_answer takes them.
+    if (answer.action == ElicitationAction::accept) {
+        if (auto problem = elicitation_content_problem(answer.content)) return std::move(*problem);
+        if (!answer.content.empty()) result[std::string(content_member)] = answer.content;
+    }
+    return result;
+}
+
+WrittenAnswer write_sampling_answer(const SamplingAnswer& answer) {
+    if (!is_block_or_blocks(answer.content)) {
+        return std::string("the content of a sampling result is a content block or an array of them");
+    }
+    json result = json::object();
+    result[std::string(role_member)] = std::string(wire::role_name(answer.role));
+    result[std::string(content_member)] = answer.content;
+    result[std::string(model_member)] = answer.model;
+    if (answer.stop_reason) result[std::string(stop_reason_member)] = *answer.stop_reason;
+    return result;
+}
+
+WrittenAnswer write_roots_answer(const RootsAnswer& answer, const profile::Profile& profile) {
+    json roots = json::array();
+    for (const Root& root : answer.roots) {
+        json entry = json::object();
+        entry[std::string(uri_member)] = root.uri;
+        if (root.name) entry[std::string(name_member)] = *root.name;
+        if (root.meta) {
+            if (!root.meta->is_object()) return std::string("the _meta of a root is an object");
+            entry[std::string(meta_member)] = *root.meta;
+        }
+        keep_members(entry, root_type, profile);
+        roots.push_back(std::move(entry));
+    }
+    json result = json::object();
+    result[std::string(roots_member)] = std::move(roots);
+    return result;
+}
+
+std::string_view result_type_name(std::string_view method) {
+    for (const ResultTypeOf& entry : result_types) {
+        if (entry.method == method) return entry.type;
+    }
+    return {};
 }
 
 }  // namespace
@@ -386,6 +735,56 @@ bool capabilities_declare(const InputRequest& request, const json& capabilities)
 std::variant<json, std::string> write_params(const InputRequest& request, const profile::Profile& profile,
                                              const InputMechanism& mechanism) {
     return write(request, profile, mechanism, true);
+}
+
+std::variant<InputRequest, std::string> read_request(std::string_view method, const json& params,
+                                                     const profile::Profile& profile,
+                                                     const InputMechanism& mechanism) {
+    if (!mechanism.carries(profile, method)) {
+        return "the revision has no " + std::string(method) + " request for a server to ask with";
+    }
+    if (method == roots_method) {
+        // roots/list has no params of its own.
+        if (!params.is_null() && !params.is_object()) return std::string("the params of a request must be an object");
+        return InputRequest(RootsRequest{});
+    }
+    if (!params.is_object()) return std::string("the params of a request must be an object");
+    if (method == elicit_method) return read_elicitation_request(params, profile, mechanism);
+    if (method == sampling_method) return read_sampling_request(params, profile, mechanism);
+    return std::string("no request of this kind is asked");
+}
+
+std::variant<json, std::string> write_answer(const InputResponse& response, const profile::Profile& profile,
+                                             const InputMechanism& mechanism) {
+    std::string_view method = roots_method;
+    if (std::holds_alternative<ElicitationAnswer>(response)) method = elicit_method;
+    if (std::holds_alternative<SamplingAnswer>(response)) method = sampling_method;
+    if (!mechanism.carries(profile, method)) {
+        return "the revision has no " + std::string(method) + " request for a client to answer";
+    }
+    WrittenAnswer written = std::visit(
+        [&](const auto& value) -> WrittenAnswer {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, ElicitationAnswer>) {
+                return write_elicitation_answer(value);
+            } else if constexpr (std::is_same_v<T, SamplingAnswer>) {
+                return write_sampling_answer(value);
+            } else {
+                return write_roots_answer(value, profile);
+            }
+        },
+        response);
+    auto* result = std::get_if<json>(&written);
+    if (result == nullptr) return written;
+    if (const profile::Type* type = profile.type(result_type_name(method))) {
+        keep_members(*result, type->name, profile);
+        for (const auto& name : type->required) {
+            if (member(*result, name) == nullptr) {
+                return "the answer lacks the member " + name + ", which the revision requires";
+            }
+        }
+    }
+    return written;
 }
 
 bool input_supported(const InputRequest& request, const json& capabilities, const profile::Profile& profile,
