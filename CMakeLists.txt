@@ -184,9 +184,12 @@ include(cmake/NeomcpAsio.cmake)
 
 add_library(neomcp_server
     src/server/server.cpp
-    src/server/form_schema.cpp)
+    src/server/form_schema.cpp
+    src/server/inputs.cpp)
 add_library(neomcp::server ALIAS neomcp_server)
-target_include_directories(neomcp_server PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+target_include_directories(neomcp_server
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(neomcp_server PUBLIC neomcp::core neomcp::describe neomcp::schema asio::asio)
 target_compile_features(neomcp_server PUBLIC cxx_std_20)
 neomcp_configure_target(neomcp_server)

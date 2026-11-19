@@ -1272,6 +1272,9 @@ JobOutcome ToolEntry::failure(const CallRecord&, const std::exception_ptr& throw
     };
     try {
         std::rethrow_exception(thrown);
+    } catch (const AnswerRefused& refused) {
+        // Answers to declared inputs that cannot be used: Invalid params, as for a malformed answer.
+        return InvalidRequest{refused.what()};
     } catch (const ToolError& error) {
         return error_result(error.what());
     } catch (const std::exception& error) {
@@ -1325,6 +1328,8 @@ template <class Out>
 JobOutcome FeatureEntry<Out>::failure(const CallRecord& record, const std::exception_ptr& thrown) const {
     try {
         std::rethrow_exception(thrown);
+    } catch (const AnswerRefused& refused) {
+        return InvalidRequest{refused.what()};
     } catch (const ResourceNotFound&) {
         return NotFound{record.subject};
     } catch (const std::exception& error) {

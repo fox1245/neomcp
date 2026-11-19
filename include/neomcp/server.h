@@ -81,10 +81,27 @@
 // named, and answers with an empty list when there is none; a reference to a prompt or template the server lacks is
 // answered with Invalid params. At most neomcp::max_completion_values values are sent.
 //
-// Asking the client. A tool, resource, template or prompt handler that needs something only the client can give (a
-// form the user fills in, a completion from the client's model, the client's roots; neomcp/input.h) returns
-// neomcp::InputRequired instead of its result. Its return type is then std::variant<R, neomcp::InputRequired> for one
-// of the results above (or neomcp::InputRequired alone), and the same for a coroutine handler:
+// Asking the client. A tool, resource, template or prompt that needs something only the client can give (a form the
+// user fills in, a completion from the client's model, the client's roots; neomcp/input.h) declares it after its
+// handler, and the handler takes the answers:
+//
+//   struct Confirm { bool ok; };
+//   NEOMCP_DESCRIBE(Confirm, ok, "Delete it?")
+//
+//   server.tool<DeleteArgs>("delete_folder", "Delete a folder",
+//       [](const DeleteArgs& a, const neomcp::Answer<Confirm>& confirm) {
+//           if (!confirm.accepted() || !confirm->ok) return std::string("kept");
+//           remove_folder(a.path);
+//           return std::string("deleted");
+//       },
+//       neomcp::elicit<Confirm>("confirm", [](const DeleteArgs& a) { return "Delete " + a.path + "?"; }));
+//
+// The question functions run on every entry of the call and decide what is still to be asked; the handler runs once,
+// when every input has its outcome. neomcp/server/inputs.h says what may be declared and how the answers are checked.
+//
+// For what a declaration cannot express, a handler asks by itself: it returns neomcp::InputRequired instead of its
+// result. Its return type is then std::variant<R, neomcp::InputRequired> for one of the results above (or
+// neomcp::InputRequired alone), and the same for a coroutine handler; it declares no inputs:
 //
 //   server.tool<DeleteArgs>("delete_folder", "Delete a folder",
 //       [](const DeleteArgs& a, neomcp::Context& ctx) -> std::variant<std::string, neomcp::InputRequired> {
@@ -408,6 +425,17 @@ public:
     template <class Handler>
     ToolHandle tool(std::string name, std::string description, Handler&& handler);
 
+    // The same two forms with declared inputs after the handler (neomcp/server/inputs.h): the handler takes one
+    // neomcp::Answer per input after its arguments and runs once, when every input has its outcome. Throws as above,
+    // and std::invalid_argument for an input without a key, two inputs with the same key and a form that cannot be
+    // built from its struct; each message names the tool and the input.
+    template <class Args, class Handler, class First, class... Rest>
+    ToolHandle tool(std::string tool_name, std::string tool_description, Handler&& handler, First&& first,
+                    Rest&&... rest);
+    template <class Handler, class First, class... Rest>
+    ToolHandle tool(std::string tool_name, std::string tool_description, Handler&& handler, First&& first,
+                    Rest&&... rest);
+
     // A tool with a definition written by hand; the handler takes the arguments object and returns a ToolResult.
     // The input schema must be an object schema the validator accepts, and so must the output schema when there is
     // one; std::invalid_argument otherwise. The schema may mark integer, string and boolean parameters for HTTP
@@ -445,6 +473,10 @@ public:
     // a URI registered already, and std::logic_error once the server serves.
     template <class Handler>
     ResourceHandle resource(std::string uri, std::string name, Handler&& handler);
+    // The same with declared inputs after the handler (see tool).
+    template <class Handler, class First, class... Rest>
+    ResourceHandle resource(std::string resource_uri, std::string resource_name, Handler&& handler, First&& first,
+                            Rest&&... rest);
 
     // A family of resources whose URIs `uri_template` (RFC 6570) describes; Params is a described struct whose
     // members are the template's variables. Throws std::invalid_argument for an empty template or name, a template
@@ -454,6 +486,10 @@ public:
     // store must check it against what it is willing to serve.
     template <class Params, class Handler>
     ResourceTemplateHandle resource_template(std::string uri_template, std::string name, Handler&& handler);
+    // The same with declared inputs after the handler (see tool).
+    template <class Params, class Handler, class First, class... Rest>
+    ResourceTemplateHandle resource_template(std::string template_text, std::string template_name, Handler&& handler,
+                                             First&& first, Rest&&... rest);
 
     // A prompt whose arguments are the described struct Args (see above). Throws std::invalid_argument for an empty or
     // duplicate name and std::logic_error once the server serves; each message names the prompt.
@@ -463,6 +499,14 @@ public:
     // A prompt without arguments.
     template <class Handler>
     PromptHandle prompt(std::string name, std::string description, Handler&& handler);
+
+    // The same two forms with declared inputs after the handler (see tool).
+    template <class Args, class Handler, class First, class... Rest>
+    PromptHandle prompt(std::string prompt_name, std::string prompt_description, Handler&& handler, First&& first,
+                        Rest&&... rest);
+    template <class Handler, class First, class... Rest>
+    PromptHandle prompt(std::string prompt_name, std::string prompt_description, Handler&& handler, First&& first,
+                        Rest&&... rest);
 
     // ToolHost: the resources and the prompts, which the first use ends registration for. Null when none is
     // registered.
@@ -618,6 +662,179 @@ PromptHandle Server::prompt(std::string name, std::string description, Handler&&
         return add_prompt(std::move(definition),
                           detail::make_feature_body<detail::PromptNoArgumentsKind, detail::NoArguments, F>(
                               std::forward<Handler>(handler)));
+    }
+}
+
+// ---- With declared inputs
+
+template <class Args, class Handler, class First, class... Rest>
+ToolHandle Server::tool(std::string tool_name, std::string tool_description, Handler&& handler, First&& first,
+                        Rest&&... rest) {
+    using F = std::decay_t<Handler>;
+    if constexpr (!described<Args>) {
+        static_assert(detail::dependent_false<Args>,
+                      "neomcp: server.tool<Args>(...) needs Args to be a described struct (NEOMCP_DESCRIBE or a "
+                      "neomcp::Described specialisation)");
+        return ToolHandle(nullptr, 0);
+    } else if constexpr (!detail::check_declarations<Args, std::decay_t<First>, std::decay_t<Rest>...>()) {
+        return ToolHandle(nullptr, 0);
+    } else if constexpr (!detail::check_declared_handler<detail::DeclaredSite::tool, Args, F, std::decay_t<First>,
+                                                         std::decay_t<Rest>...>()) {
+        return ToolHandle(nullptr, 0);
+    } else {
+        ToolDefinition definition;
+        definition.name = std::move(tool_name);
+        definition.description = std::move(tool_description);
+        definition.input_schema = schema_of<Args>();
+        definition.output_schema = detail::output_schema_of<detail::handler_value_t<detail::Input::typed, F>>();
+        auto inputs = detail::make_input_set("tool '" + definition.name + "'", options().schema_limits,
+                                             std::forward<First>(first),
+                                             std::forward<Rest>(rest)...);
+        return add(std::move(definition),
+                   detail::make_declared_tool_body<Args, F>(std::forward<Handler>(handler), std::move(inputs)),
+                   header_marks_of<Args>());
+    }
+}
+
+template <class Handler, class First, class... Rest>
+ToolHandle Server::tool(std::string tool_name, std::string tool_description, Handler&& handler, First&& first,
+                        Rest&&... rest) {
+    using F = std::decay_t<Handler>;
+    using None = detail::NoArguments;
+    if constexpr (!detail::check_declarations<None, std::decay_t<First>, std::decay_t<Rest>...>()) {
+        return ToolHandle(nullptr, 0);
+    } else if constexpr (!detail::check_declared_handler<detail::DeclaredSite::tool, None, F, std::decay_t<First>,
+                                                         std::decay_t<Rest>...>()) {
+        return ToolHandle(nullptr, 0);
+    } else {
+        ToolDefinition definition;
+        definition.name = std::move(tool_name);
+        definition.description = std::move(tool_description);
+        definition.input_schema = detail::empty_object_schema();
+        definition.output_schema = detail::output_schema_of<detail::handler_value_t<detail::Input::none, F>>();
+        auto inputs = detail::make_input_set("tool '" + definition.name + "'", options().schema_limits,
+                                             std::forward<First>(first),
+                                             std::forward<Rest>(rest)...);
+        return add(std::move(definition),
+                   detail::make_declared_tool_body<None, F>(std::forward<Handler>(handler), std::move(inputs)));
+    }
+}
+
+template <class Handler, class First, class... Rest>
+ResourceHandle Server::resource(std::string resource_uri, std::string resource_name, Handler&& handler, First&& first,
+                                Rest&&... rest) {
+    using F = std::decay_t<Handler>;
+    using None = detail::NoArguments;
+    if constexpr (!detail::check_declarations<None, std::decay_t<First>, std::decay_t<Rest>...>()) {
+        return ResourceHandle(nullptr, 0);
+    } else if constexpr (!detail::check_declared_handler<detail::DeclaredSite::resource, None, F, std::decay_t<First>,
+                                                         std::decay_t<Rest>...>()) {
+        return ResourceHandle(nullptr, 0);
+    } else {
+        ResourceDefinition definition;
+        definition.uri = std::move(resource_uri);
+        definition.name = std::move(resource_name);
+        auto inputs = detail::make_input_set("resource '" + definition.uri + "'", options().schema_limits,
+                                             std::forward<First>(first),
+                                             std::forward<Rest>(rest)...);
+        return add_resource(std::move(definition),
+                            detail::make_declared_feature_body<detail::ResourceKind, None, F>(
+                                std::forward<Handler>(handler), std::move(inputs)));
+    }
+}
+
+template <class Params, class Handler, class First, class... Rest>
+ResourceTemplateHandle Server::resource_template(std::string template_text, std::string template_name,
+                                                 Handler&& handler, First&& first, Rest&&... rest) {
+    using F = std::decay_t<Handler>;
+    if constexpr (!described<Params>) {
+        static_assert(detail::dependent_false<Params>,
+                      "neomcp: server.resource_template<Params>(...) needs Params to be a described struct "
+                      "(NEOMCP_DESCRIBE or a neomcp::Described specialisation)");
+        return ResourceTemplateHandle(nullptr, 0);
+    } else if constexpr (!detail::all_template_members_decodable<Params>()) {
+        static_assert(detail::dependent_false<Params>,
+                      "neomcp: the members of the Params of server.resource_template<Params>(...) are std::string, "
+                      "bool or integers, or std::optional of one of them");
+        return ResourceTemplateHandle(nullptr, 0);
+    } else if constexpr (!detail::check_declarations<Params, std::decay_t<First>, std::decay_t<Rest>...>()) {
+        return ResourceTemplateHandle(nullptr, 0);
+    } else if constexpr (!detail::check_declared_handler<detail::DeclaredSite::resource, Params, F,
+                                                         std::decay_t<First>, std::decay_t<Rest>...>()) {
+        return ResourceTemplateHandle(nullptr, 0);
+    } else {
+        ResourceTemplateDefinition definition;
+        definition.uri_template = std::move(template_text);
+        definition.name = std::move(template_name);
+        detail::TemplateCheck check = [](const json& variables) {
+            try {
+                static_cast<void>(neomcp::from_json<Params>(variables));
+                return true;
+            } catch (const DecodeError&) {
+                return false;
+            }
+        };
+        auto inputs = detail::make_input_set("resource template '" + definition.uri_template + "'",
+                                             options().schema_limits, std::forward<First>(first),
+                                             std::forward<Rest>(rest)...);
+        return add_resource_template(std::move(definition),
+                                     detail::make_declared_feature_body<detail::TemplateKind<Params>, Params, F>(
+                                         std::forward<Handler>(handler), std::move(inputs)),
+                                     detail::template_members_of<Params>(), std::move(check));
+    }
+}
+
+template <class Args, class Handler, class First, class... Rest>
+PromptHandle Server::prompt(std::string prompt_name, std::string prompt_description, Handler&& handler, First&& first,
+                            Rest&&... rest) {
+    using F = std::decay_t<Handler>;
+    if constexpr (!described<Args>) {
+        static_assert(detail::dependent_false<Args>,
+                      "neomcp: server.prompt<Args>(...) needs Args to be a described struct (NEOMCP_DESCRIBE or a "
+                      "neomcp::Described specialisation)");
+        return PromptHandle(nullptr, 0);
+    } else if constexpr (!detail::all_prompt_arguments_are_strings<Args>()) {
+        static_assert(detail::dependent_false<Args>,
+                      "neomcp: the arguments of a prompt are strings on the wire: the members of the Args of "
+                      "server.prompt<Args>(...) are std::string or std::optional<std::string>");
+        return PromptHandle(nullptr, 0);
+    } else if constexpr (!detail::check_declarations<Args, std::decay_t<First>, std::decay_t<Rest>...>()) {
+        return PromptHandle(nullptr, 0);
+    } else if constexpr (!detail::check_declared_handler<detail::DeclaredSite::prompt, Args, F, std::decay_t<First>,
+                                                         std::decay_t<Rest>...>()) {
+        return PromptHandle(nullptr, 0);
+    } else {
+        PromptDefinition definition;
+        definition.name = std::move(prompt_name);
+        definition.description = std::move(prompt_description);
+        definition.arguments = detail::prompt_arguments_of<Args>();
+        auto inputs = detail::make_input_set("prompt '" + definition.name + "'", options().schema_limits,
+                                             std::forward<First>(first),
+                                             std::forward<Rest>(rest)...);
+        return add_prompt(std::move(definition), detail::make_declared_feature_body<detail::PromptKind<Args>, Args, F>(
+                                                     std::forward<Handler>(handler), std::move(inputs)));
+    }
+}
+
+template <class Handler, class First, class... Rest>
+PromptHandle Server::prompt(std::string prompt_name, std::string prompt_description, Handler&& handler, First&& first,
+                            Rest&&... rest) {
+    using F = std::decay_t<Handler>;
+    using None = detail::NoArguments;
+    if constexpr (!detail::check_declarations<None, std::decay_t<First>, std::decay_t<Rest>...>()) {
+        return PromptHandle(nullptr, 0);
+    } else if constexpr (!detail::check_declared_handler<detail::DeclaredSite::prompt, None, F, std::decay_t<First>,
+                                                         std::decay_t<Rest>...>()) {
+        return PromptHandle(nullptr, 0);
+    } else {
+        PromptDefinition definition;
+        definition.name = std::move(prompt_name);
+        definition.description = std::move(prompt_description);
+        auto inputs = detail::make_input_set("prompt '" + definition.name + "'", options().schema_limits,
+                                             std::forward<First>(first),
+                                             std::forward<Rest>(rest)...);
+        return add_prompt(std::move(definition), detail::make_declared_feature_body<detail::PromptNoArgumentsKind, None, F>(
+                                                     std::forward<Handler>(handler), std::move(inputs)));
     }
 }
 

@@ -16,6 +16,7 @@ namespace neomcp {
 
 namespace detail {
 class ServerCore;
+class InputRound;
 }  // namespace detail
 
 // Thrown by a handler to answer its call with a tool execution error: a result with `isError` whose one text block
@@ -84,6 +85,7 @@ public:
 
 private:
     friend class detail::ServerCore;
+    friend class detail::InputRound;  // the declared inputs of neomcp/server/inputs.h: the call's profile
     Context(const CallControl& control, const json& meta, std::stop_token stop, const InputResponses& responses,
             const std::optional<std::string>& state)
         : control_(control), meta_(meta), stop_(std::move(stop)), responses_(responses), state_(state) {}

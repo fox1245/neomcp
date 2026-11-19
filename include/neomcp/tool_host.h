@@ -72,8 +72,9 @@ struct NotFound {
     std::string uri;
 };
 
-// The host found the request itself invalid (a prompt that does not exist, an argument it cannot use). It is
-// answered with Invalid params and `message`.
+// The host found the request itself invalid (a prompt that does not exist, an argument it cannot use, answers to
+// its input requests that it cannot use). It is answered with Invalid params and `message`, whatever the kind of the
+// call: a tool's call too, completed with it as a FeatureOutcome.
 struct InvalidRequest {
     std::string message;
 };

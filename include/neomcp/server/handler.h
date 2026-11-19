@@ -17,7 +17,8 @@
 //
 // A handler that may ask its client for input returns std::variant<R, neomcp::InputRequired> (or InputRequired
 // alone), where R is one of the results below; a ToolDefinition handler then returns
-// std::variant<neomcp::ToolResult, neomcp::InputRequired>.
+// std::variant<neomcp::ToolResult, neomcp::InputRequired>. A handler registered with declared inputs takes their
+// answers after the arguments instead (neomcp/server/inputs.h).
 #pragma once
 
 #include <cstddef>

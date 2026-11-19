@@ -34,7 +34,8 @@
 //   neomcp::PromptResult              as built (the description of the prompt's result too)
 //
 // A resource, template or prompt handler that may ask its client for input returns std::variant<R, InputRequired>
-// (or InputRequired alone) for one of the results R above. A completer never asks.
+// (or InputRequired alone) for one of the results R above, or is registered with declared inputs and takes their
+// answers after its inputs (neomcp/server/inputs.h). A completer never asks.
 #pragma once
 
 #include <cstddef>
