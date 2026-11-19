@@ -80,6 +80,13 @@ TEST(ArgumentHeaderMarks, AcceptedSchemas) {
         {"an integer with exclusive bounds",
          R"({"type":"object","properties":{"n":{"type":"integer","exclusiveMinimum":-5,"exclusiveMaximum":5,"x-mcp-header":"N"}}})",
          {"N=n"}},
+        {"an integer without bounds",
+         R"({"type":"object","properties":{"n":{"type":"integer","x-mcp-header":"N"}}})", {"N=n"}},
+        {"an integer with one bound",
+         R"({"type":"object","properties":{"n":{"type":"integer","minimum":0,"x-mcp-header":"N"}}})", {"N=n"}},
+        {"an integer whose declared bounds are past the safe range",
+         R"({"type":"object","properties":{"n":{"type":"integer","minimum":-9007199254740993,"maximum":9007199254740993,"x-mcp-header":"N"}}})",
+         {"N=n"}},
         {"an integer that is a constant",
          R"({"type":"object","properties":{"n":{"type":"integer","const":7,"x-mcp-header":"N"}}})", {"N=n"}},
         {"an integer from a list",
@@ -200,33 +207,6 @@ TEST(ArgumentHeaderMarks, RefusedSchemas) {
          "/properties/p/x-mcp-header", "type"},
         {"a type of the wrong shape", R"({"type":"object","properties":{"p":{"type":5,"x-mcp-header":"H"}}})",
          "/properties/p/x-mcp-header", "type"},
-        // The range of an integer.
-        {"an integer without bounds", R"({"type":"object","properties":{"p":{"type":"integer","x-mcp-header":"H"}}})",
-         "/properties/p/x-mcp-header", "bounded"},
-        {"an integer without an upper bound",
-         R"({"type":"object","properties":{"p":{"type":"integer","minimum":0,"x-mcp-header":"H"}}})",
-         "/properties/p/x-mcp-header", "bounded"},
-        {"an integer without a lower bound",
-         R"({"type":"object","properties":{"p":{"type":"integer","maximum":0,"x-mcp-header":"H"}}})",
-         "/properties/p/x-mcp-header", "bounded"},
-        {"an integer whose maximum is past the safe range",
-         R"({"type":"object","properties":{"p":{"type":"integer","minimum":0,"maximum":9007199254740992,"x-mcp-header":"H"}}})",
-         "/properties/p/x-mcp-header", "maximum"},
-        {"an integer whose minimum is past the safe range",
-         R"({"type":"object","properties":{"p":{"type":"integer","minimum":-9007199254740992,"maximum":0,"x-mcp-header":"H"}}})",
-         "/properties/p/x-mcp-header", "minimum"},
-        {"an integer whose exclusive bound is past the safe range",
-         R"({"type":"object","properties":{"p":{"type":"integer","minimum":0,"exclusiveMaximum":1e300,"x-mcp-header":"H"}}})",
-         "/properties/p/x-mcp-header", "exclusiveMaximum"},
-        {"an integer constant past the safe range",
-         R"({"type":"object","properties":{"p":{"type":"integer","const":9007199254740992,"x-mcp-header":"H"}}})",
-         "/properties/p/x-mcp-header", "const"},
-        {"an integer list with a value past the safe range",
-         R"({"type":"object","properties":{"p":{"type":"integer","enum":[1,9007199254740992],"x-mcp-header":"H"}}})",
-         "/properties/p/x-mcp-header", "enum"},
-        {"an integer list that is empty",
-         R"({"type":"object","properties":{"p":{"type":"integer","enum":[],"x-mcp-header":"H"}}})",
-         "/properties/p/x-mcp-header", "enum"},
     };
     for (const auto& item : cases) {
         SCOPED_TRACE(item.name);
@@ -324,7 +304,6 @@ TEST(ArgumentHeaderRegistration, EveryRuleIsEnforcedWhenAToolIsRegistered) {
         {"a number", one_property(R"({"type":"number","x-mcp-header":"H"})")},
         {"an empty name", one_property(R"({"type":"string","x-mcp-header":""})")},
         {"a name that is not a token", one_property(R"({"type":"string","x-mcp-header":"a b"})")},
-        {"an unbounded integer", one_property(R"({"type":"integer","x-mcp-header":"H"})")},
         {"a duplicate",
          parsed(R"({"type":"object","properties":{"a":{"type":"string","x-mcp-header":"H"},"b":{"type":"string","x-mcp-header":"h"}}})")},
         {"a mark on the root", parsed(R"({"type":"object","x-mcp-header":"H"})")},
@@ -510,7 +489,7 @@ TEST(DescribedHeaderMarks, TheKeywordOfEveryServedRevisionIsWritten) {
     EXPECT_EQ(city.at("x-other-header"), "City");
 }
 
-TEST(DescribedHeaderMarks, MarksThatBreakARuleRefuseTheTool) {
+TEST(DescribedHeaderMarks, MarksThatBreakARuleRefuseTheToolAndAnIntegerNeedsNoBounds) {
     neomcp::Server server({.name = "t", .version = "1"});
     const auto message_of = [&](auto tool_registration) {
         try {
@@ -522,16 +501,15 @@ TEST(DescribedHeaderMarks, MarksThatBreakARuleRefuseTheTool) {
     };
     const std::string wide = message_of(
         [&] { server.tool<described::Wide>("wide", "d", [](const described::Wide&) { return std::string("done"); }); });
-    EXPECT_NE(wide.find("wide"), std::string::npos) << wide;
-    EXPECT_NE(wide.find("/properties/count"), std::string::npos) << wide;
-    EXPECT_NE(wide.find("bounded"), std::string::npos) << wide;
+    EXPECT_TRUE(wide.empty()) << "a 64-bit integer member needs no bounds: " << wide;
     const std::string bad = message_of(
         [&] { server.tool<described::BadName>("bad", "d", [](const described::BadName&) { return std::string("done"); }); });
     EXPECT_NE(bad.find("token"), std::string::npos) << bad;
     const std::string twice = message_of(
         [&] { server.tool<described::Twice>("twice", "d", [](const described::Twice&) { return std::string("done"); }); });
     EXPECT_NE(twice.find("without regard to case"), std::string::npos) << twice;
-    EXPECT_TRUE(server.tools().empty());
+    ASSERT_EQ(server.tools().size(), 1U) << "only the tool with the integer was registered";
+    EXPECT_EQ(mark_of(server.tools()[0].input_schema, {"count"}), "Count");
 }
 
 }  // namespace
@@ -607,6 +585,11 @@ public:
         });
         neomcp::ToolDefinition plain = tool_of("plain", parsed(R"({"type":"object","properties":{"query":{"type":"string"}}})"));
         server.tool(plain, [this](const json&) {
+            ++runs;
+            return neomcp::ToolResult{};
+        });
+        neomcp::ToolDefinition counter = tool_of("counter", parsed(R"({"type":"object","properties":{"n":{"type":"integer","x-mcp-header":"N"}}})"));
+        server.tool(counter, [this](const json&) {
             ++runs;
             return neomcp::ToolResult{};
         });
@@ -774,6 +757,33 @@ TEST(ArgumentHeaderCall, IntegersAreComparedAsNumbersAndBooleansAsWords) {
         EXPECT_EQ(outcome.status, 400);
         EXPECT_NE(outcome.text().find(item.refused), std::string::npos) << outcome.text();
         EXPECT_EQ(rig.runs.load(), 0);
+    }
+}
+
+TEST(ArgumentHeaderCall, AnIntegerOutsideTheSafeRangeIsRefusedWhateverTheSchemaDeclares) {
+    // The schema of the tool declares no bounds; the range is enforced on the values.
+    const std::vector<std::pair<json, std::string>> inside{
+        {9007199254740991LL, "9007199254740991"}, {-9007199254740991LL, "-9007199254740991"}};
+    for (const auto& [value, text] : inside) {
+        SCOPED_TRACE(text);
+        CallRig rig;
+        const Outcome outcome = rig.call("counter", json{{"n", value}}, {{"Mcp-Param-N", text}});
+        EXPECT_FALSE(outcome.failed()) << outcome.message.dump();
+        EXPECT_EQ(rig.runs.load(), 1);
+    }
+    const std::vector<std::pair<json, std::string>> outside{
+        {9007199254740992LL, "9007199254740992"},
+        {-9007199254740992LL, "-9007199254740992"},
+        {json(std::uint64_t{18446744073709551615ULL}), "18446744073709551615"},
+        {json(1e300), "1e300"}};
+    for (const auto& [value, text] : outside) {
+        SCOPED_TRACE(text);
+        CallRig rig;
+        const Outcome outcome = rig.call("counter", json{{"n", value}}, {{"Mcp-Param-N", text}});
+        EXPECT_EQ(outcome.code(), -32020) << outcome.message.dump();
+        EXPECT_EQ(outcome.status, 400);
+        EXPECT_NE(outcome.text().find("cannot mirror"), std::string::npos) << outcome.text();
+        EXPECT_EQ(rig.runs.load(), 0) << "the tool did not run";
     }
 }
 

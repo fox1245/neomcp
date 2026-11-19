@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <optional>
 #include <utility>
 
@@ -46,31 +45,6 @@ bool is_token_char(char c) noexcept {
 const json* member_of(const json::object_t& object, std::string_view name) {
     const auto found = object.find(std::string(name));
     return found == object.end() ? nullptr : &found->second;
-}
-
-// Whether the number is an integer inside +-max_safe_integer (a bound or a value of a schema).
-bool inside_safe_range(const json& number) {
-    if (number.is_number_unsigned()) {
-        return *number.get_ptr<const json::number_unsigned_t*>() <= static_cast<std::uint64_t>(max_safe_integer);
-    }
-    if (number.is_number_integer()) {
-        const std::int64_t value = *number.get_ptr<const json::number_integer_t*>();
-        return value >= -max_safe_integer && value <= max_safe_integer;
-    }
-    if (const auto* real = number.get_ptr<const json::number_float_t*>()) {
-        return std::isfinite(*real) && std::floor(*real) == *real &&
-               std::fabs(*real) <= static_cast<double>(max_safe_integer);
-    }
-    return false;
-}
-
-// Whether the number is a bound inside the range; a bound need not be whole.
-bool bound_inside_safe_range(const json& number) {
-    if (number.is_number_integer() || number.is_number_unsigned()) return inside_safe_range(number);
-    if (const auto* real = number.get_ptr<const json::number_float_t*>()) {
-        return std::isfinite(*real) && std::fabs(*real) <= static_cast<double>(max_safe_integer);
-    }
-    return false;
 }
 
 class Reader {
@@ -179,7 +153,6 @@ private:
         }
         const auto type = type_of(schema, where);
         if (!type) return;
-        if (*type == HeaderParameterType::integer && !bounded(schema, where)) return;
         found_.push_back(HeaderParameter{*name, path_, *type, pointer_});
     }
 
@@ -232,44 +205,6 @@ private:
         }
         if (!primitive) refuse(where, wrong);
         return primitive;
-    }
-
-    // Whether an integer parameter has bounds that keep its values inside the range a header can carry.
-    bool bounded(const json::object_t& schema, const std::string& where) {
-        const std::string range = "+-" + std::to_string(max_safe_integer);
-        if (const json* fixed = member_of(schema, "const")) {
-            if (inside_safe_range(*fixed)) return true;
-            refuse(where, "an integer parameter's 'const' must be a whole number within " + range);
-            return false;
-        }
-        if (const json* choices = member_of(schema, "enum")) {
-            const auto* list = choices->get_ptr<const json::array_t*>();
-            if (list != nullptr && !list->empty() &&
-                std::all_of(list->begin(), list->end(), [](const json& value) { return inside_safe_range(value); })) {
-                return true;
-            }
-            refuse(where, "every value of an integer parameter's 'enum' must be a whole number within " + range);
-            return false;
-        }
-        bool has_lower = false;
-        bool has_upper = false;
-        for (const std::string_view bound : {"minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum"}) {
-            const json* value = member_of(schema, bound);
-            if (value == nullptr) continue;
-            if (!bound_inside_safe_range(*value)) {
-                refuse(where, "an integer parameter's '" + std::string(bound) + "' must be a number within " + range);
-                return false;
-            }
-            (bound.starts_with("min") || bound.starts_with("exclusiveMin") ? has_lower : has_upper) = true;
-        }
-        if (!has_lower || !has_upper) {
-            refuse(where,
-                   "an integer parameter must be bounded so that its values stay within " + range +
-                       ": give 'minimum' (or 'exclusiveMinimum') and 'maximum' (or 'exclusiveMaximum'), or 'const', or "
-                       "'enum'");
-            return false;
-        }
-        return true;
     }
 
     std::string_view keyword_;

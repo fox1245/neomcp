@@ -8,6 +8,11 @@
 // when a tool is registered (Server does), because a mark that breaks a rule makes the tool definition invalid and
 // clients drop such a tool; the session applies it again to every tool call it serves, so that a tool of a host that
 // did not check is still served safely.
+//
+// The range of an integer is a rule about values, not about the schema: a schema need not declare bounds for an
+// integer parameter. The range is enforced on the values of calls: a call whose argument is an integer outside
+// +-max_safe_integer (or a number that is not whole) cannot be mirrored into a header and is refused as a header
+// mismatch.
 #pragma once
 
 #include <cstddef>
@@ -58,8 +63,6 @@ inline constexpr std::size_t default_header_schema_depth = 64;
 //     `$ref` or any other keyword;
 //   - sit on a property whose `type` is integer, string or boolean (one of them, with `"null"` allowed besides), so
 //     not number;
-//   - on an integer, be bounded: the schema must give a lower and an upper bound (`minimum` or `exclusiveMinimum`,
-//     `maximum` or `exclusiveMaximum`), or `const`, or `enum`, with every value inside +-max_safe_integer.
 // The values of `const`, `enum`, `default` and `examples` are data, and so are the names of properties: a property
 // that is called like the keyword is not a mark. Any other keyword is searched, so a mark below an unknown keyword is
 // refused rather than overlooked. A schema nested deeper than `max_depth` is refused.

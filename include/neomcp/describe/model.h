@@ -238,9 +238,9 @@ struct DefaultValue {
 //
 // Applies to bool, integer and std::string members, also inside a described struct that is itself a member (not
 // below a vector or a map). The rules for a mark are checked when the tool is registered (see header_parameters in
-// neomcp/argument_headers.h): the name must be an HTTP token and unique among the marks without regard to case, and an
-// integer member needs a lower and an upper bound within +-9007199254740991 (neomcp::minimum and neomcp::maximum).
-// The option is not enforced by decoding, and a schema made by schema_of<Args>() alone does not carry the mark.
+// neomcp/argument_headers.h): the name must be an HTTP token and unique among the marks without regard to case. An
+// integer member needs no bounds; a call whose value is outside +-9007199254740991 is refused when it is made. The
+// option is not enforced by decoding, and a schema made by schema_of<Args>() alone does not carry the mark.
 struct HeaderName {
     std::string_view name;
     template <class Member>
