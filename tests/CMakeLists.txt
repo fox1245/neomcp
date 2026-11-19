@@ -84,6 +84,13 @@ target_link_libraries(neomcp_json_schema_pattern_time_test PRIVATE neomcp::schem
 neomcp_configure_target(neomcp_json_schema_pattern_time_test)
 gtest_discover_tests(neomcp_json_schema_pattern_time_test DISCOVERY_TIMEOUT 120)
 
+# The translation of a pattern to the syntax of the regular expression engine; the test reaches the internal header.
+add_executable(neomcp_json_schema_pattern_translate_test json_schema_pattern_translate_test.cpp)
+target_link_libraries(neomcp_json_schema_pattern_translate_test PRIVATE neomcp::schema GTest::gtest_main Threads::Threads)
+target_include_directories(neomcp_json_schema_pattern_translate_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+neomcp_configure_target(neomcp_json_schema_pattern_translate_test)
+gtest_discover_tests(neomcp_json_schema_pattern_translate_test DISCOVERY_TIMEOUT 120)
+
 add_executable(neomcp_crypto_test crypto_test.cpp)
 target_link_libraries(neomcp_crypto_test PRIVATE neomcp::crypto GTest::gtest_main Threads::Threads)
 target_include_directories(neomcp_crypto_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
