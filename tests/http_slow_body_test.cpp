@@ -1,7 +1,8 @@
-// Checks that a client sending a request body slowly holds a worker of the listener no longer than about the read
-// timeout. The request line and the headers are bounded as a whole by the read timeout; this checks the body. The
+// Checks that a client sending a request body slowly holds a worker of the listener no longer than its body deadline
+// allows. The request line and the headers are bounded as a whole by the read timeout; this checks the body. The
 // slow client sends one byte of a 64-byte body every 300 ms, inside a read timeout of 500 ms, and gives up after four
-// seconds. The listener has one worker, so a second client's request shows at once whether that worker is held.
+// seconds; the body deadline is one read timeout here (its default, two minutes, is sized for large bodies on slow
+// links). The listener has one worker, so a second client's request shows at once whether that worker is held.
 #if defined(_MSC_VER)
 #pragma warning(push, 0)
 #endif
@@ -45,6 +46,7 @@ TEST(HttpSlowBody, ABodySentSlowlyDoesNotHoldTheOnlyWorkerMuchLongerThanTheReadT
     options.max_worker_threads = 1;
     options.max_queued_connections = 4;
     options.read_timeout = read_timeout;
+    options.body_timeout = read_timeout;
     options.disconnect_poll_interval = 20ms;
     neomcp::http::Listener listener(options, [](neomcp::http::Request, neomcp::http::Responder responder) {
         responder.complete(neomcp::http::make_response(200, "application/json", "{}"));

@@ -33,18 +33,46 @@ namespace {
 
 constexpr int lowest_status = 100;
 constexpr int highest_status = 599;
+constexpr int lowest_error_status = 400;
+constexpr int bad_request_status = 400;
+constexpr int request_timeout_status = 408;
+constexpr int length_required_status = 411;
+constexpr int content_too_large_status = 413;
 constexpr int internal_error_status = 500;
 constexpr int unavailable_status = 503;
 
 constexpr std::string_view content_type_field = "Content-Type";
 constexpr std::string_view content_length_field = "Content-Length";
 constexpr std::string_view transfer_encoding_field = "Transfer-Encoding";
+constexpr std::string_view connection_field = "Connection";
+constexpr std::string_view close_token = "close";
 constexpr std::string_view cache_control_field = "Cache-Control";
 constexpr std::string_view proxy_buffering_field = "X-Accel-Buffering";
 constexpr std::string_view no_store = "no-store";
 constexpr std::string_view no = "no";
 constexpr std::string_view default_content_type = "application/octet-stream";
 constexpr std::string_view head_method = "HEAD";
+constexpr std::string_view post_method = "POST";
+constexpr std::string_view put_method = "PUT";
+constexpr std::string_view patch_method = "PATCH";
+constexpr std::string_view delete_method = "DELETE";
+
+// The methods whose requests carry a body here: the library reads their bodies through the listener (Impl::receive),
+// which bounds the time a body takes. The others (GET, HEAD, OPTIONS) take none.
+bool takes_body(const std::string& method) {
+    return method == post_method || method == put_method || method == patch_method || method == delete_method;
+}
+
+// Whether the request's body comes in a transfer coding (the library takes only `chunked`).
+bool transfer_coded(const httplib::Request& incoming) {
+    return incoming.has_header(std::string(transfer_encoding_field));
+}
+
+// Whether the request's framing announces a body: a transfer coding, or a Content-Length above zero (the library
+// refused a malformed one before routing).
+bool frames_body(const httplib::Request& incoming) {
+    return transfer_coded(incoming) || incoming.get_header_value_u64(std::string(content_length_field)) > 0;
+}
 
 // The answer a worker waits for: filled once, by the responder, by the destruction of the last responder copy, or by
 // stop().
@@ -127,6 +155,7 @@ std::string check_options(const ListenerOptions& o) {
     if (o.worker_idle_timeout.count() < 1) return "worker_idle_timeout must be at least 1 second";
     if (o.max_queued_connections < 1) return "max_queued_connections must be at least 1";
     if (o.read_timeout <= milliseconds::zero()) return "read_timeout must be positive";
+    if (o.body_timeout <= milliseconds::zero()) return "body_timeout must be positive";
     if (o.write_timeout <= milliseconds::zero()) return "write_timeout must be positive";
     if (o.idle_connection_timeout.count() < 1) return "idle_connection_timeout must be at least 1 second";
     if (o.keep_alive_interval <= milliseconds::zero()) return "keep_alive_interval must be positive";
@@ -143,7 +172,8 @@ struct Listener::Impl {
 
     Outcome<std::uint16_t> start();
     void stop() noexcept;
-    void handle(const httplib::Request& incoming, httplib::Response& outgoing);
+    void receive(const httplib::Request& incoming, httplib::Response& outgoing, const httplib::ContentReader& reader);
+    void handle(const httplib::Request& incoming, std::string body, httplib::Response& outgoing);
     void write(Response&& response, const httplib::Request& incoming, httplib::Response& outgoing);
     void write_stream(std::shared_ptr<BodyStream> stream, const std::string& content_type,
                       httplib::Response& outgoing);
@@ -157,6 +187,8 @@ struct Listener::Impl {
     std::unique_ptr<httplib::Server> server;
     std::thread serve_thread;
     std::atomic<std::uint16_t> bound_port{0};
+    // Set by stop() before it waits for the workers; a body being read stops at its next piece.
+    std::atomic<bool> closing{false};
 
     std::mutex mutex;  // guards the three below
     bool stopping = false;
@@ -196,13 +228,35 @@ Outcome<std::uint16_t> Listener::Impl::start() {
         return new BoundedPool(base, maximum, queued, idle);
     };
 
-    auto route = [this](const httplib::Request& incoming, httplib::Response& outgoing) { handle(incoming, outgoing); };
+    // The library reads a body it routes to an ordinary handler before the handler runs, with a bound on each read
+    // only. So the methods that take a body are routed to a handler that reads it in pieces (receive), which bounds
+    // its total time, and a request of another method that frames a body is refused before that body is read. A
+    // body in the chunked coding is refused too (411): between its pieces of data the library reads chunk lines and
+    // trailer fields, during which the reader is never called, so their time could not be bounded.
+    candidate->set_pre_request_handler([](const httplib::Request& incoming, httplib::Response& outgoing) {
+        if (transfer_coded(incoming)) {
+            outgoing.status = length_required_status;
+        } else if (!takes_body(incoming.method) && frames_body(incoming)) {
+            outgoing.status = bad_request_status;
+        } else {
+            return httplib::Server::HandlerResponse::Unhandled;
+        }
+        outgoing.set_header(std::string(connection_field), std::string(close_token));
+        return httplib::Server::HandlerResponse::Handled;
+    });
+    const httplib::Server::Handler route = [this](const httplib::Request& incoming, httplib::Response& outgoing) {
+        handle(incoming, std::string(), outgoing);
+    };
+    const httplib::Server::HandlerWithContentReader reading =
+        [this](const httplib::Request& incoming, httplib::Response& outgoing, const httplib::ContentReader& reader) {
+            receive(incoming, outgoing, reader);
+        };
     candidate->Get(options.path, route);  // HEAD is routed with GET
-    candidate->Post(options.path, route);
-    candidate->Put(options.path, route);
-    candidate->Delete(options.path, route);
-    candidate->Patch(options.path, route);
     candidate->Options(options.path, route);
+    candidate->Post(options.path, reading);
+    candidate->Put(options.path, reading);
+    candidate->Delete(options.path, reading);
+    candidate->Patch(options.path, reading);
 
     int port = 0;
     if (options.port == 0) {
@@ -237,6 +291,7 @@ void Listener::Impl::stop() noexcept {
     if (stopped) return;
     stopped = true;
     if (!started) return;
+    closing = true;
 
     std::vector<Exchange*> waiting;
     std::vector<std::shared_ptr<BodyStream>> open;
@@ -259,7 +314,54 @@ void Listener::Impl::stop() noexcept {
     bound_port = 0;
 }
 
-void Listener::Impl::handle(const httplib::Request& incoming, httplib::Response& outgoing) {
+void Listener::Impl::receive(const httplib::Request& incoming, httplib::Response& outgoing,
+                             const httplib::ContentReader& reader) {
+    using clock = std::chrono::steady_clock;
+    // The time runs from the end of the header fields, which the library read within one read timeout.
+    const clock::time_point deadline = clock::now() + options.body_timeout;
+    enum class Cut { none, late, too_large, stopping };
+    Cut cut = Cut::none;
+    std::string body;
+    const bool complete = reader([&](const char* data, std::size_t size) {
+        // stop() joins the workers: a body that is still arriving does not keep it waiting.
+        if (closing.load()) {
+            cut = Cut::stopping;
+            return false;
+        }
+        // Looked at for every piece, the last one included: a body that is not complete by the deadline is refused
+        // however much of it came in time.
+        if (clock::now() >= deadline) {
+            cut = Cut::late;
+            return false;
+        }
+        // The library bounds the body as well; this keeps the bound where the bytes are kept. body.size() never
+        // exceeds max_body_bytes, so the difference does not wrap.
+        if (size > options.max_body_bytes - body.size()) {
+            cut = Cut::too_large;
+            return false;
+        }
+        body.append(data, size);
+        return true;
+    });
+    if (!complete) {
+        // The handler is not called. An error status closes the connection after the answer (the rest of the body
+        // cannot be told from a next request); the field says so to the peer as well.
+        switch (cut) {
+            case Cut::late: outgoing.status = request_timeout_status; break;
+            case Cut::too_large: outgoing.status = content_too_large_status; break;
+            case Cut::stopping: outgoing.status = unavailable_status; break;
+            case Cut::none:
+                // The library's own reason (a body over the bound, a malformed chunk, a read that timed out).
+                if (outgoing.status < lowest_error_status) outgoing.status = bad_request_status;
+                break;
+        }
+        outgoing.set_header(std::string(connection_field), std::string(close_token));
+        return;
+    }
+    handle(incoming, std::move(body), outgoing);
+}
+
+void Listener::Impl::handle(const httplib::Request& incoming, std::string body, httplib::Response& outgoing) {
     // A responder the handler keeps may outlive this call, so the exchange is shared with it.
     const auto exchange = std::make_shared<Exchange>();
     {
@@ -279,7 +381,7 @@ void Listener::Impl::handle(const httplib::Request& incoming, httplib::Response&
         const std::size_t question = incoming.target.find('?');
         if (question != std::string::npos) request.query = incoming.target.substr(question + 1);
         for (const auto& field : incoming.headers) request.headers.add(field.first, field.second);
-        request.body = incoming.body;
+        request.body = std::move(body);
         if (!incoming.remote_addr.empty()) request.peer_address = incoming.remote_addr;
 
         // The handler gets the only copy kept here: when it drops it uncompleted, the exchange is answered 500. The

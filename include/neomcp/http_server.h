@@ -16,7 +16,8 @@
 // Sizing. Each request that waits for its answer and each open stream holds one worker thread of the listener for as
 // long as it lasts; a connection that arrives while every worker is busy waits, up to max_queued_connections of them,
 // and one beyond that is closed. So max_worker_threads bounds the requests in progress plus the open streams (a
-// client of a session-based revision usually keeps one stream open, besides its requests).
+// client of a session-based revision usually keeps one stream open, besides its requests). A request also holds its
+// worker while it arrives: its body within body_timeout.
 #pragma once
 
 #include <chrono>
@@ -59,6 +60,8 @@ struct HttpServerOptions {
     std::chrono::seconds worker_idle_timeout = http::ListenerDefaults::worker_idle_timeout;
     std::size_t max_queued_connections = http::ListenerDefaults::max_queued_connections;
     std::chrono::milliseconds read_timeout = http::ListenerDefaults::read_timeout;
+    // The time the body of one request may take to arrive (default 2 minutes, see http::ListenerOptions::body_timeout).
+    std::chrono::milliseconds body_timeout = http::ListenerDefaults::body_timeout;
     std::chrono::milliseconds write_timeout = http::ListenerDefaults::write_timeout;
     std::chrono::seconds idle_connection_timeout = http::ListenerDefaults::idle_connection_timeout;
     std::chrono::milliseconds keep_alive_interval = http::ListenerDefaults::keep_alive_interval;

@@ -35,6 +35,7 @@ http::ListenerOptions listener_options(const HttpServerOptions& options, std::si
     listener.worker_idle_timeout = options.worker_idle_timeout;
     listener.max_queued_connections = options.max_queued_connections;
     listener.read_timeout = options.read_timeout;
+    listener.body_timeout = options.body_timeout;
     listener.write_timeout = options.write_timeout;
     listener.idle_connection_timeout = options.idle_connection_timeout;
     listener.keep_alive_interval = options.keep_alive_interval;

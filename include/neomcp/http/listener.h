@@ -11,6 +11,9 @@
 //   - A connection that arrives when every worker is busy is accepted and kept waiting, up to max_queued_connections
 //     of them; it gets no answer until a worker is free. So at most max_worker_threads + max_queued_connections
 //     connections are open at once, and a connection that arrives beyond that is closed at once.
+//   - A worker also serves a request while it arrives: the request line and header fields within one read timeout,
+//     the body within ListenerOptions::body_timeout. A peer that sends slowly holds its worker no longer than that
+//     and one read timeout more.
 //
 // The peer's disconnect is noticed by polling (ListenerOptions::disconnect_poll_interval), because a blocking
 // socket gives the worker no wake-up: a client that went away is noticed within about one interval. While a stream is
@@ -43,6 +46,7 @@ struct ListenerDefaults {
     static constexpr std::chrono::seconds worker_idle_timeout{3};
     static constexpr std::size_t max_queued_connections = 64;
     static constexpr std::chrono::milliseconds read_timeout{5000};
+    static constexpr std::chrono::milliseconds body_timeout = std::chrono::minutes{2};
     static constexpr std::chrono::milliseconds write_timeout{5000};
     static constexpr std::chrono::seconds idle_connection_timeout{5};
     static constexpr std::chrono::milliseconds keep_alive_interval{15000};
@@ -76,10 +80,24 @@ struct ListenerOptions {
     // Connections kept waiting for a worker while every worker is busy; at least 1.
     std::size_t max_queued_connections = ListenerDefaults::max_queued_connections;
 
-    // How long the listener waits for the next bytes of a request, and for the peer to accept bytes it writes. A
-    // stream whose reader stops reading ends after the write timeout.
+    // How long the listener waits for the next bytes of a request, and for the peer to accept bytes it writes. The
+    // request line and the header fields must arrive within one read timeout as a whole. A stream whose reader stops
+    // reading ends after the write timeout.
     std::chrono::milliseconds read_timeout = ListenerDefaults::read_timeout;
     std::chrono::milliseconds write_timeout = ListenerDefaults::write_timeout;
+
+    // How long the body of one request may take to arrive, counted from the end of its header fields, whatever the
+    // pace of the single reads. A request whose body is not complete by then is answered 408 without the handler being
+    // called, and its connection is closed. The listener looks at the time whenever bytes of the body arrive, so a
+    // worker that reads a body too slowly is free again at most one read timeout after this time. Must be positive.
+    // A body must be framed by Content-Length: one in the chunked transfer coding is answered 411 before it is read
+    // (the time between its pieces of data could not be bounded). GET, HEAD and OPTIONS requests take no body: one
+    // that frames a body is answered 400 before it is read.
+    //
+    // Default 2 minutes: the largest body allowed by default (8 MiB) then needs an average of about 0.56 Mbit/s, so an
+    // honest client on a slow link (1 Mbit/s takes about 67 s for 8 MiB) still has twice the time it needs. A server
+    // that takes smaller bodies, or whose clients are near, can shorten it; while a body is read it holds a worker.
+    std::chrono::milliseconds body_timeout = ListenerDefaults::body_timeout;
 
     // How long an idle connection is kept for another request (whole seconds, at least 1).
     std::chrono::seconds idle_connection_timeout = ListenerDefaults::idle_connection_timeout;

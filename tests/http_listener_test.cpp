@@ -373,7 +373,7 @@ TEST(HttpListener, OtherPathsGet404AndTheHandlerIsNotCalled) {
     EXPECT_EQ(hit->body, "/mcp|a=b");
 }
 
-TEST(HttpListener, ABodyOverTheBoundGets413AndTheHandlerIsNotCalled) {
+TEST(HttpListener, ABodyOverTheBoundGets413AChunkedBody411AndTheHandlerIsNotCalled) {
     std::atomic<int> calls{0};
     ListenerOptions options = defaults();
     options.max_body_bytes = 1024;
@@ -394,23 +394,27 @@ TEST(HttpListener, ABodyOverTheBoundGets413AndTheHandlerIsNotCalled) {
     EXPECT_EQ(exact->body, "1024");
     EXPECT_EQ(calls, 1);
 
-    // A body without a declared length is bounded too.
-    std::size_t sent = 0;
-    auto chunked = client->Post(
-        "/", httplib::Headers(),
-        [&](std::size_t, httplib::DataSink& sink) {
-            if (sent >= 4096) {
-                sink.done();
+    // A body without a declared length (the chunked coding) is refused before it is read, whatever its size: the
+    // listener bounds the time a body takes only for one framed by Content-Length.
+    for (const std::size_t total : {std::size_t{512}, std::size_t{4096}}) {
+        SCOPED_TRACE(total);
+        std::size_t sent = 0;
+        auto chunked = make_client(server->port)->Post(
+            "/", httplib::Headers(),
+            [&](std::size_t, httplib::DataSink& sink) {
+                if (sent >= total) {
+                    sink.done();
+                    return true;
+                }
+                const std::string piece(512, 'y');
+                sink.write(piece.data(), piece.size());
+                sent += piece.size();
                 return true;
-            }
-            const std::string piece(512, 'y');
-            sink.write(piece.data(), piece.size());
-            sent += piece.size();
-            return true;
-        },
-        "text/plain");
-    if (chunked) {  // the connection may also be cut before the answer is read
-        EXPECT_EQ(chunked->status, 413);
+            },
+            "text/plain");
+        if (chunked) {  // the connection may also be cut before the answer is read
+            EXPECT_EQ(chunked->status, 411);
+        }
     }
     EXPECT_EQ(calls, 1);
 }
@@ -860,6 +864,7 @@ TEST(HttpListener, StartRejectsOptionsOutOfRange) {
         {"maximum below base", [](ListenerOptions& o) { o.worker_threads = 4; o.max_worker_threads = 3; }, "max_worker_threads"},
         {"no queue", [](ListenerOptions& o) { o.max_queued_connections = 0; }, "max_queued_connections"},
         {"zero read timeout", [](ListenerOptions& o) { o.read_timeout = 0ms; }, "read_timeout"},
+        {"zero body timeout", [](ListenerOptions& o) { o.body_timeout = 0ms; }, "body_timeout"},
         {"zero write timeout", [](ListenerOptions& o) { o.write_timeout = 0ms; }, "write_timeout"},
         {"zero idle connection timeout", [](ListenerOptions& o) { o.idle_connection_timeout = 0s; }, "idle_connection_timeout"},
         {"zero keep-alive interval", [](ListenerOptions& o) { o.keep_alive_interval = 0ms; }, "keep_alive_interval"},
