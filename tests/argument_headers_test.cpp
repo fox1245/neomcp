@@ -366,6 +366,10 @@ struct Twice {
     std::string b;
 };
 
+struct Doubled {
+    std::string a;
+};
+
 struct Listed {
     std::vector<Place> places;
 };
@@ -407,6 +411,12 @@ struct neomcp::Described<described::Twice> {
     static constexpr auto fields = neomcp::fields(
         neomcp::field(&described::Twice::a, "a", "", neomcp::mirror_in_header("Same")),
         neomcp::field(&described::Twice::b, "b", "", neomcp::mirror_in_header("sAME")));
+};
+
+template <>
+struct neomcp::Described<described::Doubled> {
+    static constexpr auto fields = neomcp::fields(
+        neomcp::field(&described::Doubled::a, "a", "", neomcp::mirror_in_header("First"), neomcp::mirror_in_header("Second")));
 };
 
 template <>
@@ -510,6 +520,14 @@ TEST(DescribedHeaderMarks, MarksThatBreakARuleRefuseTheToolAndAnIntegerNeedsNoBo
     EXPECT_NE(twice.find("without regard to case"), std::string::npos) << twice;
     ASSERT_EQ(server.tools().size(), 1U) << "only the tool with the integer was registered";
     EXPECT_EQ(mark_of(server.tools()[0].input_schema, {"count"}), "Count");
+}
+
+TEST(DescribedHeaderMarks, AMemberWithTwoMarksRefusesTheToolInsteadOfKeepingOne) {
+    neomcp::Server server({.name = "t", .version = "1"});
+    EXPECT_THROW(
+        server.tool<described::Doubled>("doubled", "d", [](const described::Doubled&) { return std::string("done"); }),
+        std::invalid_argument);
+    EXPECT_EQ(server.tools().size(), 0U);
 }
 
 }  // namespace
