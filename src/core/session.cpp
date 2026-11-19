@@ -1061,8 +1061,8 @@ std::optional<Answer> SessionCore::serve_named(Message request, const OpenMechan
     const Claims& claims = *place.claims;
     if (claims.versions == 1 && claims.version != revision) {
         return header_mismatch(id,
-                               std::string(header_mismatch_prefix) + std::string(claims.version_name) + " header value '" +
-                                   std::string(claims.version) + "' does not match body value '" + revision + "'",
+                               std::string(header_mismatch_prefix) + "the " + std::string(claims.version_name) +
+                                   " header value does not match the revision the body names",
                                {claims.named, chosen});
     }
     const Served* rules = chosen != nullptr ? chosen : newest;

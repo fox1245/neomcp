@@ -3242,6 +3242,40 @@ TEST(Headers, TheRequestHeadersOfTheRevision) {
     }
 }
 
+// A message about a header names the header and the member of the body and repeats no value of the request, however
+// long the values are.
+TEST(Headers, AMismatchMessageRepeatsNoValueOfTheRequest) {
+    const auto modern = builtin(modern_revision);
+    const std::string body_name(4000, 'b');
+    const std::string header_name(4000, 'h');
+    const json call = Peer::make_request(*modern, "c", "tools/call", {{"name", body_name}, {"arguments", json::object()}});
+    struct Case {
+        std::string name;
+        Fields fields;
+        std::string names;  // what the message must name
+    };
+    const Fields standard = modern_headers(call);
+    const std::vector<Case> cases{
+        {"Mcp-Name differs", replaced(standard, "Mcp-Name", header_name), "Mcp-Name"},
+        {"Mcp-Method differs", replaced(standard, "Mcp-Method", header_name), "Mcp-Method"},
+        {"the version differs", replaced(standard, "MCP-Protocol-Version", "2025-11-25"), "MCP-Protocol-Version"},
+    };
+    for (const auto& item : cases) {
+        SCOPED_TRACE(item.name);
+        FakeHost host;
+        Recorder recorder;
+        auto session = tagged_session(host, recorder, http_options());
+        EXPECT_TRUE(feed(*session, 1, call, item.fields));
+        const std::string message = error_message_of(message_of(only_output(recorder, 1)));
+        EXPECT_NE(message.find(item.names), std::string::npos) << message;
+        EXPECT_LT(message.size(), 200U);
+        EXPECT_EQ(message.find("bbbb"), std::string::npos) << "the body's value is not repeated";
+        EXPECT_EQ(message.find("hhhh"), std::string::npos) << "the header's value is not repeated";
+        EXPECT_EQ(message.find("2025-11-25"), std::string::npos);
+        EXPECT_EQ(message.find(modern_revision), std::string::npos);
+    }
+}
+
 TEST(Headers, AMismatchTakesItsCodeFromTheRevisionThatDefinesIt) {
     FakeHost host;
     Recorder recorder;

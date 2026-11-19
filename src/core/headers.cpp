@@ -35,8 +35,6 @@ std::optional<std::string> decoded(std::string_view value, const profile::Encode
     return std::string(value);
 }
 
-std::string in_quotes(std::string_view text) { return "'" + std::string(text) + "'"; }
-
 // ---- Argument headers
 
 // The characters a header value may hold in the plain form (RFC 9110, section 5.5): visible ASCII, space and tab.
@@ -195,17 +193,21 @@ std::optional<std::string> check_request_headers(const Message& request, std::sp
         if (found.count > 1) return prefix + "the " + header.name + " header appears more than once";
         std::string expected;
         std::string given;
+        std::string about;  // the member of the body the header mirrors, for the message
         switch (header.value) {
             case profile::HeaderValue::protocol_version:
+                about = "the revision the body names";
                 expected = std::string(revision);
                 given = std::string(found.value);
                 break;
             case profile::HeaderValue::method:
+                about = "the method of the body";
                 expected = request.method;
                 given = std::string(found.value);
                 break;
             case profile::HeaderValue::params_member: {
                 const std::string_view key = *header.params_member(request.method);
+                about = "params." + std::string(key);
                 const json* body = member(request.params, key);
                 const auto* text = body == nullptr ? nullptr : body->get_ptr<const std::string*>();
                 if (text == nullptr) {
@@ -220,8 +222,7 @@ std::optional<std::string> check_request_headers(const Message& request, std::sp
             }
         }
         if (given != expected) {
-            return prefix + header.name + " header value " + in_quotes(found.value) + " does not match body value " +
-                   in_quotes(expected);
+            return prefix + "the " + header.name + " header value does not match " + about;
         }
     }
     return std::nullopt;
