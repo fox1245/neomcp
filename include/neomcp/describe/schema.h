@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -172,6 +173,17 @@ json schema_of();
 
 namespace detail {
 
+// An option that carries a number refuses one that is not finite (see model.h), naming the member.
+template <class Option>
+void check_option(std::string_view member, const Option& option) {
+    if constexpr (requires { option.finite(); }) {
+        if (!option.finite()) {
+            throw std::invalid_argument("neomcp: the member \"" + std::string(member) + "\" has " +
+                                        std::string(Option::keyword) + " with a value that is not a finite number");
+        }
+    }
+}
+
 // The schema of one member, with its description and options applied, added to `properties` (and to `required`
 // unless the member is a std::optional).
 template <class T, class F>
@@ -183,6 +195,7 @@ void add_property(json& properties, json& required, const F& item) {
     static_assert(has_schema<Core>(),
                   "neomcp: no neomcp::Schema for this member type (describe it with neomcp::Described or "
                   "neomcp::DescribedEnum, or specialise neomcp::Schema; std::optional is allowed only as the member's own type)");
+    std::apply([&](const auto&... option) { (check_option(item.name, option), ...); }, item.options);
     json schema = schema_of<Core>();
     if (schema.is_boolean() && schema.get<bool>()) {
         schema = json::object();  // the schema `true` accepts everything, which is the empty object

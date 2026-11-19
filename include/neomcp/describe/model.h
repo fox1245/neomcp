@@ -6,7 +6,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -101,6 +103,29 @@ json number_json(V value) {
     }
 }
 
+// True when a number can be written to JSON as it is: an integer always can; a floating point number only when it is
+// neither an infinity nor a NaN once it is the double that number_json writes (JSON has no spelling for them, and a
+// writer would turn them into null).
+template <class V>
+constexpr bool is_finite_number(V value) {
+    if constexpr (std::is_floating_point_v<V>) {
+        const double wide = static_cast<double>(value);
+        return wide >= std::numeric_limits<double>::lowest() && wide <= std::numeric_limits<double>::max();
+    } else {
+        static_cast<void>(value);
+        return true;
+    }
+}
+
+// Called by the function that makes an option from a number it was given. Evaluated as a constant (the field list of a
+// Described specialisation is), a number that is not finite stops the compilation here; at run time nothing happens,
+// and the schema derivation (schema_of) refuses the option, naming the member.
+constexpr void refuse_when_constant(bool finite, const char* message) {
+    if (!finite && std::is_constant_evaluated()) {
+        throw std::invalid_argument(message);
+    }
+}
+
 // The JSON form of a value an option carries.
 template <class V>
 json option_json(const V& value) {
@@ -123,10 +148,16 @@ inline void set_keyword(json& schema, std::string_view keyword, json value) {
 // Field options. They add keywords to the member's schema and replace a keyword of the same name that the member's
 // type already gives. They document and constrain the schema only: decoding does not enforce them (validating a
 // value against the schema does).
+//
+// A number an option carries must be finite: JSON has no infinity and no NaN. An option made from one in a constant
+// expression (as the field list of a Described specialisation is) does not compile; one made at run time is refused
+// by schema_of with std::invalid_argument, which names the member and the option.
 
 template <class V>
 struct Minimum {
     V value;
+    static constexpr std::string_view keyword = "neomcp::minimum";
+    constexpr bool finite() const { return detail::is_finite_number(value); }
     template <class Member>
     static constexpr void check() {
         static_assert(detail::is_number_v<Member>, "neomcp::minimum applies to integer and floating point members only");
@@ -137,6 +168,8 @@ struct Minimum {
 template <class V>
 struct Maximum {
     V value;
+    static constexpr std::string_view keyword = "neomcp::maximum";
+    constexpr bool finite() const { return detail::is_finite_number(value); }
     template <class Member>
     static constexpr void check() {
         static_assert(detail::is_number_v<Member>, "neomcp::maximum applies to integer and floating point members only");
@@ -191,6 +224,13 @@ struct MaxItems {
 template <class V, std::size_t N>
 struct OneOf {
     std::array<V, N> values;
+    static constexpr std::string_view keyword = "neomcp::one_of";
+    constexpr bool finite() const {
+        for (const V& value : values) {
+            if (!detail::is_finite_number(value)) return false;
+        }
+        return true;
+    }
     template <class Member>
     static constexpr void check() {
         if constexpr (std::is_same_v<V, std::string_view>) {
@@ -213,6 +253,8 @@ struct OneOf {
 template <class V>
 struct DefaultValue {
     V value;
+    static constexpr std::string_view keyword = "neomcp::default_value";
+    constexpr bool finite() const { return detail::is_finite_number(value); }
     template <class Member>
     static constexpr void check() {
         if constexpr (std::is_same_v<V, bool>) {
@@ -262,12 +304,14 @@ struct HeaderMark {
 template <class V>
 constexpr Minimum<std::decay_t<V>> minimum(V value) {
     static_assert(detail::is_number_v<V>, "neomcp::minimum takes an integer or a floating point number");
+    detail::refuse_when_constant(detail::is_finite_number(value), "neomcp::minimum takes a finite number");
     return {value};
 }
 
 template <class V>
 constexpr Maximum<std::decay_t<V>> maximum(V value) {
     static_assert(detail::is_number_v<V>, "neomcp::maximum takes an integer or a floating point number");
+    detail::refuse_when_constant(detail::is_finite_number(value), "neomcp::maximum takes a finite number");
     return {value};
 }
 
@@ -286,7 +330,9 @@ constexpr auto one_of(Vs... values) {
         return OneOf<std::string_view, sizeof...(Vs)>{{std::string_view(values)...}};
     } else if constexpr (all_numbers) {
         using Common = std::common_type_t<Vs...>;
-        return OneOf<Common, sizeof...(Vs)>{{static_cast<Common>(values)...}};
+        OneOf<Common, sizeof...(Vs)> option{{static_cast<Common>(values)...}};
+        detail::refuse_when_constant(option.finite(), "neomcp::one_of takes finite numbers");
+        return option;
     } else {
         return OneOf<int, 0>{};
     }
@@ -296,7 +342,9 @@ constexpr HeaderName mirror_in_header(std::string_view name) { return {name}; }
 
 template <class V>
 constexpr DefaultValue<detail::option_value_t<V>> default_value(V value) {
-    return {static_cast<detail::option_value_t<V>>(value)};
+    DefaultValue<detail::option_value_t<V>> option{static_cast<detail::option_value_t<V>>(value)};
+    detail::refuse_when_constant(option.finite(), "neomcp::default_value takes a finite number");
+    return option;
 }
 
 // ---------------------------------------------------------------------------------------------------------------

@@ -42,6 +42,25 @@ neomcp_compile_case(2 TRUE)
 neomcp_compile_case(3 TRUE)
 neomcp_compile_case(4 TRUE)
 
+# A number that is not finite in the option of a member must not compile; the control case (0) must.
+function(neomcp_bounds_case case expect_failure)
+    set(target neomcp_compile_check_bounds${case})
+    add_library(${target} OBJECT EXCLUDE_FROM_ALL compile_check/describe_bounds.cpp)
+    target_compile_definitions(${target} PRIVATE NEOMCP_CASE=${case})
+    target_link_libraries(${target} PRIVATE neomcp::describe neojson::neojson)
+    neomcp_configure_target(${target})
+    add_test(NAME CompileCheck.DescribeBounds${case}
+             COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --config $<CONFIG> --target ${target})
+    if(expect_failure)
+        set_tests_properties(CompileCheck.DescribeBounds${case} PROPERTIES WILL_FAIL TRUE)
+    endif()
+endfunction()
+neomcp_bounds_case(0 FALSE)
+neomcp_bounds_case(1 TRUE)
+neomcp_bounds_case(2 TRUE)
+neomcp_bounds_case(3 TRUE)
+neomcp_bounds_case(4 TRUE)
+
 # ---- JSON Schema validator -------------------------------------------------------------------------------------------
 
 # The official JSON Schema test suite, used as data only: the tests parse its JSON files and nothing of it is built.

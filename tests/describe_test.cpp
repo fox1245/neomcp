@@ -63,6 +63,29 @@ struct Opt {
     std::optional<int> maybe;
 };
 
+// Members whose options carry a number that is not finite. The options are built as aggregates because their
+// functions refuse such a number in a constant expression.
+struct InfiniteMinimum {
+    double ok;
+    double bad;
+};
+struct NotANumberMaximum {
+    float bad;
+};
+struct InfiniteChoice {
+    double bad;
+};
+struct NotANumberDefault {
+    double bad;
+};
+struct HugeButFinite {
+    double d;
+    float f;
+};
+struct HoldsBadBound {
+    InfiniteMinimum inner;
+};
+
 struct AllOptional {
     std::optional<int> a;
     std::optional<std::string> b;
@@ -191,6 +214,49 @@ struct neomcp::Described<dt::Opt> {
         neomcp::field(&dt::Opt::color, "color", "", neomcp::one_of("red", "blue"), neomcp::default_value("green")),
         neomcp::field(&dt::Opt::verbose, "verbose", "", neomcp::default_value(true)),
         neomcp::field(&dt::Opt::maybe, "maybe", "", neomcp::minimum(0)));
+};
+
+template <>
+struct neomcp::Described<dt::InfiniteMinimum> {
+    static constexpr auto fields = neomcp::fields(
+        neomcp::field(&dt::InfiniteMinimum::ok, "ok", "", neomcp::minimum(-1.5)),
+        neomcp::field(&dt::InfiniteMinimum::bad, "bad", "",
+                      neomcp::Minimum<double>{-std::numeric_limits<double>::infinity()}));
+};
+
+template <>
+struct neomcp::Described<dt::NotANumberMaximum> {
+    static constexpr auto fields = neomcp::fields(
+        neomcp::field(&dt::NotANumberMaximum::bad, "bad", "",
+                      neomcp::Maximum<float>{std::numeric_limits<float>::quiet_NaN()}));
+};
+
+template <>
+struct neomcp::Described<dt::InfiniteChoice> {
+    static constexpr auto fields = neomcp::fields(
+        neomcp::field(&dt::InfiniteChoice::bad, "bad", "",
+                      neomcp::OneOf<double, 2>{{1.0, std::numeric_limits<double>::infinity()}}));
+};
+
+template <>
+struct neomcp::Described<dt::NotANumberDefault> {
+    static constexpr auto fields = neomcp::fields(
+        neomcp::field(&dt::NotANumberDefault::bad, "bad", "",
+                      neomcp::DefaultValue<double>{std::numeric_limits<double>::quiet_NaN()}));
+};
+
+template <>
+struct neomcp::Described<dt::HugeButFinite> {
+    static constexpr auto fields = neomcp::fields(
+        neomcp::field(&dt::HugeButFinite::d, "d", "", neomcp::minimum(std::numeric_limits<double>::lowest()),
+                      neomcp::maximum(std::numeric_limits<double>::max())),
+        neomcp::field(&dt::HugeButFinite::f, "f", "", neomcp::one_of(-std::numeric_limits<float>::max(), 0.0f),
+                      neomcp::default_value(std::numeric_limits<float>::max())));
+};
+
+template <>
+struct neomcp::Described<dt::HoldsBadBound> {
+    static constexpr auto fields = neomcp::fields(neomcp::field(&dt::HoldsBadBound::inner, "inner", ""));
 };
 
 template <>
@@ -362,6 +428,53 @@ TEST(DescribeSchema, EveryOptionKeyword) {
                  R"("required":["count","ratio","text","list","mode","level","color","verbose"],)" +
                  R"("additionalProperties":false})")
                     .c_str());
+}
+
+// A bound that is not a number would be written as null. The schema derivation (which is when a tool is registered)
+// refuses it with the member and the option named.
+template <class T>
+void expect_refused_option(const char* member, const char* option) {
+    try {
+        static_cast<void>(neomcp::schema_of<T>());
+    } catch (const std::invalid_argument& error) {
+        const std::string text = error.what();
+        EXPECT_NE(text.find(std::string("\"") + member + "\""), std::string::npos) << text;
+        EXPECT_NE(text.find(option), std::string::npos) << text;
+        return;
+    }
+    ADD_FAILURE() << "no std::invalid_argument for the option " << option << " of " << member;
+}
+
+TEST(DescribeSchema, ANumberThatIsNotFiniteIsRefusedWhenTheSchemaIsDerived) {
+    expect_refused_option<dt::InfiniteMinimum>("bad", "neomcp::minimum");
+    expect_refused_option<dt::NotANumberMaximum>("bad", "neomcp::maximum");
+    expect_refused_option<dt::InfiniteChoice>("bad", "neomcp::one_of");
+    expect_refused_option<dt::NotANumberDefault>("bad", "neomcp::default_value");
+    // Through a member that is a described struct: the member that holds the number is the one named.
+    expect_refused_option<dt::HoldsBadBound>("bad", "neomcp::minimum");
+}
+
+TEST(DescribeSchema, TheLargestFiniteNumbersAreAcceptedByEveryNumericOption) {
+    const json schema = neomcp::schema_of<dt::HugeButFinite>();
+    EXPECT_FALSE(schema.at("properties").at("d").at("minimum").is_null());
+    EXPECT_FALSE(schema.at("properties").at("d").at("maximum").is_null());
+    EXPECT_EQ(schema.at("properties").at("f").at("enum").at(0).get<double>(),
+              -static_cast<double>(std::numeric_limits<float>::max()));
+    EXPECT_EQ(schema.at("properties").at("f").at("default").get<double>(),
+              static_cast<double>(std::numeric_limits<float>::max()));
+}
+
+TEST(DescribeSchema, AnOptionMadeAtRunTimeFromANumberThatIsNotFiniteReportsIt) {
+    // The functions refuse such a number only in a constant expression (tests/compile_check/describe_bounds.cpp);
+    // at run time the option is made and says it is not finite, which is what schema_of looks at.
+    const volatile double infinity = std::numeric_limits<double>::infinity();
+    const volatile double not_a_number = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_FALSE(neomcp::minimum(infinity).finite());
+    EXPECT_FALSE(neomcp::maximum(not_a_number).finite());
+    EXPECT_FALSE(neomcp::one_of(1.0, infinity).finite());
+    EXPECT_FALSE(neomcp::default_value(-infinity).finite());
+    EXPECT_TRUE(neomcp::minimum(3).finite());
+    EXPECT_TRUE(neomcp::default_value("text").finite());
 }
 
 TEST(DescribeSchema, RequiredIsOmittedWhenEveryMemberIsOptional) {
