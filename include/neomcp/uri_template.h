@@ -19,7 +19,8 @@
 // The rules, stated so that one URI never matches one template in two ways:
 //  - Literal text of the template must appear in the URI exactly (case-sensitive, no normalisation).
 //  - The variables of an expression are separated by a literal comma, and two expressions are never adjacent
-//    (a literal lies between them), which unsupported() reports otherwise. Each variable that a literal follows,
+//    (a literal lies between them) unless the second is the query expression that ends the template; unsupported()
+//    reports any other adjacency. Each variable that a literal follows,
 //    and that is not the last variable of the template, takes the shortest value that lets that literal match next;
 //    the last variable takes everything up to the template's final literal. The match is decided in one pass over
 //    the URI and does not backtrack.
