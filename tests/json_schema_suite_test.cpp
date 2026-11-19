@@ -1,6 +1,6 @@
-// Runs the official JSON Schema validation test suite for the 2020-12 dialect (the files of validation/tests, not
-// optional/ or proposals/) against the validator. The suite is data only: its files are parsed here and nothing of
-// it is built.
+// Runs the official JSON Schema validation test suite for the 2020-12 dialect (the files of validation/tests, and
+// from optional/ the two files about regular expressions; not the rest of optional/ or proposals/) against the
+// validator. The suite is data only: its files are parsed here and nothing of it is built.
 //
 // Which cases apply to a dialect is decided by the suite's own `compatibility` and `tags` properties, following the
 // algorithm in the suite's README. Of the cases that apply, those the validator does not support by design are
@@ -148,6 +148,12 @@ TEST(JsonSchemaSuite, Draft2020_12) {
     }
     std::sort(files.begin(), files.end());
     ASSERT_FALSE(files.empty()) << "no test files in " << NEOMCP_JSON_SCHEMA_SUITE_DIR;
+    // The optional files that test the dialect of the regular expressions of `pattern` and `patternProperties`.
+    for (const char* name : {"ecmascript-regex.json", "non-bmp-regex.json"}) {
+        const fs::path path = fs::path(NEOMCP_JSON_SCHEMA_SUITE_DIR) / "optional" / name;
+        ASSERT_TRUE(fs::is_regular_file(path)) << path.string();
+        files.push_back(path);
+    }
 
     for (const fs::path& path : files) {
         const std::string file = path.filename().string();

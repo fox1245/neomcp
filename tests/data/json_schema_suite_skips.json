@@ -1,5 +1,5 @@
 {
-  "minimum_executed_tests": 1226,
+  "minimum_executed_tests": 1321,
   "skips": [
     {
       "file": "anchor.json",
@@ -150,21 +150,6 @@
       "file": "id.json",
       "group": "remote HTTP ref with nested absolute ref",
       "reason": "The schema references another document (a retrieval URI the suite serves from http://localhost:1234 or as an external schema). A reference is never fetched, so the schema is refused at compile."
-    },
-    {
-      "file": "pattern.json",
-      "group": "pattern with Unicode property escape requires unicode mode",
-      "reason": "The pattern uses a Unicode property escape (\\p{..}), which the ECMAScript 3 grammar of std::regex does not have; the validator refuses it before the regex engine sees it, on every platform."
-    },
-    {
-      "file": "pattern.json",
-      "group": "pattern with Unicode property escape",
-      "reason": "The pattern uses a Unicode property escape (\\p{..}), which the ECMAScript 3 grammar of std::regex does not have; the validator refuses it before the regex engine sees it, on every platform."
-    },
-    {
-      "file": "patternProperties.json",
-      "group": "patternProperties with Unicode property escape",
-      "reason": "The pattern uses a Unicode property escape (\\p{..}), which the ECMAScript 3 grammar of std::regex does not have; the validator refuses it before the regex engine sees it, on every platform."
     },
     {
       "file": "ref.json",
