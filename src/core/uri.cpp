@@ -1,4 +1,4 @@
-#include "schema/uri.h"
+#include "core/uri.h"
 
 #include <string_view>
 #include <utility>

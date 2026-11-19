@@ -92,25 +92,27 @@ target_include_directories(neomcp_describe INTERFACE $<BUILD_INTERFACE:${CMAKE_C
 target_link_libraries(neomcp_describe INTERFACE neojson::neojson)
 target_compile_features(neomcp_describe INTERFACE cxx_std_20)
 
-# JSON Schema 2020-12 validation. It depends on the JSON value type and, for patterns, on RE2 (not visible in the headers).
+# JSON Schema 2020-12 validation. It depends on the JSON value type, on RE2 for patterns (not visible in the headers)
+# and, for resolving $id and $ref, on the RFC 3986 URI code of the protocol core (internal; see below).
 add_library(neomcp_schema
     src/schema/compile.cpp
     src/schema/evaluate.cpp
     src/schema/pattern.cpp
     src/schema/pattern_translate.cpp
-    src/schema/uri.cpp
     src/schema/validator.cpp
     src/schema/value.cpp)
 add_library(neomcp::schema ALIAS neomcp_schema)
 target_include_directories(neomcp_schema
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(neomcp_schema PUBLIC neojson::neojson PRIVATE re2::re2)
+target_link_libraries(neomcp_schema PUBLIC neojson::neojson PRIVATE re2::re2 neomcp::core)
 target_compile_features(neomcp_schema PUBLIC cxx_std_20)
 neomcp_configure_target(neomcp_schema)
 
 # The protocol core: JSON-RPC messages, the revision-independent model, the members filter, the mechanisms and their
-# registry, the session engine and the in-memory test peer. It does no I/O of its own.
+# registry, the session engine, the in-memory test peer and the RFC 3986 URI code (internal, shared with the JSON
+# Schema validator, which links this target). It does no I/O of its own. The core depends on neither the validator nor
+# the server, so the validator can link it without a cycle.
 find_package(Threads REQUIRED)
 
 # std::stop_token is part of C++20, and a standard library may still ship it behind a flag. The public headers use
@@ -161,6 +163,7 @@ add_library(neomcp_core
     src/core/headers.cpp
     src/core/jsonrpc.cpp
     src/core/model.cpp
+    src/core/uri.cpp
     src/core/uri_template.cpp
     src/core/wire.cpp
     src/core/mechanisms.cpp

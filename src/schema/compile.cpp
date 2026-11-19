@@ -16,9 +16,9 @@
 #include <utility>
 #include <vector>
 
+#include "core/uri.h"
 #include "schema/internal.h"
 #include "schema/pattern.h"
-#include "schema/uri.h"
 #include "schema/value.h"
 
 namespace neomcp::json_schema::detail {
