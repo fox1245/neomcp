@@ -166,6 +166,7 @@ add_library(neomcp_core
     src/core/uri.cpp
     src/core/uri_template.cpp
     src/core/wire.cpp
+    src/core/wire_read.cpp
     src/core/mechanisms.cpp
     src/core/input.cpp
     src/core/request_state.cpp

@@ -5,7 +5,11 @@
 #include <utility>
 #include <variant>
 
+#include "core/wire_names.h"
+
 namespace neomcp {
+
+namespace wire = detail::wire;
 
 bool keep_members(json& object, std::string_view type_name, const profile::Profile& profile) {
     const profile::Type* type = profile.type(type_name);
@@ -26,32 +30,18 @@ bool has_content_kind(ContentKind kind, const profile::Profile& profile) {
 
 namespace {
 
-std::string_view to_string(IconTheme theme) {
-    switch (theme) {
-        case IconTheme::light: return "light";
-        case IconTheme::dark: return "dark";
-    }
-    return {};
+json& at(json& object, std::string_view name) { return object[std::string(name)]; }
+
+void put(json& object, std::string_view name, const std::optional<std::string>& value) {
+    if (value) at(object, name) = *value;
 }
 
-std::string_view to_string(Role role) {
-    switch (role) {
-        case Role::user: return "user";
-        case Role::assistant: return "assistant";
-    }
-    return {};
+void put(json& object, std::string_view name, const std::optional<bool>& value) {
+    if (value) at(object, name) = *value;
 }
 
-void put(json& object, const char* name, const std::optional<std::string>& value) {
-    if (value) object[name] = *value;
-}
-
-void put(json& object, const char* name, const std::optional<bool>& value) {
-    if (value) object[name] = *value;
-}
-
-void put(json& object, const char* name, const std::optional<json>& value) {
-    if (value) object[name] = *value;
+void put(json& object, std::string_view name, const std::optional<json>& value) {
+    if (value) at(object, name) = *value;
 }
 
 json icons(const std::vector<Icon>& list, const profile::Profile& profile) {
@@ -64,10 +54,10 @@ json icons(const std::vector<Icon>& list, const profile::Profile& profile) {
 // replaces one of them, then annotations and _meta.
 json block_base(ContentKind kind, const json& extra) {
     json object = json::object();
-    object["type"] = std::string(wire_name(kind));
+    at(object, wire::type_member) = std::string(wire_name(kind));
     if (const auto* members = extra.get_ptr<const json::object_t*>()) {
         for (const auto& [name, value] : *members) {
-            if (name != "type") object[name] = value;
+            if (name != wire::type_member) object[name] = value;
         }
     }
     return object;
@@ -77,80 +67,80 @@ json annotations_value(const ContentAnnotations& annotations, const profile::Pro
     json value = json::object();
     if (!annotations.audience.empty()) {
         json audience = json::array();
-        for (const Role role : annotations.audience) audience.push_back(std::string(to_string(role)));
-        value["audience"] = std::move(audience);
+        for (const Role role : annotations.audience) audience.push_back(std::string(wire::role_name(role)));
+        at(value, wire::audience_member) = std::move(audience);
     }
-    if (annotations.priority) value["priority"] = *annotations.priority;
-    put(value, "lastModified", annotations.last_modified);
-    keep_members(value, "Annotations", profile);
+    if (annotations.priority) at(value, wire::priority_member) = *annotations.priority;
+    put(value, wire::last_modified_member, annotations.last_modified);
+    keep_members(value, wire::annotations_type, profile);
     return value;
 }
 
 void block_common(json& object, const std::optional<ContentAnnotations>& annotations, const std::optional<json>& meta,
                   const profile::Profile& profile) {
-    if (annotations) object["annotations"] = annotations_value(*annotations, profile);
-    put(object, "_meta", meta);
+    if (annotations) at(object, wire::annotations_member) = annotations_value(*annotations, profile);
+    put(object, wire::meta_member, meta);
 }
 
 json resource_contents(const TextResourceContents& contents, const profile::Profile& profile) {
     json value = json::object();
-    value["uri"] = contents.uri;
-    put(value, "mimeType", contents.mime_type);
-    value["text"] = contents.text;
-    put(value, "_meta", contents.meta);
-    keep_members(value, "TextResourceContents", profile);
+    at(value, wire::uri_member) = contents.uri;
+    put(value, wire::mime_type_member, contents.mime_type);
+    at(value, wire::text_member) = contents.text;
+    put(value, wire::meta_member, contents.meta);
+    keep_members(value, wire::text_resource_contents_type, profile);
     return value;
 }
 
 json resource_contents(const BlobResourceContents& contents, const profile::Profile& profile) {
     json value = json::object();
-    value["uri"] = contents.uri;
-    put(value, "mimeType", contents.mime_type);
-    value["blob"] = contents.blob;
-    put(value, "_meta", contents.meta);
-    keep_members(value, "BlobResourceContents", profile);
+    at(value, wire::uri_member) = contents.uri;
+    put(value, wire::mime_type_member, contents.mime_type);
+    at(value, wire::blob_member) = contents.blob;
+    put(value, wire::meta_member, contents.meta);
+    keep_members(value, wire::blob_resource_contents_type, profile);
     return value;
 }
 
 json block_value(const TextContent& block, const profile::Profile& profile) {
     json object = block_base(block.kind, block.extra);
-    object["text"] = block.text;
+    at(object, wire::text_member) = block.text;
     block_common(object, block.annotations, block.meta, profile);
     return object;
 }
 
 json block_value(const ImageContent& block, const profile::Profile& profile) {
     json object = block_base(block.kind, block.extra);
-    object["data"] = block.data;
-    object["mimeType"] = block.mime_type;
+    at(object, wire::data_member) = block.data;
+    at(object, wire::mime_type_member) = block.mime_type;
     block_common(object, block.annotations, block.meta, profile);
     return object;
 }
 
 json block_value(const AudioContent& block, const profile::Profile& profile) {
     json object = block_base(block.kind, block.extra);
-    object["data"] = block.data;
-    object["mimeType"] = block.mime_type;
+    at(object, wire::data_member) = block.data;
+    at(object, wire::mime_type_member) = block.mime_type;
     block_common(object, block.annotations, block.meta, profile);
     return object;
 }
 
 json block_value(const ResourceLink& block, const profile::Profile& profile) {
     json object = block_base(block.kind, block.extra);
-    object["uri"] = block.uri;
-    object["name"] = block.name;
-    put(object, "title", block.title);
-    put(object, "description", block.description);
-    put(object, "mimeType", block.mime_type);
-    if (block.size) object["size"] = *block.size;
-    if (!block.icons.empty()) object["icons"] = icons(block.icons, profile);
+    at(object, wire::uri_member) = block.uri;
+    at(object, wire::name_member) = block.name;
+    put(object, wire::title_member, block.title);
+    put(object, wire::description_member, block.description);
+    put(object, wire::mime_type_member, block.mime_type);
+    if (block.size) at(object, wire::size_member) = *block.size;
+    if (!block.icons.empty()) at(object, wire::icons_member) = icons(block.icons, profile);
     block_common(object, block.annotations, block.meta, profile);
     return object;
 }
 
 json block_value(const EmbeddedResource& block, const profile::Profile& profile) {
     json object = block_base(block.kind, block.extra);
-    object["resource"] = std::visit([&](const auto& contents) { return resource_contents(contents, profile); },
+    at(object, wire::resource_member) = std::visit([&](const auto& contents) { return resource_contents(contents, profile); },
                                     block.resource);
     block_common(object, block.annotations, block.meta, profile);
     return object;
@@ -160,52 +150,52 @@ json block_value(const EmbeddedResource& block, const profile::Profile& profile)
 
 json to_wire(const Icon& icon, const profile::Profile& profile) {
     json object = json::object();
-    object["src"] = icon.src;
-    put(object, "mimeType", icon.mime_type);
+    at(object, wire::src_member) = icon.src;
+    put(object, wire::mime_type_member, icon.mime_type);
     if (!icon.sizes.empty()) {
         json sizes = json::array();
         for (const auto& size : icon.sizes) sizes.push_back(size);
-        object["sizes"] = std::move(sizes);
+        at(object, wire::sizes_member) = std::move(sizes);
     }
-    if (icon.theme) object["theme"] = std::string(to_string(*icon.theme));
-    keep_members(object, "Icon", profile);
+    if (icon.theme) at(object, wire::theme_member) = std::string(wire::theme_name(*icon.theme));
+    keep_members(object, wire::icon_type, profile);
     return object;
 }
 
 json to_wire(const Implementation& implementation, const profile::Profile& profile) {
     json object = json::object();
-    object["name"] = implementation.name;
-    put(object, "title", implementation.title);
-    object["version"] = implementation.version;
-    put(object, "description", implementation.description);
-    put(object, "websiteUrl", implementation.website_url);
-    if (!implementation.icons.empty()) object["icons"] = icons(implementation.icons, profile);
-    keep_members(object, "Implementation", profile);
+    at(object, wire::name_member) = implementation.name;
+    put(object, wire::title_member, implementation.title);
+    at(object, wire::version_member) = implementation.version;
+    put(object, wire::description_member, implementation.description);
+    put(object, wire::website_url_member, implementation.website_url);
+    if (!implementation.icons.empty()) at(object, wire::icons_member) = icons(implementation.icons, profile);
+    keep_members(object, wire::implementation_type, profile);
     return object;
 }
 
 json to_wire(const ToolAnnotations& annotations, const profile::Profile& profile) {
     json object = json::object();
-    put(object, "title", annotations.title);
-    put(object, "readOnlyHint", annotations.read_only_hint);
-    put(object, "destructiveHint", annotations.destructive_hint);
-    put(object, "idempotentHint", annotations.idempotent_hint);
-    put(object, "openWorldHint", annotations.open_world_hint);
-    keep_members(object, "ToolAnnotations", profile);
+    put(object, wire::title_member, annotations.title);
+    put(object, wire::read_only_hint_member, annotations.read_only_hint);
+    put(object, wire::destructive_hint_member, annotations.destructive_hint);
+    put(object, wire::idempotent_hint_member, annotations.idempotent_hint);
+    put(object, wire::open_world_hint_member, annotations.open_world_hint);
+    keep_members(object, wire::tool_annotations_type, profile);
     return object;
 }
 
 json to_wire(const ToolDefinition& tool, const profile::Profile& profile) {
     json object = json::object();
-    object["name"] = tool.name;
-    put(object, "title", tool.title);
-    put(object, "description", tool.description);
-    object["inputSchema"] = tool.input_schema;
-    put(object, "outputSchema", tool.output_schema);
-    if (tool.annotations) object["annotations"] = to_wire(*tool.annotations, profile);
-    if (!tool.icons.empty()) object["icons"] = icons(tool.icons, profile);
-    put(object, "_meta", tool.meta);
-    keep_members(object, "Tool", profile);
+    at(object, wire::name_member) = tool.name;
+    put(object, wire::title_member, tool.title);
+    put(object, wire::description_member, tool.description);
+    at(object, wire::input_schema_member) = tool.input_schema;
+    put(object, wire::output_schema_member, tool.output_schema);
+    if (tool.annotations) at(object, wire::annotations_member) = to_wire(*tool.annotations, profile);
+    if (!tool.icons.empty()) at(object, wire::icons_member) = icons(tool.icons, profile);
+    put(object, wire::meta_member, tool.meta);
+    keep_members(object, wire::tool_type, profile);
     return object;
 }
 
@@ -226,32 +216,32 @@ json to_wire(const ContentBlock& block, const profile::Profile& profile) {
 
 json to_wire(const ResourceDefinition& resource, const profile::Profile& profile) {
     json object = json::object();
-    object["uri"] = resource.uri;
-    object["name"] = resource.name;
-    put(object, "title", resource.title);
-    put(object, "description", resource.description);
-    put(object, "mimeType", resource.mime_type);
-    if (resource.size) object["size"] = *resource.size;
-    if (resource.annotations) object["annotations"] = annotations_value(*resource.annotations, profile);
-    if (!resource.icons.empty()) object["icons"] = icons(resource.icons, profile);
-    put(object, "_meta", resource.meta);
-    keep_members(object, "Resource", profile);
+    at(object, wire::uri_member) = resource.uri;
+    at(object, wire::name_member) = resource.name;
+    put(object, wire::title_member, resource.title);
+    put(object, wire::description_member, resource.description);
+    put(object, wire::mime_type_member, resource.mime_type);
+    if (resource.size) at(object, wire::size_member) = *resource.size;
+    if (resource.annotations) at(object, wire::annotations_member) = annotations_value(*resource.annotations, profile);
+    if (!resource.icons.empty()) at(object, wire::icons_member) = icons(resource.icons, profile);
+    put(object, wire::meta_member, resource.meta);
+    keep_members(object, wire::resource_type, profile);
     return object;
 }
 
 json to_wire(const ResourceTemplateDefinition& resource_template, const profile::Profile& profile) {
     json object = json::object();
-    object["uriTemplate"] = resource_template.uri_template;
-    object["name"] = resource_template.name;
-    put(object, "title", resource_template.title);
-    put(object, "description", resource_template.description);
-    put(object, "mimeType", resource_template.mime_type);
+    at(object, wire::uri_template_member) = resource_template.uri_template;
+    at(object, wire::name_member) = resource_template.name;
+    put(object, wire::title_member, resource_template.title);
+    put(object, wire::description_member, resource_template.description);
+    put(object, wire::mime_type_member, resource_template.mime_type);
     if (resource_template.annotations) {
-        object["annotations"] = annotations_value(*resource_template.annotations, profile);
+        at(object, wire::annotations_member) = annotations_value(*resource_template.annotations, profile);
     }
-    if (!resource_template.icons.empty()) object["icons"] = icons(resource_template.icons, profile);
-    put(object, "_meta", resource_template.meta);
-    keep_members(object, "ResourceTemplate", profile);
+    if (!resource_template.icons.empty()) at(object, wire::icons_member) = icons(resource_template.icons, profile);
+    put(object, wire::meta_member, resource_template.meta);
+    keep_members(object, wire::resource_template_type, profile);
     return object;
 }
 
@@ -263,52 +253,52 @@ json to_wire(const ReadResult& result, const profile::Profile& profile) {
     json object = json::object();
     json contents = json::array();
     for (const auto& item : result.contents) contents.push_back(to_wire(item, profile));
-    object["contents"] = std::move(contents);
-    put(object, "_meta", result.meta);
-    keep_members(object, "ReadResourceResult", profile);
+    at(object, wire::contents_member) = std::move(contents);
+    put(object, wire::meta_member, result.meta);
+    keep_members(object, wire::read_result_type, profile);
     return object;
 }
 
 json to_wire(const PromptDefinition& prompt, const profile::Profile& profile) {
     json object = json::object();
-    object["name"] = prompt.name;
-    put(object, "title", prompt.title);
-    put(object, "description", prompt.description);
+    at(object, wire::name_member) = prompt.name;
+    put(object, wire::title_member, prompt.title);
+    put(object, wire::description_member, prompt.description);
     if (!prompt.arguments.empty()) {
         json arguments = json::array();
         for (const auto& argument : prompt.arguments) {
             json entry = json::object();
-            entry["name"] = argument.name;
-            put(entry, "title", argument.title);
-            put(entry, "description", argument.description);
-            entry["required"] = argument.required;
-            keep_members(entry, "PromptArgument", profile);
+            at(entry, wire::name_member) = argument.name;
+            put(entry, wire::title_member, argument.title);
+            put(entry, wire::description_member, argument.description);
+            at(entry, wire::required_member) = argument.required;
+            keep_members(entry, wire::prompt_argument_type, profile);
             arguments.push_back(std::move(entry));
         }
-        object["arguments"] = std::move(arguments);
+        at(object, wire::arguments_member) = std::move(arguments);
     }
-    if (!prompt.icons.empty()) object["icons"] = icons(prompt.icons, profile);
-    put(object, "_meta", prompt.meta);
-    keep_members(object, "Prompt", profile);
+    if (!prompt.icons.empty()) at(object, wire::icons_member) = icons(prompt.icons, profile);
+    put(object, wire::meta_member, prompt.meta);
+    keep_members(object, wire::prompt_type, profile);
     return object;
 }
 
 json to_wire(const PromptMessage& message, const profile::Profile& profile) {
     json object = json::object();
-    object["role"] = std::string(to_string(message.role));
-    object["content"] = to_wire(message.content, profile);
-    keep_members(object, "PromptMessage", profile);
+    at(object, wire::role_member) = std::string(wire::role_name(message.role));
+    at(object, wire::content_member) = to_wire(message.content, profile);
+    keep_members(object, wire::prompt_message_type, profile);
     return object;
 }
 
 json to_wire(const PromptResult& result, const profile::Profile& profile) {
     json object = json::object();
-    put(object, "description", result.description);
+    put(object, wire::description_member, result.description);
     json messages = json::array();
     for (const auto& message : result.messages) messages.push_back(to_wire(message, profile));
-    object["messages"] = std::move(messages);
-    put(object, "_meta", result.meta);
-    keep_members(object, "GetPromptResult", profile);
+    at(object, wire::messages_member) = std::move(messages);
+    put(object, wire::meta_member, result.meta);
+    keep_members(object, wire::prompt_result_type, profile);
     return object;
 }
 
@@ -318,21 +308,21 @@ json to_wire(const CompletionResult& result, const profile::Profile& profile) {
     json values = json::array();
     for (std::size_t i = 0; i < kept; ++i) values.push_back(result.values[i]);
     json completion = json::object();
-    completion["values"] = std::move(values);
+    at(completion, wire::values_member) = std::move(values);
     if (result.total) {
-        completion["total"] = *result.total;
+        at(completion, wire::total_member) = *result.total;
     } else if (truncated) {
-        completion["total"] = static_cast<std::uint64_t>(result.values.size());
+        at(completion, wire::total_member) = static_cast<std::uint64_t>(result.values.size());
     }
     if (truncated) {
-        completion["hasMore"] = true;
+        at(completion, wire::has_more_member) = true;
     } else if (result.has_more) {
-        completion["hasMore"] = *result.has_more;
+        at(completion, wire::has_more_member) = *result.has_more;
     }
     json object = json::object();
-    object["completion"] = std::move(completion);
-    put(object, "_meta", result.meta);
-    keep_members(object, "CompleteResult", profile);
+    at(object, wire::completion_member) = std::move(completion);
+    put(object, wire::meta_member, result.meta);
+    keep_members(object, wire::complete_result_type, profile);
     return object;
 }
 
@@ -340,11 +330,11 @@ json to_wire(const ToolResult& result, const profile::Profile& profile) {
     json object = json::object();
     json content = json::array();
     for (const auto& block : result.content) content.push_back(to_wire(block, profile));
-    object["content"] = std::move(content);
-    put(object, "structuredContent", result.structured_content);
-    if (result.is_error) object["isError"] = true;
-    put(object, "_meta", result.meta);
-    keep_members(object, "CallToolResult", profile);
+    at(object, wire::content_member) = std::move(content);
+    put(object, wire::structured_content_member, result.structured_content);
+    if (result.is_error) at(object, wire::is_error_member) = true;
+    put(object, wire::meta_member, result.meta);
+    keep_members(object, wire::tool_result_type, profile);
     return object;
 }
 
