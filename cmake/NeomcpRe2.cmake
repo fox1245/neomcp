@@ -5,6 +5,8 @@
 # Pinned by commit of a release tag:
 #   RE2     2025-11-05   (commit 927f5d53caf8111721e734cf24724686bb745f55)
 #   Abseil  20260817.0   (commit 2065f4ded0558c6f89fee67c8e5228feb4eb960e)
+# RE2's own module file asks for Abseil 20250512.1 or newer; the newest release is taken, where corrections land.
+# RE2 still uses two interfaces that this Abseil marks as deprecated, which shows as warnings in RE2's own sources.
 if(NOT TARGET re2::re2)
     include(FetchContent)
 

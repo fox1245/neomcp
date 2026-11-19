@@ -44,7 +44,7 @@ constexpr std::size_t longest = 64;
 json arguments_of(std::size_t letters) { return json{{"host", std::string(letters, 'a') + "!"}}; }
 
 // The number of letters whose check takes `slow` or more here, or `longest` when none up to it does.
-std::size_t crafted_letters() {
+std::size_t slowest_letters() {
     auto made = neomcp::json_schema::Validator::compile(json::parse(schema));
     const auto& validator = std::get<neomcp::json_schema::Validator>(made);
     for (std::size_t n = 12; n <= longest; n += 2) {
@@ -77,8 +77,8 @@ std::shared_ptr<httplib::Client> client_for(std::uint16_t port) {
     return client;
 }
 
-TEST(HttpPatternCheck, ACallWithAShortCraftedArgumentDoesNotHoldTheServerAfterItsCallerLeft) {
-    const std::size_t letters = crafted_letters();
+TEST(HttpPatternCheck, ACallWhoseShortArgumentIsCostlyToCheckDoesNotHoldTheServerAfterItsCallerLeft) {
+    const std::size_t letters = slowest_letters();
 
     neomcp::Server server(neomcp::ServerOptions{.name = "pattern-test", .version = "0.0.1"});
     neomcp::ToolDefinition lookup;
@@ -99,12 +99,12 @@ TEST(HttpPatternCheck, ACallWithAShortCraftedArgumentDoesNotHoldTheServerAfterIt
     const std::uint16_t port = *started.value;
 
     const auto caller = client_for(port);
-    auto crafted = std::async(std::launch::async, [caller, letters] {
+    auto costly = std::async(std::launch::async, [caller, letters] {
         const json params{{"name", "lookup"}, {"arguments", arguments_of(letters)}};
         return caller->Post(path, modern_headers("tools/call", "lookup"), modern_request(1, "tools/call", params),
                             "application/json");
     });
-    std::this_thread::sleep_for(head_start);  // the crafted call reaches the worker first
+    std::this_thread::sleep_for(head_start);  // the costly call reaches the worker first
     caller->stop();                           // and its caller leaves
 
     const auto start = Clock::now();
@@ -115,7 +115,7 @@ TEST(HttpPatternCheck, ACallWithAShortCraftedArgumentDoesNotHoldTheServerAfterIt
     EXPECT_EQ(listed->status, 200);
     EXPECT_LT(waited, 100ms) << "another client's tools/list waited " << waited.count() << " ms for a call with a "
                              << letters + 1 << "-byte argument whose caller had left";
-    (void)crafted.get();
+    (void)costly.get();
 }
 
 }  // namespace
