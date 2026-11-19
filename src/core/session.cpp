@@ -2747,7 +2747,7 @@ void SessionCore::log(const std::shared_ptr<CallState>& call, LogLevel level, js
 // Output
 
 bool SessionCore::enqueue(Queued queued) {
-    if (closed_) return false;
+    if (closed_ || broken_) return false;  // a sink that threw is not called again, not even before close() ran
     if (queued.unit) {
         UnitState& unit = *queued.unit;
         if (unit.finished || unit.abandoned) return false;  // nothing follows the last output of a unit
