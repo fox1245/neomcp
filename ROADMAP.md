@@ -29,8 +29,7 @@ Last updated: 2026-11-20.
   (`neomcp/http/headers.h`) and the authority parser (`neomcp/http/authority.h`) in headers that include nothing of
   the server.
 - **The reading half of the wire code** (`neomcp/wire_read.h`): readers for everything a server writes, the inverses
-  for input requests, and the encoder for mirrored parameter headers. Its tests have not yet been checked by
-  breaking the code on purpose.
+  for input requests, and the encoder for mirrored parameter headers.
 - **The client halves of the mechanisms** (`neomcp/client/mechanism.h`, target `neomcp::client`): one client half per
   name the profiles declare, each tested against its server half and against what a session writes, and the
   registry that selects them per profile and transport.
