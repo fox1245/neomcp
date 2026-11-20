@@ -179,6 +179,7 @@ struct HttpClientDefaults {
     static constexpr std::size_t max_session_id_bytes = 1024;
     static constexpr std::chrono::milliseconds connect_timeout{10'000};
     static constexpr std::chrono::milliseconds stream_idle_timeout{300'000};
+    static constexpr std::chrono::milliseconds retry_delay{1'000};
     static constexpr std::chrono::milliseconds max_retry_delay{60'000};
     static constexpr std::size_t max_resumptions = 3;
     static constexpr std::size_t max_redirects = 5;
@@ -208,16 +209,24 @@ struct HttpEndpoint {
     std::chrono::milliseconds connect_timeout = HttpClientDefaults::connect_timeout;
     // A stream that carries no byte for this long is taken as broken. Default 5 min.
     std::chrono::milliseconds stream_idle_timeout = HttpClientDefaults::stream_idle_timeout;
+    // Under a revision whose streams may be resumed, an event stream that ends before the answer it carries, after it
+    // named an event id, is resumed (a GET that names the last id) once the server's advised wait passed, never
+    // earlier; this is the wait when the server advised none. The stream of the connection is opened again the same
+    // way after it was lost, and no sooner than this when it carried no message. Default 1 s.
+    std::chrono::milliseconds retry_delay = HttpClientDefaults::retry_delay;
     // A server that advises waiting longer than this before a stream is resumed is not waited for: the request fails
-    // stream_lost. Default 60 s.
+    // stream_lost (and the stream of the connection is given up for the session). Default 60 s.
     std::chrono::milliseconds max_retry_delay = HttpClientDefaults::max_retry_delay;
-    // Resumptions of one stream that bring no new event. Default 3.
+    // Resumptions of one request's stream in a row that bring no new message; one more fails the request
+    // stream_lost. For the stream of the connection: reopens in a row that do not establish it again, after which it
+    // is given up for the session. Default 3.
     std::size_t max_resumptions = HttpClientDefaults::max_resumptions;
     // Redirects followed for one request (only to the same origin, with the method kept). Default 5.
     std::size_t max_redirects = HttpClientDefaults::max_redirects;
     // The older transport: how long the first event, which names where messages go, may take. Default 10 s.
     std::chrono::milliseconds endpoint_timeout = HttpClientDefaults::endpoint_timeout;
-    // The request that ends a session when the client closes. Default 2 s.
+    // The request that ends a session when the client closes (where the revision ends sessions that way); the client
+    // waits for its answer at most this long, and takes any answer. Default 2 s.
     std::chrono::milliseconds delete_timeout = HttpClientDefaults::delete_timeout;
 };
 

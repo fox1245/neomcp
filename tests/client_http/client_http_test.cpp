@@ -100,6 +100,71 @@ TEST_P(RoundTrip, CallsTheLibrarysServer) {
     EXPECT_TRUE(client->close());
 }
 
+neomcp::ClientOptions options_for(const std::string& revision) {
+    return revision == "all" ? every_revision() : client_test::only({revision});
+}
+
+// The server asks the client while a call is served: a request of its own on the call's stream where the revision
+// sends requests, a result that asks where the revision asks so.
+TEST_P(RoundTrip, AsksTheClientForInput) {
+    OwnServer own;
+    neomcp::ClientOptions options = options_for(GetParam());
+    options.handlers.form([](const neomcp::ElicitationForm&) {
+        return neomcp::ElicitationAnswer{neomcp::ElicitationAction::accept,
+                                         json{{"username", "ada"}, {"email", "ada@example.com"}}};
+    });
+    options.handlers.sampling([](const neomcp::SamplingRequest&) {
+        neomcp::SamplingAnswer answer;
+        answer.content = json{{"type", "text"}, {"text", "Paris"}};
+        answer.model = "scripted";
+        return answer;
+    });
+    auto client = neomcp::Client::open(std::move(options), http_rig::endpoint(own.url()));
+    ASSERT_TRUE(client) << client.error().message;
+    const auto sampled = client->call_tool("test_sampling", json{{"prompt", "The capital of France?"}});
+    ASSERT_TRUE(sampled) << sampled.error().message;
+    EXPECT_EQ(text_of(*sampled), "LLM response: Paris");
+    const neomcp::profile::ProfilePtr governing = neomcp::profile::builtin(client->verdict()->revision);
+    if (governing->request("elicitation/create") != nullptr || governing->input_request("elicitation/create")) {
+        const auto asked = client->call_tool("test_elicitation", json{{"message", "Who are you?"}});
+        ASSERT_TRUE(asked) << asked.error().message;
+        EXPECT_NE(text_of(*asked).find("action=accept"), std::string::npos) << text_of(*asked);
+        EXPECT_NE(text_of(*asked).find("ada@example.com"), std::string::npos) << text_of(*asked);
+    }
+    EXPECT_TRUE(client->close());
+}
+
+TEST_P(RoundTrip, ReportsTheProgressOfACall) {
+    OwnServer own;
+    auto client = neomcp::Client::open(options_for(GetParam()), http_rig::endpoint(own.url()));
+    ASSERT_TRUE(client) << client.error().message;
+    std::atomic<int> reports{0};
+    neomcp::RequestOptions call;
+    call.on_progress = [&reports](const neomcp::Progress&) { ++reports; };
+    const auto done = client->call_tool("test_tool_with_progress", json::object(), call);
+    ASSERT_TRUE(done) << done.error().message;
+    EXPECT_EQ(text_of(*done), "Progress test completed");
+    EXPECT_EQ(reports.load(), 3);
+    EXPECT_TRUE(client->close());
+}
+
+// Under a revision with a handshake the changes come on the stream of the connection, which the listener opens.
+TEST_P(RoundTrip, HearsOfAChangeOfTheTools) {
+    OwnServer own;
+    auto client = neomcp::Client::open(options_for(GetParam()), http_rig::endpoint(own.url()));
+    ASSERT_TRUE(client) << client.error().message;
+    neomcp::ChangeFilter filter;
+    filter.tools_list = true;
+    auto subscription = client->listen(filter);
+    ASSERT_TRUE(subscription) << subscription.error().message;
+    const auto triggered = client->call_tool("test_trigger_tool_change");
+    ASSERT_TRUE(triggered) << triggered.error().message;
+    const auto change = subscription->next();
+    ASSERT_TRUE(change) << change.error().message;
+    EXPECT_EQ(change->kind, neomcp::ChangeKind::tools_list);
+    EXPECT_TRUE(client->close());
+}
+
 // Every revision that defines Streamable HTTP, and all of them at once (the probe decides).
 INSTANTIATE_TEST_SUITE_P(ClientHttp, RoundTrip,
                          ::testing::Values("2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28", "all"),

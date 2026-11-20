@@ -4,7 +4,12 @@
 // The transport runs on libcurl, which no header of neomcp includes. It sends every message of the client as one POST
 // to the endpoint's URL, with `Content-Type: application/json`, `Accept: application/json, text/event-stream` and the
 // header fields the client's engine writes for the message, and reads the answer as one JSON body or as an event
-// stream. It follows a redirect only with status 307 or 308, only to the endpoint's origin and with the method kept,
+// stream. Under a revision with sessions it sends the session id of the handshake's answer on every later request,
+// opens a new session when the server no longer knows that one, and ends the session with a DELETE when the client
+// closes. Where the revision offers it and the client needs it, it holds the stream on which the server speaks outside
+// any request (a GET), and it resumes an event stream that ends before its answer (a GET that names the last event
+// id), as HttpEndpoint describes. It follows a redirect only with status 307 or 308, only to the endpoint's origin and
+// with the method kept,
 // at most HttpEndpoint::max_redirects times. Certificates are verified as libcurl verifies them, against the system's
 // authorities or HttpEndpoint::ca_file; there is no option that turns verification off. Proxies are those of the
 // environment unless HttpEndpoint::proxy says otherwise.
@@ -24,9 +29,10 @@ namespace neomcp {
 
 // One request of the transport, as the authorizer sees it.
 struct HttpRequestInfo {
-    std::string method;  // the HTTP method: POST (later also GET and DELETE)
+    std::string method;  // the HTTP method: POST, GET (the stream of the connection, a resumption) or DELETE
     std::string url;     // where it goes
-    UnitId unit = connection_unit;  // the engine's unit the request carries
+    UnitId unit = connection_unit;  // the engine's unit the request carries (connection_unit for the stream of the
+                                    // connection; the transport's own for the DELETE that ends a session)
 };
 
 // Gives the requests of an HTTP transport the authorization a server asks for, and hears every refusal for want of

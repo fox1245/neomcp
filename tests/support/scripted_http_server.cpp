@@ -174,6 +174,10 @@ Reply& Reply::pause(std::chrono::milliseconds duration) {
     steps.emplace_back(Pause{duration});
     return *this;
 }
+Reply& Reply::run(std::function<void()> action) {
+    steps.emplace_back(Run{std::move(action)});
+    return *this;
+}
 
 std::string head(int status, const Fields& fields, std::optional<std::size_t> content_length) {
     std::string text = "HTTP/1.1 " + std::to_string(status) + " " + reason_of(status) + "\r\n";
@@ -259,6 +263,7 @@ struct ScriptedHttpServer::Impl {
         const std::size_t head_size = asio::read_until(*socket, buffer, head_end, error);
         if (error) return;
         Request request;
+        request.arrived = std::chrono::steady_clock::now();
         {
             const auto data = buffer.data();
             const std::string all(asio::buffers_begin(data), asio::buffers_end(data));
@@ -305,6 +310,8 @@ struct ScriptedHttpServer::Impl {
             } else if (const auto* pause = std::get_if<Pause>(&step)) {
                 std::unique_lock lock(mutex);
                 if (arrived.wait_for(lock, pause->duration, [this] { return stopping.load(); })) return;
+            } else if (const auto* action = std::get_if<Run>(&step)) {
+                if (action->action) action->action();
             } else {
                 break;
             }

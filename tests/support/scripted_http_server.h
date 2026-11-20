@@ -4,7 +4,7 @@
 // A script is a function of the request that returns the reply as steps: bytes to write (the status line and the
 // header fields are bytes too, so a reply may hold two Content-Type fields, an oversized header or a body that stops
 // half way), a gate to wait at until the test opens it (the test's own clock), a pause of the peer's own (only where a
-// test is about bytes that keep coming apart in time), and a drop of the connection. After the last step the connection is closed, so a body without a length ends there.
+// test is about bytes that keep coming apart in time), an action of the test's own, and a drop of the connection. After the last step the connection is closed, so a body without a length ends there.
 //
 // Each connection is served by a thread of its own, one request per connection. stop() (and the destructor) opens
 // every gate, ends every connection and joins every thread.
@@ -37,6 +37,8 @@ struct Request {
     std::string head;  // the request line and the header lines, exactly as received, up to the blank line
     std::vector<std::pair<std::string, std::string>> fields;  // names as sent; values without surrounding blanks
     std::string body;
+    // When its head had arrived, on the steady clock.
+    std::chrono::steady_clock::time_point arrived{};
 
     // The value of the first field of that name (compared without regard to case), when there is one.
     std::optional<std::string> field(std::string_view name) const;
@@ -77,7 +79,11 @@ struct Drop {};  // the connection ends at once, without the rest of the reply
 struct Pause {
     std::chrono::milliseconds duration{0};
 };
-using Step = std::variant<Send, Wait, Drop, Pause>;
+// The test's own action at that point of the reply (such as noting the time the reply ends); it must return promptly.
+struct Run {
+    std::function<void()> action;
+};
+using Step = std::variant<Send, Wait, Drop, Pause, Run>;
 
 struct Reply {
     std::vector<Step> steps;
@@ -86,6 +92,7 @@ struct Reply {
     Reply& wait(std::shared_ptr<Gate> gate);
     Reply& drop();
     Reply& pause(std::chrono::milliseconds duration);
+    Reply& run(std::function<void()> action);
 };
 
 using Fields = std::vector<std::pair<std::string, std::string>>;

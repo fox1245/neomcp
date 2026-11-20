@@ -1,7 +1,8 @@
 # The client's Streamable HTTP transport (neomcp::client_http): the reader of event streams, the transfer thread, the
-# transport against a scripted peer that records every request's bytes, the probe of which kind of server answers, the
-# guard of URLs a server supplies, and round trips with the library's own HTTP server on every revision that defines
-# the transport. The tests reach the transport's internal headers. Nothing here is built without NEOMCP_HTTP_CLIENT.
+# transport against a scripted peer that records every request's bytes, its event streams (sessions, the stream of the
+# connection, resumption), the probe of which kind of server answers, the guard of URLs a server supplies, and round
+# trips with the library's own HTTP server on every revision that defines the transport. The tests reach the
+# transport's internal headers. Nothing here is built without NEOMCP_HTTP_CLIENT.
 if(NOT NEOMCP_HTTP_CLIENT)
     return()
 endif()
@@ -9,6 +10,7 @@ endif()
 add_executable(neomcp_client_http_test
     client_http_test.cpp
     sse_parser_test.cpp
+    streams_test.cpp
     transfer_loop_test.cpp
     transport_test.cpp
     url_guard_test.cpp
