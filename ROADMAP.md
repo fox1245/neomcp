@@ -47,12 +47,16 @@ Last updated: 2026-11-20.
   Windows without a shell, a short named environment plus what the application adds, stderr inherited, captured or
   discarded, the shutdown ladder (stdin closed, then the group ended), and a server that exits started again at most
   `max_restarts` times in a row.
+- **Change notifications on the client** (`Client::listen`, `neomcp/client/subscription.h`): one subscription call
+  for both mechanisms, changes merged per kind and per resource, a lost subscription reopened with backoff and jitter.
+- **The Streamable HTTP transport of the client** (`neomcp::client_http`, libcurl from the system behind
+  `NEOMCP_HTTP_CLIENT`): JSON and event-stream answers, detection of the kind of server over HTTP, mirrored headers,
+  sessions renewed when the server forgets them, the connection stream, resumption of a broken stream, redirects only
+  within the endpoint's origin.
+- **Client conformance.** The official conformance suite's client scenarios that need no authorization pass at
+  2025-11-25 and 2026-07-28, with only the authorization scenarios listed as expected failures.
 
-## In progress
-
-Nothing is on a branch that is not on `main`.
-
-## Not started: the client without authorization
+## In progress: the rest of the client without authorization
 
 The client is built as one engine without input or output plus transports, like the server. Its methods come in two
 forms: a blocking one under the plain name and a coroutine one with the prefix `async_`
@@ -60,12 +64,7 @@ forms: a blocking one under the plain name and a coroutine one with the prefix `
 
 In order; items on one line can be done side by side.
 
-1. Change notifications for the client | the HTTP transport
-   on libcurl with JSON answers, detection of the kind of server over HTTP, mirrored headers, and a client fixture
-   for the official conformance suite in CI.
-2. Event streams for the HTTP transport: answers as streams, server requests on streams, sessions, the connection
-   stream, resumption.
-3. The HTTP+SSE transport of 2024-11-05 (client only) | every bound on what a server controls tested at its edge |
+1. The HTTP+SSE transport of 2024-11-05 (client only) | every bound on what a server controls tested at its edge |
    the official Python SDK's servers as peers, and the matrix of this client against this server over every
    transport and revision.
 
@@ -75,8 +74,8 @@ settings of the environment are honoured; a stdio server that exited is started 
 times in a row at most; certificate verification cannot be switched off; libcurl comes from the system
 (`find_package(CURL)`), behind an option, so that a server-only build needs none.
 
-Acceptance: the official conformance suite's client scenarios that need no authorization, at 2025-11-25 and
-2026-07-28, with empty lists of expected failures.
+The acceptance of this step (the conformance suite's client scenarios that need no authorization) is met; what is
+left are the items above.
 
 ## Not started: later steps
 
