@@ -261,6 +261,10 @@ struct ContactFailure {
     ContactFailureKind kind = ContactFailureKind::transport;
     std::string message;
     std::vector<std::string> server_revisions;  // what the server said it serves, when it said
+    // HTTP: the transport this endpoint may serve instead, for the next step of opening contact. Set to http_sse when
+    // the handshake was refused with 400, 404 or 405 and no body only a server that names revisions per request sends,
+    // and an enabled profile defines the older transport of events over HTTP; empty otherwise.
+    std::optional<profile::Transport> next_transport;
 };
 
 // What one step of opening contact met, in order, so that a failure can name every answer.

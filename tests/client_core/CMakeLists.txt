@@ -5,6 +5,7 @@
 add_executable(neomcp_client_core_test
     client_input_test.cpp
     client_mechanism_test.cpp
+    engine_http_probe_test.cpp
     engine_pair_test.cpp
     engine_pending_test.cpp
     engine_test.cpp

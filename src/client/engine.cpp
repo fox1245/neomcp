@@ -49,6 +49,10 @@ constexpr int status_unauthorized = 401;
 constexpr int status_forbidden = 403;
 constexpr int status_not_found = 404;
 constexpr int status_method_not_allowed = 405;
+// The reason, in a profile's Streamable HTTP status map, of the status a server gives a method it does not know: with
+// a body whose code is Method not found, that status is an answer only a server that names revisions per request
+// sends.
+constexpr std::string_view method_not_found_reason = "method_not_found";
 
 constexpr std::string_view busy_message = "The client is answering as many requests of the server as it takes";
 constexpr std::string_view unanswered_message = "The client did not answer in time";
@@ -239,6 +243,10 @@ public:
         if (in_sink_) throw std::logic_error("the client engine was called from inside its own sink");
     }
 
+    // Whether an enabled profile defines the older transport of events over HTTP (the step after a handshake that a
+    // Streamable HTTP endpoint refused by its status).
+    void set_http_sse_enabled(bool enabled) noexcept { http_sse_enabled_ = enabled; }
+
     // ---- the public operations
 
     void open() {
@@ -251,7 +259,6 @@ public:
                 return;
             }
             if (named != nullptr && prior.kind == ServerKind::handshake && named->handshake) {
-                prior_handshake_ = true;
                 start_handshake(*named, false);
                 return;
             }
@@ -1045,9 +1052,12 @@ private:
         finish(ref);
         if (purpose == Purpose::level) return;
         step(ref, method, failure.message);
-        if (purpose == Purpose::probe && status &&
-            (*status == status_bad_request || *status == status_not_found || *status == status_method_not_allowed)) {
+        if (purpose == Purpose::probe && status && refusing_status(*status)) {
             fallback_handshake();
+            return;
+        }
+        if (purpose == Purpose::handshake && status && refusing_status(*status)) {
+            fail_handshake_by_status();
             return;
         }
         if (failure.kind == CallFailureKind::authorization_required) {
@@ -1231,9 +1241,10 @@ private:
         emit(Outgoing{std::string(), connection_unit, std::move(headers), OutgoingKind::open_connection_stream});
     }
 
-    void fail_contact(ContactFailureKind kind, std::string message, std::vector<std::string> revisions = {}) {
+    void fail_contact(ContactFailureKind kind, std::string message, std::vector<std::string> revisions = {},
+                      std::optional<profile::Transport> next_transport = std::nullopt) {
         if (contact_.phase == ContactPhase::failed || contact_.phase == ContactPhase::closed) return;
-        contact_.failure = ContactFailure{kind, std::move(message), std::move(revisions)};
+        contact_.failure = ContactFailure{kind, std::move(message), std::move(revisions), next_transport};
         opening_ = nullptr;
         set_phase(ContactPhase::failed);
         std::vector<RequestRef> refs;
@@ -1243,7 +1254,44 @@ private:
         }
     }
 
-    void on_probe_answer(RequestRef ref, const Message& message) {
+    // 400, 404 and 405: the statuses after which a server is asked in the way of the step that follows.
+    static bool refusing_status(int status) {
+        return status == status_bad_request || status == status_not_found || status == status_method_not_allowed;
+    }
+
+    // An error only a server that names revisions per request sends: a code of the `errors` table of an enabled
+    // profile of that kind, or on HTTP the code Method not found with the status such a profile gives an unknown
+    // method.
+    bool recognized_modern(const Message& message, std::optional<int> status) const {
+        const auto code = code_of(message.outcome);
+        if (!code) return false;
+        if (per_request_codes_.count(*code) > 0) return true;
+        if (transport_ != profile::Transport::streamable_http || !status || *code != error_code::method_not_found) {
+            return false;
+        }
+        for (const auto& speaker : speakers_) {
+            if (!speaker.per_request) continue;
+            const auto& http = speaker.halves.profile->streamable_http();
+            if (http && http->status_for(method_not_found_reason) == *status) return true;
+        }
+        return false;
+    }
+
+    // The handshake was refused with 400, 404 or 405 and a body that is no answer only a server that names revisions
+    // per request sends: the step after it is the older transport of events over HTTP, where a profile defines it.
+    void fail_handshake_by_status() {
+        if (http_sse_enabled_) {
+            fail_contact(ContactFailureKind::http_status,
+                         "the server refused the handshake with a status after which it may serve the older "
+                         "transport of events over HTTP",
+                         {}, profile::Transport::http_sse);
+        } else {
+            fail_contact(ContactFailureKind::http_status,
+                         "the server refused the handshake with a status after which no enabled revision can be tried");
+        }
+    }
+
+    void on_probe_answer(RequestRef ref, const Message& message, std::optional<int> status) {
         const Call& call = calls_.at(ref);
         const Speaker& speaker = *call.speaker;
         const bool refused = call.refused;
@@ -1298,19 +1346,25 @@ private:
             start_probe(*again, true);
             return;
         }
-        const auto code = code_of(message.outcome);
-        if (code && per_request_codes_.count(*code) > 0) {
+        if (recognized_modern(message, status)) {
             // A server that names its revisions per request, which refused something else than the revision.
             step(ref, method, "an error only a server that names revisions per request sends");
-            note_defect(*code, profile);
+            note_defect(*code_of(message.outcome), profile);
             open_per_request(speaker);
+            return;
+        }
+        if (status && !is_success(*status) && !refusing_status(*status)) {
+            // Another error with a status after which no step of opening goes on (a server error, another 4xx).
+            step(ref, method, "an error with a status after which no step goes on");
+            fail_contact(ContactFailureKind::http_status,
+                         "the probe was answered with an error and a status after which no step of opening goes on");
             return;
         }
         step(ref, method, "an error");
         fallback_handshake();
     }
 
-    void on_handshake_answer(RequestRef ref, const Message& message) {
+    void on_handshake_answer(RequestRef ref, const Message& message, std::optional<int> status) {
         const Call& call = calls_.at(ref);
         const Speaker& speaker = *call.speaker;
         const bool refused = call.refused;
@@ -1367,12 +1421,17 @@ private:
             emit(Outgoing{std::string(), connection_unit, {}, OutgoingKind::close});
             return;
         }
-        const auto code = code_of(message.outcome);
-        if (code && per_request_codes_.count(*code) > 0 && prior_handshake_ && !reprobed_ && newest(true) != nullptr) {
-            // The verdict an earlier engine reached no longer holds: find out once more.
+        if (recognized_modern(message, status) && !reprobed_ && newest(true) != nullptr) {
+            // A server that names revisions per request answered: find out once more which revisions it serves.
             step(ref, method, "an error only a server that names revisions per request sends");
             reprobed_ = true;
             start_probe(*newest(true), false);
+            return;
+        }
+        if (status && refusing_status(*status)) {
+            step(ref, method, "an error with a status after which the next step is another transport");
+            fail_handshake_by_status();
+            emit(Outgoing{std::string(), connection_unit, {}, OutgoingKind::close});
             return;
         }
         step(ref, method, "an error");
@@ -1418,10 +1477,16 @@ private:
         // requests (the probe, the handshake, the log level) come before any call can fail again.
         if (call.purpose == Purpose::call) exits_in_row_ = 0;
         call.wire.reset();
+        // The status of the exchange that carried the answer, read before the exchange ends: opening contact decides
+        // from both.
+        std::optional<int> status;
+        if (const auto exchange = exchanges_.find(unit); unit != connection_unit && exchange != exchanges_.end()) {
+            status = exchange->second.status;
+        }
         if (transport_ == profile::Transport::streamable_http) end_exchange(unit);
         switch (call.purpose) {
-            case Purpose::probe: on_probe_answer(ref, message); return;
-            case Purpose::handshake: on_handshake_answer(ref, message); return;
+            case Purpose::probe: on_probe_answer(ref, message, status); return;
+            case Purpose::handshake: on_handshake_answer(ref, message, status); return;
             case Purpose::level:
                 if (message.failed) diagnose(DiagnosticKind::level_refused, "the server refused the log level");
                 finish(ref);
@@ -1908,8 +1973,8 @@ private:
     const Speaker* governing_ = nullptr;
     const Speaker* opening_ = nullptr;
     bool handshake_answered_ = false;
-    bool prior_handshake_ = false;
     bool reprobed_ = false;
+    bool http_sse_enabled_ = false;  // an enabled profile defines the older transport of events over HTTP
     bool restarting_ = false;
     bool restart_for_probe_ = false;
     bool probe_restart_used_ = false;  // the one start after an end while the probe was out that does not count
@@ -2015,8 +2080,13 @@ std::variant<std::unique_ptr<ClientEngine>, ClientMechanismsError> ClientEngine:
         speaker.halves = std::move(half);
         speakers.push_back(std::move(speaker));
     }
+    const bool http_sse_enabled =
+        transport == profile::Transport::streamable_http &&
+        std::any_of(profiles.begin(), profiles.end(),
+                    [](const profile::ProfilePtr& profile) { return profile->http_sse().has_value(); });
     auto core = std::make_unique<detail::ClientEngineCore>(std::move(options), transport, std::move(sink),
                                                           std::move(speakers));
+    core->set_http_sse_enabled(http_sse_enabled);
     return std::unique_ptr<ClientEngine>(new ClientEngine(std::move(core)));
 }
 
