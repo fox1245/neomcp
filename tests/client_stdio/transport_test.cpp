@@ -213,6 +213,7 @@ TEST(ClientStdioTransport, InheritedNamesReplaceTheDefaultList) {
     Folder folder;
     const std::string report = folder.file("report.json");
     set_variable("NEOMCP_CLIENT_STDIO_PASSED", "passed");
+    set_variable("NEOMCP_CLIENT_STDIO_SECRET", "secret");
     neomcp::ChildProcess process = scripted(folder, json{{"start", json::array({action("report", report)})}});
     std::vector<std::string> names{"NEOMCP_CLIENT_STDIO_PASSED"};
 #ifdef _WIN32
@@ -224,10 +225,20 @@ TEST(ClientStdioTransport, InheritedNamesReplaceTheDefaultList) {
     ASSERT_FALSE(session.start().has_value());
     const auto seen = await_json(report);
     unset_variable("NEOMCP_CLIENT_STDIO_PASSED");
+    unset_variable("NEOMCP_CLIENT_STDIO_SECRET");
     ASSERT_TRUE(seen.has_value());
     const json& environment = (*seen)["environment"];
     EXPECT_EQ(variable(environment, "NEOMCP_CLIENT_STDIO_PASSED"), "passed");
+    // Neither a variable outside the names nor one of the default list that the names replace arrives.
+    EXPECT_FALSE(has_variable(environment, "NEOMCP_CLIENT_STDIO_SECRET")) << environment.dump();
+    EXPECT_FALSE(has_variable(environment, "PATH")) << environment.dump();
+#ifdef _WIN32
+    // Windows may add variables of its own to a new process (an ARM64 runner adds PROCESSOR_ARCHITECTURE), so the
+    // count is not exact there.
+    EXPECT_GE(environment.size(), names.size()) << environment.dump();
+#else
     EXPECT_EQ(environment.size(), names.size()) << environment.dump();
+#endif
 }
 
 TEST(ClientStdioTransport, TheProcessRunsInTheWorkingDirectoryGiven) {
