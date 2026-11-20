@@ -497,14 +497,12 @@ std::optional<ClientMessage> roots_notification(const profile::Profile& profile)
 
 // ---- the restricted form of a form's requested schema, shared by both halves
 
-// The members the root of a requested schema may have: what a form is (its type and its properties), which of its
-// properties are required, and the dialect it is written in.
+// The members of the root of a requested schema that make it a form: its type and its properties. Other members of
+// the root (a title that a schema generator adds, its dialect, which properties are required) are not the form's
+// restriction: the form restricts what each property may be, and the accepted content is still validated against the
+// whole schema.
 constexpr std::string_view form_type_member = "type";
 constexpr std::string_view form_properties_member = "properties";
-constexpr std::string_view form_required_member = "required";
-constexpr std::string_view form_dialect_member = "$schema";
-constexpr std::string_view form_root_members[] = {form_type_member, form_properties_member, form_required_member,
-                                                  form_dialect_member};
 // The union of the schemas one property of a form may have, in the profile's wire tables.
 constexpr std::string_view primitive_schema_union = "PrimitiveSchemaDefinition";
 
@@ -539,13 +537,6 @@ std::optional<std::string> restricted_form_problem(const json& schema, const pro
     constexpr int union_depth = 8;
     const auto* root = schema.get_ptr<const json::object_t*>();
     if (root == nullptr) return std::string("the requested schema is not an object");
-    for (const auto& [keyword, unused] : *root) {
-        static_cast<void>(unused);
-        if (std::find(std::begin(form_root_members), std::end(form_root_members), keyword) ==
-            std::end(form_root_members)) {
-            return std::string("the requested schema has a member a form does not define at its root");
-        }
-    }
     if (root->find(std::string(form_type_member)) == root->end()) {
         return std::string("the requested schema has no type");
     }

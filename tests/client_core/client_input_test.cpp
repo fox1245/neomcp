@@ -846,8 +846,13 @@ TEST(ClientInputForm, TheCheckFollowsTheRevisionsPrimitiveSchemaDefinitions) {
             "required":["b"],"$schema":"https://json-schema.org/draft/2020-12/schema"})"), *profile));
         EXPECT_FALSE(refused(*half, J(R"({"type":"object","properties":{"c":{"type":"string","enum":["a","b"]}}})"),
                                         *profile));
-        // A member the root does not have, a property of no definition, and no properties at all.
-        EXPECT_TRUE(refused(*half, J(R"({"type":"object","properties":{},"additionalProperties":false})"), *profile));
+        // Members of the root other than its type and properties are not the form's restriction: a title and a
+        // description as a schema generator writes them, and keywords the content's validation applies.
+        EXPECT_FALSE(refused(*half, J(R"({"type":"object","title":"Contact","properties":{
+            "username":{"type":"string","title":"Username","description":"User's response"}},
+            "required":["username"]})"), *profile));
+        EXPECT_FALSE(refused(*half, J(R"({"type":"object","properties":{},"additionalProperties":false})"), *profile));
+        // A property of no definition, and no properties at all.
         EXPECT_TRUE(refused(*half, J(R"({"type":"object","properties":{"o":{"type":"object","properties":{}}}})"),
                                        *profile));
         EXPECT_TRUE(refused(*half, J(R"({"type":"object","properties":{"s":{"type":"string","pattern":"a"}}})"),
