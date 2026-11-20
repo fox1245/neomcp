@@ -84,12 +84,25 @@ BodyPlan plan_body(int status, const std::vector<std::string_view>& content_type
 
 // ---- the loop
 
+// The HTTP methods the loop makes requests with.
+enum class TransferMethod {
+    post,    // with the request's body
+    get,     // without a body
+    remove   // DELETE, without a body
+};
+
 // One HTTP request to make.
 struct TransferRequest {
     UnitId unit = connection_unit;
     std::string url;
     std::vector<std::string> header_lines;  // in libcurl's form (header_line)
     std::string body;                       // sent as the body of a POST
+    TransferMethod method = TransferMethod::post;
+    // A bound on the whole exchange, connecting included; zero: none (the client's clocks decide).
+    std::chrono::milliseconds total_timeout{0};
+    // The exchange starts no earlier than this (the wait before a stream is resumed). A request that waits is ended
+    // by remove() and replaced by a later submit() of its unit as a running exchange is.
+    std::chrono::steady_clock::time_point not_before{};
 };
 
 // The head of a response, with the plan for its body.
@@ -148,7 +161,7 @@ public:
     // sink afterwards. Idempotent.
     void stop();
 
-    // How many exchanges the thread runs now, for tests.
+    // How many exchanges the thread runs now, for tests; requests that wait for their start are not counted.
     std::size_t running() const;
 
 private:

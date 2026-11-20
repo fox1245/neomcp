@@ -31,6 +31,8 @@ constexpr int status_no_content = 204;
 constexpr int status_temporary_redirect = 307;
 constexpr int status_permanent_redirect = 308;
 
+constexpr const char* delete_method = "DELETE";
+
 constexpr std::string_view field_content_type = "Content-Type";
 constexpr std::string_view field_location = "Location";
 constexpr std::string_view json_type = "application";
@@ -242,14 +244,16 @@ struct TransferLoop::Impl {
             bool stopping = false;
             for (Command& next : batch) {
                 if (auto* submit = std::get_if<Submit>(&next)) {
-                    if (!stopping) add(std::move(submit->request), 0);
+                    if (!stopping) take(std::move(submit->request));
                 } else if (auto* remove = std::get_if<Remove>(&next)) {
                     drop(remove->unit);
+                    waiting.erase(remove->unit);
                 } else {
                     stopping = true;
                 }
             }
             if (stopping) break;
+            start_due(Clock::now());
             int still_running = 0;
             curl_multi_perform(multi, &still_running);
             collect();
@@ -264,6 +268,32 @@ struct TransferLoop::Impl {
     }
 
     void post(UnitId unit, TransferItem item) { sink(unit, std::move(item)); }
+
+    // A submitted request: started now, or kept until its time. Either way it replaces what its unit had.
+    void take(TransferRequest request) {
+        const UnitId unit = request.unit;
+        waiting.erase(unit);
+        if (request.not_before > Clock::now()) {
+            drop(unit);
+            waiting.emplace(unit, std::move(request));
+            return;
+        }
+        add(std::move(request), 0);
+    }
+
+    // Starts the requests whose time came.
+    void start_due(Clock::time_point now) {
+        std::vector<UnitId> due;
+        for (const auto& [unit, request] : waiting) {
+            if (request.not_before <= now) due.push_back(unit);
+        }
+        for (const UnitId unit : due) {
+            auto found = waiting.find(unit);
+            TransferRequest request = std::move(found->second);
+            waiting.erase(found);
+            add(std::move(request), 0);
+        }
+    }
 
     void add(TransferRequest request, std::size_t redirects) {
         const UnitId unit = request.unit;
@@ -312,9 +342,10 @@ struct TransferLoop::Impl {
         set(curl_easy_setopt(easy, CURLOPT_NOSIGNAL, 1L));
         set(curl_easy_setopt(easy, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(limits.connect_timeout.count())));
         set(curl_easy_setopt(easy, CURLOPT_TCP_KEEPALIVE, 1L));
-        // No bound on the whole exchange and no low-speed abort: the client's clocks decide how long a request waits
-        // for its answer, and the loop itself bounds an event stream that has begun and then carries no byte.
-        set(curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, 0L));
+        // No bound on the whole exchange unless the request names one (the request that ends a session), and no
+        // low-speed abort: the client's clocks decide how long a request waits for its answer, and the loop itself
+        // bounds an event stream that has begun and then carries no byte.
+        set(curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, static_cast<long>(transfer.request.total_timeout.count())));
         set(curl_easy_setopt(easy, CURLOPT_SUPPRESS_CONNECT_HEADERS, 1L));
         switch (limits.proxy.mode) {
             case ProxyMode::environment: break;  // libcurl reads the environment by default
@@ -322,9 +353,20 @@ struct TransferLoop::Impl {
             case ProxyMode::named: set(curl_easy_setopt(easy, CURLOPT_PROXY, limits.proxy.url.c_str())); break;
         }
         if (ca_file) set(curl_easy_setopt(easy, CURLOPT_CAINFO, ca_file->c_str()));
-        set(curl_easy_setopt(easy, CURLOPT_POST, 1L));
-        set(curl_easy_setopt(easy, CURLOPT_POSTFIELDS, transfer.request.body.data()));
-        set(curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(transfer.request.body.size())));
+        switch (transfer.request.method) {
+            case TransferMethod::post:
+                set(curl_easy_setopt(easy, CURLOPT_POST, 1L));
+                set(curl_easy_setopt(easy, CURLOPT_POSTFIELDS, transfer.request.body.data()));
+                set(curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE_LARGE,
+                                     static_cast<curl_off_t>(transfer.request.body.size())));
+                break;
+            case TransferMethod::get: set(curl_easy_setopt(easy, CURLOPT_HTTPGET, 1L)); break;
+            case TransferMethod::remove:
+                // A request without a body under another method name; CURLOPT_NOBODY would make it a HEAD.
+                set(curl_easy_setopt(easy, CURLOPT_HTTPGET, 1L));
+                set(curl_easy_setopt(easy, CURLOPT_CUSTOMREQUEST, delete_method));
+                break;
+        }
         set(curl_easy_setopt(easy, CURLOPT_HTTPHEADER, transfer.headers.get()));
         set(curl_easy_setopt(easy, CURLOPT_HEADERFUNCTION, &Impl::on_header));
         set(curl_easy_setopt(easy, CURLOPT_HEADERDATA, &transfer));
@@ -336,9 +378,13 @@ struct TransferLoop::Impl {
     }
 
     // How long the next wait may last: the idle bound of the loop, shortened to the moment the first event stream that
-    // has begun would have been idle for stream_idle_timeout.
+    // has begun would have been idle for stream_idle_timeout, and to the start of the first request that waits.
     int wait_ms(Clock::time_point now) const {
         auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(limits.idle_wait);
+        for (const auto& [unit, request] : waiting) {
+            const auto left = std::chrono::ceil<std::chrono::milliseconds>(request.not_before - now);
+            if (left < wait) wait = left;
+        }
         for (const auto& [unit, transfer] : transfers) {
             if (!transfer->idle_bounded) continue;
             const auto left = std::chrono::ceil<std::chrono::milliseconds>(
@@ -549,6 +595,7 @@ struct TransferLoop::Impl {
     bool closed = false;
 
     std::map<UnitId, std::unique_ptr<Transfer>> transfers;  // the thread's alone
+    std::map<UnitId, TransferRequest> waiting;               // the thread's alone: requests not yet due
     std::atomic<std::size_t> count{0};
 };
 
