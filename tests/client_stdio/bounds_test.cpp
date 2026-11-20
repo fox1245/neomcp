@@ -219,10 +219,11 @@ TEST(ClientBounds, TheGracesAreWaitedInFullBeforeEachStep) {
         std::lock_guard lock(mutex);
         steps.emplace_back(event.step, Clock::now());
     };
+    // The rig holds the context the transport's timers run on: it is made first, so that it ends after the transport.
+    Rig rig;
     auto made = neomcp::make_transport(process, std::move(options));
     ASSERT_TRUE(made);
     auto transport = std::move(*made);
-    Rig rig;
     ASSERT_FALSE(rig.start(*transport).has_value());
     ASSERT_TRUE(eventually([&] { return rig.lines().size() == 1; }));
     ASSERT_TRUE(rig.close(*transport));
