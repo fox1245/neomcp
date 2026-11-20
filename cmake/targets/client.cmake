@@ -1,8 +1,9 @@
-# The client: the client halves of the mechanisms and their registry. It will also hold the client engine. Like the
-# core it does no I/O of its own. The halves read and write what a server also reads and writes through the internal
+# The client: the client halves of the mechanisms and their registry, and the client engine. Like the core it does no
+# I/O of its own. The halves read and write what a server also reads and writes through the internal
 # input functions of the core (src/core/input.h), so the target sees the sources' folder privately; no public header of
 # it includes an internal one.
 add_library(neomcp_client
+    src/client/engine.cpp
     src/client/mechanisms.cpp)
 add_library(neomcp::client ALIAS neomcp_client)
 target_include_directories(neomcp_client

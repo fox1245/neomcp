@@ -312,6 +312,7 @@ enum class CallFailureKind {
     input_timed_out,     // a round of input was not answered within input_handler_timeout
     input_rounds_exceeded,  // the server asked for input more than max_input_rounds times
     state_not_echoable,  // the state of a round cannot be sent back exactly as it was received
+    answer_not_writable,  // an answer of a round cannot be written for the revision
     closed               // the engine was closed
 };
 
@@ -328,7 +329,8 @@ struct ErrorAnswered {
     RequestError error;  // the server's error answer: its code, message and data
 };
 // The result asks for input, and no handler takes every request it asks (InputSupport): the asking is the call's
-// answer. With handlers the call goes on instead (InputRoundStarted).
+// answer. With handlers the call goes on instead (InputRoundStarted). The layer above the engine reports such an answer
+// to the application as a server that asked for input the client did not declare.
 struct AskedForInput {
     InputAsking asking;
     json result;  // the result as the server sent it
