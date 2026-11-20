@@ -7,6 +7,7 @@
     "repository": "https://github.com/modelcontextprotocol/modelcontextprotocol",
     "commit": "d4b317231161ee96d3eefb2448bda4230c76f4c6",
     "pages": [
+      "docs/specification/2026-07-28/basic/authorization/authorization-server-discovery.mdx",
       "docs/specification/2026-07-28/basic/index.mdx",
       "docs/specification/2026-07-28/basic/versioning.mdx",
       "docs/specification/2026-07-28/basic/transports/stdio.mdx",
@@ -91,6 +92,9 @@
   },
   "tools": {
     "invalid_arguments": "error_result"
+  },
+  "authorization": {
+    "discovery": "protected_resource_metadata"
   },
   "wire": {
     "schema": {

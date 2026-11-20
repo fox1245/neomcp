@@ -7,6 +7,7 @@
     "repository": "https://github.com/modelcontextprotocol/modelcontextprotocol",
     "commit": "d4b317231161ee96d3eefb2448bda4230c76f4c6",
     "pages": [
+      "docs/specification/2025-11-25/basic/authorization.mdx",
       "docs/specification/2025-11-25/basic/index.mdx",
       "docs/specification/2025-11-25/basic/lifecycle.mdx",
       "docs/specification/2025-11-25/basic/transports.mdx",
@@ -54,6 +55,9 @@
   },
   "tools": {
     "invalid_arguments": "error_result"
+  },
+  "authorization": {
+    "discovery": "protected_resource_metadata"
   },
   "wire": {
     "schema": {

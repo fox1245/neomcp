@@ -257,6 +257,37 @@ std::vector<std::string> strings_of(const Node& node, bool distinct) {
     return out;
 }
 
+// A string that is an absolute path of a URL (RFC 3986, section 3.3, path-absolute): a '/' not followed by another,
+// then segments of pchar (unreserved, percent-encoded, sub-delims, ':' and '@') separated by '/'. No query, no
+// fragment, no authority.
+const std::string& absolute_path_of(const Node& node) {
+    static const std::string expected = "an absolute path: '/' and segments of RFC 3986 path characters";
+    const auto is_hex = [](char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    };
+    // unreserved without letters and digits, sub-delims, ':', '@' and the separator '/'
+    static constexpr std::string_view path_specials = "-._~!$&'()*+,;=:@/";
+    const auto is_path_char = [](char c) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) return true;
+        return path_specials.find(c) != std::string_view::npos;
+    };
+    const std::string& text = string_of(node);
+    if (text.empty() || text.front() != '/' || (text.size() > 1 && text[1] == '/')) {
+        fail(node.pointer(), expected, "found '" + text + "'");
+    }
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '%') {
+            if (i + 2 >= text.size() || !is_hex(text[i + 1]) || !is_hex(text[i + 2])) {
+                fail(node.pointer(), expected, "found '" + text + "'");
+            }
+            i += 2;
+        } else if (!is_path_char(text[i])) {
+            fail(node.pointer(), expected, "found '" + text + "'");
+        }
+    }
+    return text;
+}
+
 // A string that must be one of a fixed set of spellings, each standing for a value.
 template <typename Value, std::size_t N>
 Value pick(const Node& node, const std::array<std::pair<std::string_view, Value>, N>& table) {
@@ -361,6 +392,7 @@ private:
                                    {"transports", true},
                                    {"errors", true},
                                    {"tools", true},
+                                   {"authorization", true},
                                    {"wire", true}});
 
         const Node version = object.at("profile_version");
@@ -376,6 +408,7 @@ private:
         mechanisms(object.at("mechanisms"));
         errors(object.at("errors"));
         tools(object.at("tools"));
+        authorization(object.at("authorization"));
         wire(object.at("wire"));
         transports(object.at("transports"));
     }
@@ -408,6 +441,40 @@ private:
     void tools(const Node& node) {
         const Object object(node, {{"invalid_arguments", true}});
         profile_.invalid_arguments_ = declared_name(object.at("invalid_arguments"), declared_invalid_arguments());
+    }
+
+    // ----- authorization
+
+    void authorization(const Node& node) {
+        // The declared discovery whose data is the member of the same name.
+        static constexpr std::string_view origin_metadata = "origin_metadata";
+        const Object object(node, {{"discovery", true}, {origin_metadata, false}});
+        Authorization& authorization = profile_.authorization_;
+        authorization.discovery = declared_name(object.at("discovery"), declared_authorization_discovery());
+        const std::optional<Node> origin = object.find(origin_metadata);
+        if (authorization.discovery != origin_metadata) {
+            if (origin) {
+                fail(origin->pointer(),
+                     "no such member, because discovery is " + std::string(authorization.discovery),
+                     "found the member");
+            }
+            return;
+        }
+        if (!origin) {
+            fail(node.member_pointer(origin_metadata),
+                 "a member named '" + std::string(origin_metadata) + "', because discovery is " +
+                     std::string(origin_metadata),
+                 "the member is missing");
+        }
+        const Object body(*origin, {{"metadata_path", true}, {"default_endpoints", true}});
+        OriginMetadataDiscovery discovery;
+        discovery.metadata_path = absolute_path_of(body.at("metadata_path"));
+        const Object endpoints(body.at("default_endpoints"),
+                               {{"authorization", true}, {"token", true}, {"registration", true}});
+        discovery.default_endpoints.authorization = absolute_path_of(endpoints.at("authorization"));
+        discovery.default_endpoints.token = absolute_path_of(endpoints.at("token"));
+        discovery.default_endpoints.registration = absolute_path_of(endpoints.at("registration"));
+        authorization.origin_metadata = std::move(discovery);
     }
 
     void errors(const Node& node) {

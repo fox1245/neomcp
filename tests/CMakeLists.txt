@@ -9,7 +9,7 @@ if(NOT TARGET GTest::gtest_main)
     FetchContent_MakeAvailable(googletest)
 endif()
 
-add_executable(neomcp_profile_test profile_test.cpp)
+add_executable(neomcp_profile_test profile_test.cpp profile_authorization_test.cpp)
 find_package(Threads REQUIRED)
 target_link_libraries(neomcp_profile_test PRIVATE neomcp::profile neojson::neojson GTest::gtest_main Threads::Threads)
 neomcp_configure_target(neomcp_profile_test)

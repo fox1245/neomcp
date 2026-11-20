@@ -23,6 +23,12 @@ constexpr std::array<std::string_view, 2> streamable_http_cancel_names{"cancelle
 // error_result: a tool result with isError set; invalid_params_error: the JSON-RPC error Invalid params.
 constexpr std::array<std::string_view, 2> invalid_arguments_names{"error_result", "invalid_params_error"};
 
+// How a client finds the authorization server: protected_resource_metadata, the resource's metadata (RFC 9728) that
+// names the authorization server, whose own metadata (RFC 8414) follows; origin_metadata, the authorization server's
+// metadata on the origin of the server's URL, then default endpoints there.
+constexpr std::array<std::string_view, 2> authorization_discovery_names{"origin_metadata",
+                                                                        "protected_resource_metadata"};
+
 // The reasons a Streamable HTTP status map can name. The first group are the reasons a session gives when it refuses
 // an input before any method ran (neomcp::RefusalReason spells them the same way); the rest are decided by the HTTP
 // transport itself.
@@ -72,5 +78,7 @@ Names declared_cancel(Transport transport) {
 Names declared_invalid_arguments() { return invalid_arguments_names; }
 
 Names declared_status_reasons() { return status_reason_names; }
+
+Names declared_authorization_discovery() { return authorization_discovery_names; }
 
 }  // namespace neomcp::profile

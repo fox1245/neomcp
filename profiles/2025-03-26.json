@@ -7,6 +7,7 @@
     "repository": "https://github.com/modelcontextprotocol/modelcontextprotocol",
     "commit": "d4b317231161ee96d3eefb2448bda4230c76f4c6",
     "pages": [
+      "docs/specification/2025-03-26/basic/authorization.mdx",
       "docs/specification/2025-03-26/basic/index.mdx",
       "docs/specification/2025-03-26/basic/lifecycle.mdx",
       "docs/specification/2025-03-26/basic/transports.mdx",
@@ -48,6 +49,17 @@
   },
   "tools": {
     "invalid_arguments": "invalid_params_error"
+  },
+  "authorization": {
+    "discovery": "origin_metadata",
+    "origin_metadata": {
+      "metadata_path": "/.well-known/oauth-authorization-server",
+      "default_endpoints": {
+        "authorization": "/authorize",
+        "token": "/token",
+        "registration": "/register"
+      }
+    }
   },
   "wire": {
     "schema": {

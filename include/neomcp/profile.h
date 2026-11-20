@@ -54,6 +54,9 @@ std::span<const std::string_view> declared_mechanisms(Slot slot);
 std::span<const std::string_view> declared_cancel(Transport transport);
 std::span<const std::string_view> declared_invalid_arguments();
 std::span<const std::string_view> declared_status_reasons();
+// The ways a revision says a client finds the authorization server of a server that refuses it
+// (`authorization.discovery`).
+std::span<const std::string_view> declared_authorization_discovery();
 
 struct Evidence {
     std::string verified_at;
@@ -147,6 +150,28 @@ struct StreamableHttpTransport {
     std::optional<int> status_for(std::string_view reason) const;
 };
 
+// The endpoints of an authorization server that publishes no metadata, as paths on the origin of the server's URL.
+struct DefaultEndpoints {
+    std::string authorization;
+    std::string token;
+    std::string registration;
+};
+
+// Discovery on the server's origin: the authorization server's metadata at a path of the origin of the server's URL
+// (the URL's path is discarded), and the default endpoints when no metadata is found there.
+struct OriginMetadataDiscovery {
+    std::string metadata_path;
+    DefaultEndpoints default_endpoints;
+};
+
+// What the revision decides for authorization.
+struct Authorization {
+    // How a client finds the authorization server: one of declared_authorization_discovery().
+    std::string_view discovery;
+    // Present exactly when `discovery` is the discovery on the server's origin.
+    std::optional<OriginMetadataDiscovery> origin_metadata;
+};
+
 struct NamedCode {
     std::string name;
     int code = 0;
@@ -204,6 +229,9 @@ public:
     // one of declared_invalid_arguments().
     std::string_view invalid_arguments() const noexcept { return invalid_arguments_; }
 
+    // What the revision decides for authorization (member `authorization`).
+    const Authorization& authorization() const noexcept { return authorization_; }
+
     // Present when the revision defines the transport.
     const std::optional<StdioTransport>& stdio() const noexcept { return stdio_; }
     const std::optional<HttpSseTransport>& http_sse() const noexcept { return http_sse_; }
@@ -248,6 +276,7 @@ private:
     Evidence evidence_;
     std::vector<std::string_view> mechanisms_;  // indexed by Slot; views of the declared names
     std::string_view invalid_arguments_;        // a view of a declared name
+    Authorization authorization_;
     std::optional<StdioTransport> stdio_;
     std::optional<HttpSseTransport> http_sse_;
     std::optional<StreamableHttpTransport> streamable_http_;
