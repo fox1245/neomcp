@@ -55,27 +55,23 @@ Last updated: 2026-11-20.
   within the endpoint's origin.
 - **Client conformance.** The official conformance suite's client scenarios that need no authorization pass at
   2025-11-25 and 2026-07-28, with only the authorization scenarios listed as expected failures.
+- **The HTTP+SSE transport of 2024-11-05 on the client**: found when a Streamable HTTP endpoint refuses the
+  handshake, the endpoint event's URL resolved and held to the endpoint's origin, event names from the profile.
+- **Every bound on what a server controls**, tested exactly at the bound and one past it.
+- **The client against other servers**: this library's servers over every transport and revision, and the official
+  Python SDK's servers over stdio, Streamable HTTP and SSE.
 
-## In progress: the rest of the client without authorization
+## The client without authorization: done
 
 The client is built as one engine without input or output plus transports, like the server. Its methods come in two
 forms: a blocking one under the plain name and a coroutine one with the prefix `async_`
 (`client->call<int>("add", args)` and `co_await client->async_call<int>("add", args)`).
-
-In order; items on one line can be done side by side.
-
-1. The HTTP+SSE transport of 2024-11-05 (client only) | every bound on what a server controls tested at its edge |
-   the official Python SDK's servers as peers, and the matrix of this client against this server over every
-   transport and revision.
 
 Decided for the client: an answer that was lost is asked for again once for reads and lists and never for a tool
 call; a server started as a child process gets a short named environment plus what the application adds; proxy
 settings of the environment are honoured; a stdio server that exited is started again at the next request, three
 times in a row at most; certificate verification cannot be switched off; libcurl comes from the system
 (`find_package(CURL)`), behind an option, so that a server-only build needs none.
-
-The acceptance of this step (the conformance suite's client scenarios that need no authorization) is met; what is
-left are the items above.
 
 ## Not started: later steps
 
@@ -115,3 +111,8 @@ left are the items above.
 - Measurements not yet taken: the cost of creating a session per request under 2026-07-28, and of computing the
   mirrored parameter headers per call.
 - Windows: the tests that drive raw sockets are skipped.
+- Client: the bounds of the HTTP+SSE transport (its endpoint event's time, its stream's size, idle and connect
+  bounds) are not yet tested at their edges.
+- Client: a client fixture of the conformance suite over stdio (the suite's client scenarios run over HTTP).
+- Client: very large values of the delays of a retried round that asks only with its state are not bounded at
+  creation.
