@@ -1,6 +1,7 @@
 # What an HTTP client needs as well as an HTTP server, and nothing that serves: the header collection, media types, the
 # server-sent events writer, the parsers for an authority and an origin with the strict IP text grammar they use, and
-# (as a header only) the random source under the names of the HTTP blocks. It knows nothing of the protocol and does
+# (as a header only) the random source under the names of the HTTP blocks, and the reader of server-sent events that a
+# client of HTTP uses. It knows nothing of the protocol and does
 # not use the HTTP library; neomcp::http, which serves, links it.
 #
 # The headers of this target are in include/neomcp/http/ beside those of neomcp::http. The request and response model
@@ -12,6 +13,7 @@
 add_library(neomcp_http_base
     src/http_base/headers.cpp
     src/http_base/sse.cpp
+    src/http_base/sse_parser.cpp
     src/http_base/media_type.cpp
     src/http_base/authority.cpp)
 add_library(neomcp::http_base ALIAS neomcp_http_base)

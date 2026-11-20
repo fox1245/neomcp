@@ -1,0 +1,162 @@
+// The transfer thread of an HTTP transport: one thread that runs every exchange of the transport on one libcurl multi
+// handle, and the pieces of HTTP it reads that do not depend on the protocol (header lines, the plan for a body).
+//
+// Model: libcurl's multi interface in a thread of its own. The thread waits in curl_multi_poll; another thread hands
+// it work through a queue of commands (submit, remove, stop) and wakes it with curl_multi_wakeup, which any thread may
+// call. Every easy handle is made, driven, removed and freed on the transfer thread alone, so no handle is ever used by
+// two threads, and a handle is never removed from inside one of its own callbacks. What the thread reads goes to the
+// sink, on the transfer thread, in the order it was read per unit; the sink must not block and must not call back
+// into the loop.
+//
+// The loop knows nothing of the protocol: it posts bytes, bounds them and reports how each exchange ended.
+#pragma once
+
+#include <chrono>
+#include <cstddef>
+#include <filesystem>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <variant>
+#include <vector>
+
+#include "client_http/url_guard.h"
+#include "neomcp/client/engine.h"
+#include "neomcp/client/transport.h"
+
+namespace neomcp::detail::http_client {
+
+// ---- libcurl's global state, initialized once for every transport of the process
+
+// Holds libcurl's global state initialized while any holder lives: curl_global_init runs when the first holder is
+// made, curl_global_cleanup when the last one goes. Thread-safe.
+class CurlGlobal {
+public:
+    CurlGlobal();
+    ~CurlGlobal();
+    CurlGlobal(const CurlGlobal&) = delete;
+    CurlGlobal& operator=(const CurlGlobal&) = delete;
+    // Whether the initialization succeeded.
+    bool ok() const noexcept { return ok_; }
+
+private:
+    bool ok_ = false;
+};
+
+// Why a libcurl whose name resolution blocks is refused; empty when it resolves asynchronously, or when the
+// application accepted a blocking one. `asynchronous`: whether the library reports an asynchronous resolver.
+std::optional<std::string> resolver_refusal(bool asynchronous, bool allow_blocking);
+// The same for the libcurl the program runs with.
+std::optional<std::string> resolver_refusal(bool allow_blocking);
+
+// ---- header lines
+
+// The line libcurl sends for a header field: "Name: value", or "Name;" for an empty value (libcurl drops a field
+// written "Name:" with nothing after the colon instead of sending it empty). A value of spaces and tabs only is sent
+// empty: HTTP drops that whitespace around a value anyway. Empty for a name that is not an HTTP token and for a value
+// with CR, LF or NUL, which would end the field and start another.
+std::optional<std::string> header_line(std::string_view name, std::string_view value);
+
+// ---- the body of a response
+
+enum class BodyKind {
+    json,          // one JSON body, kept whole within the bound
+    event_stream,  // an event stream, read event by event
+    discard        // read and dropped
+};
+
+struct BodyPlan {
+    // For ResponseHead::media_type: the lower-case type and subtype. Engaged but empty when the response has a body
+    // whose type cannot be read (no Content-Type, an unreadable one, or more than one), so that the engine refuses it
+    // as of a type the protocol does not use; disengaged when the response has no type and carries no content.
+    std::optional<std::string> media_type;
+    BodyKind kind = BodyKind::discard;
+};
+
+// What a response's body is, from its status, the values of its Content-Type fields and the length it announced (-1
+// when it announced none). JSON is kept with any status (an error answer may come with one); an event stream only with
+// a status of success.
+BodyPlan plan_body(int status, const std::vector<std::string_view>& content_types, long long content_length);
+
+// ---- the loop
+
+// One HTTP request to make.
+struct TransferRequest {
+    UnitId unit = connection_unit;
+    std::string url;
+    std::vector<std::string> header_lines;  // in libcurl's form (header_line)
+    std::string body;                       // sent as the body of a POST
+};
+
+// The head of a response, with the plan for its body.
+struct TransferHead {
+    int status = 0;
+    std::optional<std::string> media_type;
+    std::vector<HttpHeader> headers;
+};
+
+// One message: a JSON body, or the data of one event of type message. Longer than the bound when the bound was
+// exceeded (the exchange was then aborted, and nothing more comes for its unit).
+struct TransferMessage {
+    std::string text;
+};
+
+using TransferItem =
+    std::variant<TransferHead, TransferMessage, StreamEventId, StreamRetryAdvice, StreamEnded, StreamLost, SendFailed>;
+
+// Called on the transfer thread for every item of a unit's exchange.
+using TransferSink = std::function<void(UnitId unit, TransferItem item)>;
+
+struct TransferLimits {
+    std::size_t max_message_bytes = ClientDefaults::max_message_bytes;
+    std::size_t max_response_header_bytes = HttpClientDefaults::max_response_header_bytes;
+    std::chrono::milliseconds connect_timeout = HttpClientDefaults::connect_timeout;
+    // An event stream that has begun (its head arrived) and then carries no byte for this long is ended and reported
+    // lost. Until a stream begins nothing bounds the wait here: a request waiting for its answer is bounded by the
+    // client's clock of that request alone.
+    std::chrono::milliseconds stream_idle_timeout = HttpClientDefaults::stream_idle_timeout;
+    std::size_t max_redirects = HttpClientDefaults::max_redirects;
+    HttpProxy proxy;
+    std::optional<std::filesystem::path> ca_file;
+    // The longest the thread waits in one call to curl_multi_poll. libcurl shortens the wait to its own timers and a
+    // command wakes the thread at once, so this only bounds a wait that nothing else ends (a test sets it long, so
+    // that a command that did not wake the thread shows).
+    std::chrono::milliseconds idle_wait{1000};
+};
+
+class TransferLoop {
+public:
+    // `guard` decides which redirects are followed.
+    TransferLoop(TransferLimits limits, UrlGuard guard, TransferSink sink);
+    // Stops the loop (stop()).
+    ~TransferLoop();
+    TransferLoop(const TransferLoop&) = delete;
+    TransferLoop& operator=(const TransferLoop&) = delete;
+
+    // Starts the thread; why it could not, otherwise. Called once.
+    std::optional<std::string> start();
+
+    // Any thread. Hands a request to the thread and wakes it. Ignored after stop().
+    void submit(TransferRequest request);
+    // Any thread. Ends the exchange of a unit (and the one a redirect of it made); nothing more comes for it.
+    void remove(UnitId unit);
+    // Any thread but the loop's own. Ends every exchange, stops the thread and waits for it; nothing more reaches the
+    // sink afterwards. Idempotent.
+    void stop();
+
+    // How many exchanges the thread runs now, for tests.
+    std::size_t running() const;
+
+private:
+    struct Impl;
+    std::shared_ptr<Impl> impl_;
+    std::thread thread_;
+    std::mutex stop_mutex_;
+    bool stopped_ = false;
+};
+
+}  // namespace neomcp::detail::http_client

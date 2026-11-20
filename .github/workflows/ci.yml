@@ -6,6 +6,9 @@ name: CI
 # official Python SDK's client, and one runs the official conformance suite against the HTTP server, once per revision.
 # The README's two programs are built as a user builds them (the repository added as a subdirectory of another
 # project) and run once: on Linux with Clang, and on Windows with MSVC, where the HTTP server's SIGTERM check is left out.
+# The client's HTTP transport runs on libcurl from the system: the Linux jobs install it with apt, macOS with Homebrew and
+# Windows with vcpkg; the jobs that build only servers configure without it (NEOMCP_HTTP_CLIENT=OFF), which shows that a
+# server needs no libcurl.
 # One more job checks the translation of regular expressions for the schema keyword `pattern` against V8: Node writes
 # patterns with the answers of V8, and a test executable compares the validator with them.
 # One more job compares the wire data of every profile in profiles/ with the schema the protocol's specification
@@ -43,6 +46,11 @@ jobs:
       SANITIZE: ${{ matrix.sanitize }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install libcurl (the client's HTTP transport)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
+          curl-config --version
       - name: Configure (Debug; sanitizers where the matrix names them)
         run: >-
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DNEOMCP_WARNINGS_AS_ERRORS=ON
@@ -73,8 +81,30 @@ jobs:
           - { name: windows-arm64-msvc, runner: windows-11-arm }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install libcurl (Homebrew)
+        if: runner.os == 'macOS'
+        run: |
+          brew install curl
+          prefix="$(brew --prefix curl)"
+          "$prefix/bin/curl-config" --version
+          echo "NEOMCP_CMAKE_EXTRA=-DCURL_ROOT=$prefix" >> "$GITHUB_ENV"
+      - name: Install libcurl (vcpkg)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          TRIPLET: ${{ runner.arch == 'ARM64' && 'arm64-windows' || 'x64-windows' }}
+        run: |
+          if [ -z "${VCPKG_INSTALLATION_ROOT:-}" ]; then
+            echo "This runner image has no vcpkg (VCPKG_INSTALLATION_ROOT is not set)."
+            exit 1
+          fi
+          root="$(cygpath -m "$VCPKG_INSTALLATION_ROOT")"
+          "$root/vcpkg" install "curl:$TRIPLET"
+          "$root/vcpkg" list curl
+          echo "NEOMCP_CMAKE_EXTRA=-DCMAKE_TOOLCHAIN_FILE=$root/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=$TRIPLET" >> "$GITHUB_ENV"
       - name: Configure (Release)
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON
+        shell: bash
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON ${NEOMCP_CMAKE_EXTRA:-}
       - name: Build
         run: cmake --build build --config Release --parallel
       - name: Test
@@ -93,6 +123,10 @@ jobs:
         run: |
           python -m venv "$RUNNER_TEMP/interop-venv"
           "$RUNNER_TEMP/interop-venv/bin/python" -m pip install -r tests/interop/requirements.txt
+      - name: Install libcurl (the client's HTTP transport)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
       - name: Configure (Release)
         run: >-
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON
@@ -115,8 +149,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-      - name: Configure (Release)
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON
+      - name: Configure (Release; the server only, without the client's HTTP transport)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON -DNEOMCP_HTTP_CLIENT=OFF
       - name: Build the fixture server
         run: cmake --build build --parallel --target neomcp_conformance_fixture
       - name: Start the fixture server on a free port of 127.0.0.1
@@ -162,8 +196,8 @@ jobs:
       CXX: clang++
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Configure (Release)
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON
+      - name: Configure (Release; without the client's HTTP transport, which the checker does not use)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON -DNEOMCP_HTTP_CLIENT=OFF
       - name: Build the checker
         run: cmake --build build --parallel --target neomcp_pattern_oracle
       - name: Show the reference engine and its Unicode version
@@ -196,8 +230,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: The README's programs are the files that are compiled
         run: python3 -I tests/consumer/check_readme.py
-      - name: Configure the consumer project against this checkout (Release)
-        run: cmake -S tests/consumer -B consumer-build -DCMAKE_BUILD_TYPE=Release "-DNEOMCP_SOURCE_DIR=$GITHUB_WORKSPACE"
+      - name: Configure the consumer project against this checkout (Release; servers only, so no libcurl)
+        run: >-
+          cmake -S tests/consumer -B consumer-build -DCMAKE_BUILD_TYPE=Release "-DNEOMCP_SOURCE_DIR=$GITHUB_WORKSPACE"
+          -DNEOMCP_HTTP_CLIENT=OFF
       - name: Show the compilers and flags the build uses
         run: grep -E '^CMAKE_(C|CXX)_(COMPILER|FLAGS):' consumer-build/CMakeCache.txt
       - name: Build
@@ -220,9 +256,9 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - name: Configure the consumer project against this checkout
+      - name: Configure the consumer project against this checkout (servers only, so no libcurl)
         shell: bash
-        run: cmake -S tests/consumer -B consumer-build "-DNEOMCP_SOURCE_DIR=${GITHUB_WORKSPACE//\\//}"
+        run: cmake -S tests/consumer -B consumer-build "-DNEOMCP_SOURCE_DIR=${GITHUB_WORKSPACE//\\//}" -DNEOMCP_HTTP_CLIENT=OFF
       - name: Build (Release)
         run: cmake --build consumer-build --config Release --parallel
       - name: Run the stdio server on an initialize and a tool call
