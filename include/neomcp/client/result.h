@@ -113,6 +113,10 @@ struct ClientError {
     json data = nullptr;
     // no_common_revision: the revisions the server said it serves, in its order, as data.
     std::vector<std::string> server_revisions;
+    // Contact could not be made over this transport, and the server may serve another one at the same place: the
+    // transport to try next (ContactFailure::next_transport). Client::open with an HttpEndpoint tries it by itself; an
+    // application that gives its own transport may. Empty otherwise.
+    std::optional<profile::Transport> next_transport;
     // Whether the request went out to the server and the call ended without the server's answer, so that what the
     // server did is not known: a tool may have run. Set for timed_out, cancelled, server_exited and stream_lost when
     // the request had been sent; clear when the call failed before anything was sent, and for every other kind.

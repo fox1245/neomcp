@@ -61,7 +61,8 @@ public:
     // advice on reconnecting, the end or the loss of the stream, a failed send, the end of the server process.
     virtual void stream_event(UnitId unit, StreamEvent event) = 0;
 
-    // stdio: a new server process runs, after a `restart` output or on the transport's own account.
+    // The connection was made again, after a `restart` output or on the transport's own account: stdio, a new server
+    // process runs; the older transport of events over HTTP, a new event stream named where messages go.
     virtual void restarted() = 0;
 };
 

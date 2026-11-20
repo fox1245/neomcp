@@ -113,7 +113,9 @@ enum class OutgoingKind {
     end_unit,                // no message: the transport ends the unit's exchange (its answer arrived, or the
                              // request was cancelled by ending it); ignored for a unit that ended already
     open_connection_stream,  // no message: the transport opens the stream of `connection_unit`, with the headers
-    restart,                 // no message: stdio, start the server process again, then call transport_restarted()
+    restart,                 // no message: make the connection again (stdio: start the server process again; the older
+                             // transport of events over HTTP: open its event stream again), then call
+                             // transport_restarted()
     close                    // no message: end the transport (an unanswered handshake, or close() of the engine)
 };
 
@@ -155,7 +157,9 @@ struct StreamRetryAdvice {
 // The unit's exchange ended in order (HTTP: the body is complete). A request still waiting on it lost its answer.
 struct StreamEnded {};
 
-// The unit's stream broke before its end (the connection was reset, the stream stayed idle too long).
+// The unit's stream broke before its end (the connection was reset, the stream stayed idle too long). Under the older
+// transport of events over HTTP, StreamLost or StreamEnded on `connection_unit` means that the event stream of the
+// connection ended, which ends the connection as a whole, as ProcessExited does on stdio.
 struct StreamLost {
     std::string cause;  // written by the transport, for diagnostics
 };
@@ -758,9 +762,10 @@ public:
     // and when contact is not open.
     bool roots_changed();
 
-    // stdio: a new server process runs (after a restart output, or on the transport's own account). Every request
-    // still pending ends server_exited; ids go on counting; the verdict stays, and under a revision that keeps a
-    // connection the handshake is made again before held calls go out.
+    // The connection was made again (after a restart output, or on the transport's own account): stdio, a new server
+    // process runs; the older transport of events over HTTP, a new event stream named where messages go. Every request
+    // still pending ends server_exited (stdio) or stream_lost; ids go on counting; the verdict stays, and under a
+    // revision that keeps a connection the handshake is made again before held calls go out.
     void transport_restarted();
 
     // Ends every pending call `closed`, stops every clock, and writes `close`. Later calls are refused and later input

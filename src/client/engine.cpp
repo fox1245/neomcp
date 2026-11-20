@@ -248,6 +248,24 @@ public:
     // Streamable HTTP endpoint refused by its status).
     void set_http_sse_enabled(bool enabled) noexcept { http_sse_enabled_ = enabled; }
 
+    // Whether the server's answers come on the connection rather than on the exchange that carried the request: on
+    // stdio, and on the older transport of events over HTTP, whose POSTs carry nothing back.
+    bool answers_on_connection() const noexcept { return transport_ != profile::Transport::streamable_http; }
+    // Whether the connection is one event stream, whose end ends the connection (the older transport of events over
+    // HTTP): the next request opens it again, as a new server process is started on stdio.
+    bool connection_is_stream() const noexcept { return transport_ == profile::Transport::http_sse; }
+    // Whether the connection ends as a whole and is made again for the next request (restart).
+    bool connection_restarts() const noexcept {
+        return transport_ == profile::Transport::stdio || connection_is_stream();
+    }
+    // How the calls that waited on a connection that ended end.
+    CallFailure connection_loss() const {
+        if (connection_is_stream()) {
+            return CallFailure{CallFailureKind::stream_lost, "the event stream of the connection ended"};
+        }
+        return CallFailure{CallFailureKind::server_exited, "the server process ended"};
+    }
+
     // ---- the public operations
 
     void open() {
@@ -549,7 +567,8 @@ public:
 
     void transport_restarted() {
         if (closed_) return;
-        lose_all_on_wire(CallFailureKind::server_exited, "the server process ended");
+        const CallFailure loss = connection_loss();
+        lose_all_on_wire(loss.kind, loss.message);
         end_asks();
         restarting_ = false;
         switch (contact_.phase) {
@@ -1030,13 +1049,22 @@ private:
         }
     }
 
-    // The calls whose answer counts on `unit` lose it (HTTP exchanges; on stdio the connection).
+    // The calls whose answer counts on `unit` lose it (HTTP exchanges; on stdio the connection). Where answers come
+    // on the connection, an exchange carries only its request: the calls it carried lose their answer with it.
     void lose_unit(UnitId unit, CallFailure failure, std::optional<int> status = std::nullopt) {
         std::vector<RequestRef> refs;
         for (const auto& [id, entry] : wires_) {
-            if (entry.unit == unit && (unit != connection_unit || transport_ == profile::Transport::stdio)) {
-                refs.push_back(entry.ref);
+            if (unit == connection_unit) {
+                if (entry.unit == unit && transport_ == profile::Transport::stdio) refs.push_back(entry.ref);
+                continue;
             }
+            if (entry.unit == unit) {
+                refs.push_back(entry.ref);
+                continue;
+            }
+            if (!answers_on_connection()) continue;
+            const auto call = calls_.find(entry.ref);
+            if (call != calls_.end() && call->second.sent_unit == unit) refs.push_back(entry.ref);
         }
         if (unit != connection_unit && !refs.empty()) end_exchange(unit);
         for (const RequestRef ref : refs) lose(ref, failure, status);
@@ -1053,7 +1081,7 @@ private:
         }
         finish(ref);
         if (purpose == Purpose::level) return;
-        step(ref, method, failure.message);
+        step(ref, method, status ? failure.message + " (status " + std::to_string(*status) + ")" : failure.message);
         if (purpose == Purpose::probe && status && refusing_status(*status)) {
             fallback_handshake();
             return;
@@ -1104,7 +1132,7 @@ private:
     }
 
     void request_restart() {
-        if (restarting_ || transport_ != profile::Transport::stdio) return;
+        if (restarting_ || !connection_restarts()) return;
         restarting_ = true;
         emit(Outgoing{std::string(), connection_unit, {}, OutgoingKind::restart, nullptr});
     }
@@ -1302,14 +1330,22 @@ private:
     // The handshake was refused with 400, 404 or 405 and a body that is no answer only a server that names revisions
     // per request sends: the step after it is the older transport of events over HTTP, where a profile defines it.
     void fail_handshake_by_status() {
+        // The steps so far are named, so that the failure (and a failure of the step after it) names every answer.
+        std::string met;
+        for (const ContactStep& one : contact_.steps) {
+            met += met.empty() ? " (" : "; ";
+            met += one.method + ": " + one.outcome;
+        }
+        if (!met.empty()) met += ")";
         if (http_sse_enabled_) {
             fail_contact(ContactFailureKind::http_status,
                          "the server refused the handshake with a status after which it may serve the older "
-                         "transport of events over HTTP",
+                         "transport of events over HTTP" + met,
                          {}, profile::Transport::http_sse);
         } else {
             fail_contact(ContactFailureKind::http_status,
-                         "the server refused the handshake with a status after which no enabled revision can be tried");
+                         "the server refused the handshake with a status after which no enabled revision can be "
+                         "tried" + met);
         }
     }
 
@@ -1912,12 +1948,17 @@ private:
     void on_stream(UnitId, const StreamEventId&) {}
     void on_stream(UnitId, const StreamRetryAdvice&) {}
     void on_stream(UnitId unit, const StreamEnded&) {
-        if (unit == connection_unit) return;
+        if (unit == connection_unit) {
+            if (connection_is_stream()) connection_ended();
+            return;
+        }
         const auto found = exchanges_.find(unit);
         if (found == exchanges_.end()) return;
         const std::optional<int> status = found->second.status;
         exchanges_.erase(found);
         const bool refused = status && !is_success(*status);
+        // An exchange that carried only its request was taken; its answer comes on the connection.
+        if (!refused && answers_on_connection()) return;
         lose_unit(unit,
                   CallFailure{refused ? CallFailureKind::http_status : CallFailureKind::stream_lost,
                               refused ? "the exchange was answered with a status that carries no answer"
@@ -1926,17 +1967,22 @@ private:
     }
     void on_stream(UnitId unit, const StreamLost&) {
         if (unit != connection_unit) exchanges_.erase(unit);
+        if (unit == connection_unit && connection_is_stream()) {
+            connection_ended();
+            return;
+        }
         if (unit == connection_unit && transport_ != profile::Transport::stdio) return;
         lose_unit(unit, CallFailure{CallFailureKind::stream_lost, "the exchange broke before its answer"});
     }
-    void on_stream(UnitId unit, const SendFailed&) {
+    void on_stream(UnitId unit, const SendFailed& failed) {
         std::vector<RequestRef> refs;
         for (const auto& [ref, call] : calls_) {
             if (call.wire && call.sent_unit == unit) refs.push_back(ref);
         }
         if (unit != connection_unit) exchanges_.erase(unit);
         for (const RequestRef ref : refs) {
-            lose(ref, CallFailure{CallFailureKind::send_failed, "the transport could not deliver it"}, std::nullopt);
+            lose(ref, CallFailure{CallFailureKind::send_failed, "the transport could not deliver it: " + failed.cause},
+                 std::nullopt);
         }
     }
     // The server no longer knew the session the unit's request carried. It did not take the request: a call goes out
@@ -1989,10 +2035,21 @@ private:
 
     void on_stream(UnitId unit, const ProcessExited&) {
         if (transport_ != profile::Transport::stdio || unit != connection_unit) return;
+        connection_ended();
+    }
+
+    // The connection ended as a whole: the server process (stdio), or the event stream of the older transport of
+    // events over HTTP. Every call that waited on it loses its answer; contact is opened again for the next request
+    // (restart), at most max_restarts times in a row without an answer between.
+    void connection_ended() {
+        const CallFailure loss = connection_loss();
         const ContactPhase phase = contact_.phase;
         if (phase == ContactPhase::probing) {
             for (const auto& [ref, call] : calls_) {
-                if (call.purpose == Purpose::probe) step(ref, call.message.method, "the process ended first");
+                if (call.purpose == Purpose::probe) {
+                    step(ref, call.message.method,
+                         connection_is_stream() ? "the event stream ended first" : "the process ended first");
+                }
             }
             restart_for_probe_ = true;
             if (!probe_restart_used_) {
@@ -2000,7 +2057,7 @@ private:
                 // a fresh process, a start that belongs to finding out which kind of server it is. Once only: a
                 // process that ends while the probe is out again counts as any other end.
                 probe_restart_used_ = true;
-                lose_all_on_wire(CallFailureKind::server_exited, "the server process ended");
+                lose_all_on_wire(loss.kind, loss.message);
                 reopening_ = true;
                 restarting_ = false;
                 set_phase(ContactPhase::lost);
@@ -2008,7 +2065,7 @@ private:
                 return;
             }
         }
-        lose_all_on_wire(CallFailureKind::server_exited, "the server process ended");
+        lose_all_on_wire(loss.kind, loss.message);
         end_asks();
         switch (phase) {
             case ContactPhase::open:
@@ -2021,7 +2078,10 @@ private:
         restarting_ = false;
         if (exits_in_row_ > options_.max_restarts) {
             fail_contact(ContactFailureKind::too_many_restarts,
-                         "the server process ended more often in a row than the client starts it again");
+                         connection_is_stream()
+                             ? "the event stream of the connection ended more often in a row than the client opens it "
+                               "again"
+                             : "the server process ended more often in a row than the client starts it again");
             return;
         }
         // Contact that was being opened is still wanted, with or without a call that waits for it; a held call needs the

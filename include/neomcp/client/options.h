@@ -52,8 +52,9 @@ struct RequestOptions {
 
 // ---- What the client tells the application besides the ends of its calls
 
-// stdio: the server process ended and a new one was started for the next request. Whatever the server kept is gone;
-// where the revision opens with a handshake, the handshake was made again.
+// The connection ended and was made again for the next request: on stdio the server process ended and a new one was
+// started; on the older transport of events over HTTP the event stream ended and a new one was opened. Whatever the
+// server kept is gone; where the revision opens with a handshake, the handshake was made again.
 struct ServerRestarted {
     std::size_t restarts = 0;      // restarts since the client opened
     bool handshake_repeated = false;

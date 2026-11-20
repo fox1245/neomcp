@@ -86,6 +86,7 @@ bool lost_answer(CallFailureKind kind) noexcept {
 ClientError contact_error(const ContactFailure& failure) {
     ClientError error = error_of(error_kind(failure.kind), failure.message);
     error.server_revisions = failure.server_revisions;
+    error.next_transport = failure.next_transport;
     return error;
 }
 
