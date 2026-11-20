@@ -266,9 +266,14 @@ public:
     // method, malformed params).
     virtual std::variant<ServerAsk, ServerPing, RequestError> read_request(const Message& request,
                                                                            const profile::Profile& profile) const = 0;
-    // The error answer to an input request the client declared no support for, as the revision prescribes it (a mode
-    // of elicitation the client did not declare is refused differently from a kind it did not declare at all).
-    virtual RequestError refusal(const InputRequest& request, const profile::Profile& profile) const = 0;
+    // The error answer to an input request the client declared no support for, as the revision prescribes it.
+    // `declared` is the ClientCapabilities object the client declared under the profile: a request whose kind it does
+    // not declare at all (no elicitation, no sampling, no roots) is answered as a method the client does not have; an
+    // elicitation in a mode it does not declare, while it declares elicitation in another mode, as invalid params.
+    virtual RequestError refusal(const InputRequest& request, const json& declared,
+                                 const profile::Profile& profile) const = 0;
+    // The error answer that tells the server the user refused its sampling request, as the revision prescribes it.
+    virtual RequestError user_refusal(const profile::Profile& profile) const = 0;
     // The response that answers the server's request `id`; an error when the answer cannot be written for the
     // revision.
     virtual WireRead<json> answer(const RequestId& id, const InputResponse& response,
@@ -277,6 +282,16 @@ public:
     virtual json ping_answer(const RequestId& id) const = 0;
 
     // ---- both
+
+    // What keeps the requested schema of a form from the restricted form the profile defines; empty when it fits.
+    // Each property must hold the required members of one alternative of the profile's union of primitive schema
+    // definitions and no member that alternative lacks; the schema itself may hold only the members the half names
+    // for the root of a form (its type, its properties, which of them are required, and the dialect). The profile's
+    // tables name members, not their values, so the value of a property's `type` is not compared with the
+    // alternative's; the engine compiles the schema as well before a handler sees the form. The description never
+    // repeats a text the server sent (a property is named by its position).
+    virtual std::optional<std::string> form_problem(const json& requested_schema,
+                                                    const profile::Profile& profile) const = 0;
 
     // The notification that tells the server the client's roots changed; empty when the profile has none.
     virtual std::optional<ClientMessage> roots_changed(const profile::Profile& profile) const = 0;

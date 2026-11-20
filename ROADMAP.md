@@ -95,6 +95,8 @@ Acceptance: the official conformance suite's client scenarios that need no autho
 - Sampling messages of 2025-11-25 and 2026-07-28 may hold tool use and tool result blocks (`ToolUseContent`,
   `ToolResultContent`); the content model has no such blocks, so a server cannot write them and the reader of a
   sampling request refuses a request that holds them.
+- The client checks the restricted form of an elicitation by member names only, because the profiles do not carry
+  the `type` values of the primitive schema types; accepted content is still validated against the schema.
 - Change notifications: many distinct updated URIs in a burst can delay a list change.
 - A request of 2026-07-28 that carries a session header is routed to that session; the pages say to ignore the
   header.

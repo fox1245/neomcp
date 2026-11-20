@@ -19,7 +19,10 @@
 // - the corrective retry of a request whose revision the server refuses, once, at the newest revision both serve;
 // - clocks as data: every request has a deadline, which pauses while the client itself is answering the server;
 // - cancellation, progress, pings in both directions, and the server's notifications as events;
-// - the rounds of a call that asks for input, through one seam (InputSupport, ServerAsked, InputRoundStarted).
+// - the rounds of a call that asks for input, through one seam (InputSupport, ServerAsked, InputRoundStarted), with
+//   the checks that need the revision: a request of a kind the client did not declare is refused, a form whose schema
+//   is outside the restricted form never reaches a handler, and accepted content that fails the form's schema is
+//   never sent. Running the handlers is the input dispatcher's (neomcp/client/input_dispatch.h).
 //
 // Units. A transport that carries each message in an exchange of its own (one HTTP POST per message) has one unit per
 // exchange; the engine numbers them and says on every output which unit it opens or belongs to. The connection itself
@@ -311,6 +314,14 @@ enum class CallFailureKind {
     header_value,        // an argument cannot be mirrored into a header (an integer out of range)
     input_timed_out,     // a round of input was not answered within input_handler_timeout
     input_rounds_exceeded,  // the server asked for input more than max_input_rounds times
+    input_requests_exceeded,  // one round asked for more than max_input_requests_per_round inputs
+    server_asked_undeclared,  // a round asked for input of a kind the client did not declare (InputSupport); no
+                              // retry is sent, since a server must not ask so
+    form_not_restricted,  // a round asked for a form whose schema is outside the restricted form, or cannot be
+                          // compiled within the peer limits; no handler saw it
+    answer_invalid,      // an accepted form's content fails the form's schema; it was not sent
+    input_refused,       // the user refused a sampling request of a round; no retry is sent
+    handler_failed,      // a handler of a round failed (it threw); no retry is sent
     state_not_echoable,  // the state of a round cannot be sent back exactly as it was received
     answer_not_writable,  // an answer of a round cannot be written for the revision
     closed               // the engine was closed
@@ -328,17 +339,13 @@ struct Answered {
 struct ErrorAnswered {
     RequestError error;  // the server's error answer: its code, message and data
 };
-// The result asks for input, and no handler takes every request it asks (InputSupport): the asking is the call's
-// answer. With handlers the call goes on instead (InputRoundStarted). The layer above the engine reports such an answer
-// to the application as a server that asked for input the client did not declare.
-struct AskedForInput {
-    InputAsking asking;
-    json result;  // the result as the server sent it
-};
-using RequestOutcome = std::variant<Answered, ErrorAnswered, AskedForInput, CallFailure>;
+using RequestOutcome = std::variant<Answered, ErrorAnswered, CallFailure>;
 
-// What the client answers to a server's request: the answer, or an error answer.
-using InputReply = std::variant<InputResponse, RequestError>;
+// The user refused the server's request (a sampling request): answered as the revision prescribes.
+struct InputRefused {};
+
+// What the client answers to a server's request: the answer, an error answer, or the user's refusal.
+using InputReply = std::variant<InputResponse, RequestError, InputRefused>;
 
 // ---- Input: which requests of a server the client takes
 
@@ -356,7 +363,17 @@ struct InputSupport {
 
     // Whether the client takes the request.
     bool takes(const InputRequest& request) const noexcept;
+
+    friend bool operator==(const InputSupport&, const InputSupport&) = default;
 };
+
+// The ClientCapabilities object that declares `support` under `profile`: a member for each kind the client takes and
+// nothing for a kind it does not, kept to the members the profile's ClientCapabilities type has. A nested member is
+// written only where the profile carries what it declares: the mode of an elicitation where the profile's form
+// params have a mode (elsewhere an empty elicitation object declares forms), URLs where the profile has URL params,
+// tools where its sampling params have tools, and that the roots change where the client may send the notification
+// that says so. The engine declares exactly this for each profile.
+json client_capabilities(const InputSupport& support, const profile::Profile& profile);
 
 // ---- Events
 
@@ -391,7 +408,8 @@ struct ChangeEvent {
 
 // A request of the server that a handler takes (InputSupport). The engine waits for answer(); meanwhile the clocks of
 // `paused` wait, and the input clock of `ref` runs. When that clock lapses the engine answers itself (a form or URL
-// request with a cancel, any other kind with an error), and ServerAskEnded follows.
+// request with a cancel, any other kind with an error), and ServerAskEnded follows. A form arrives here only when its
+// schema fits the restricted form and compiles within the peer limits; any other is answered with invalid params.
 struct ServerAsked {
     InputRef ref;
     std::string method;
@@ -409,11 +427,13 @@ struct ServerAskEnded {
 };
 
 // A call's result asks for input, and handlers take every request it asks. The call waits, with its clocks paused and
-// its input clock running, until answer_round() or cancel().
+// its input clock running, until answer_round(), fail_round() or cancel(). A round arrives here only when it asks for
+// at most max_input_requests_per_round inputs and every form in it fits the restricted form; any other ends the call.
 struct InputRoundStarted {
     RequestRef request;
     InputAsking asking;
     std::size_t round = 1;  // 1 for the first result that asks
+    profile::ProfilePtr profile;  // the profile the call went out under
 };
 
 // The phase of contact changed; contact() has the whole state.
@@ -435,13 +455,17 @@ enum class DiagnosticKind {
     server_defect,       // the server answered in a way only a wrong server does (such as refusing a header this
                          // client writes as the revision says)
     events_dropped,      // events were dropped because max_queued_events were queued
-    level_refused        // the server refused the log level the client asked for
+    level_refused,       // the server refused the log level the client asked for
+    form_not_restricted,  // a server's request for a form outside the restricted form was answered invalid params
+    answer_invalid       // an answer to a server's request held accepted content that fails the form's schema: it
+                         // was not sent, and the request was answered with an internal error
 };
 
 struct Diagnostic {
     DiagnosticKind kind = DiagnosticKind::not_json;
     std::string message;          // in words; never a text the server sent
     std::optional<UnitId> unit;   // the unit it concerns, when one
+    std::optional<InputRef> input = std::nullopt;  // the server's request it concerns, when one
 };
 
 using EngineEvent = std::variant<RequestEnded, ProgressEvent, LogEvent, ChangeEvent, ServerAsked, ServerAskEnded,
@@ -462,8 +486,14 @@ struct ClientDefaults {
     static constexpr std::size_t max_message_bytes = std::size_t{16} * 1024 * 1024;
     static constexpr std::size_t max_nesting_depth = 128;
     static constexpr std::size_t max_input_rounds = 10;
+    static constexpr std::size_t max_input_requests_per_round = 16;
     static constexpr std::size_t max_concurrent_server_requests = 16;
     static constexpr std::size_t max_restarts = 3;
+    // The bounds of a schema a server sent (a form's requested schema), for json_schema::Limits.
+    static constexpr std::size_t peer_schema_depth = 32;
+    static constexpr std::size_t peer_pattern_length = 256;
+    static constexpr std::size_t peer_pattern_memory = std::size_t{512} * 1024;
+    static constexpr std::size_t peer_max_evaluations = 1'000'000;
 };
 
 struct EngineOptions {
@@ -512,6 +542,10 @@ struct EngineOptions {
     // Rounds of input one call may take; the call fails with input_rounds_exceeded when the server asks once more.
     // Zero is an error. Default 10.
     std::size_t max_input_rounds = ClientDefaults::max_input_rounds;
+    // Inputs one round may ask for (each may open a dialog for a person); a round that asks for more fails the call
+    // with input_requests_exceeded and reaches no handler. Requests a server sends of its own are bounded by
+    // max_concurrent_server_requests instead. Zero is an error. Default 16.
+    std::size_t max_input_requests_per_round = ClientDefaults::max_input_requests_per_round;
     // Requests of a server that wait for the client's answer at once (ServerAsked); one more is answered at once with
     // an internal error, without reaching a handler. A ping does not count. Zero is an error. Default 16.
     std::size_t max_concurrent_server_requests = ClientDefaults::max_concurrent_server_requests;
@@ -520,6 +554,15 @@ struct EngineOptions {
     // was out (to make the handshake with a fresh process) belongs to finding out which kind of server it is and does
     // not count. Default 3.
     std::size_t max_restarts = ClientDefaults::max_restarts;
+
+    // The bounds a form's requested schema is compiled and its accepted content validated under (json_schema::Limits:
+    // max_schema_depth, max_pattern_length, max_pattern_memory, max_evaluations). A schema that does not compile
+    // within them is treated as one outside the restricted form; content whose validation exceeds them is not sent.
+    // Zero is an error. Defaults 32, 256 bytes, 512 KiB, 1 000 000.
+    std::size_t peer_schema_depth = ClientDefaults::peer_schema_depth;
+    std::size_t peer_pattern_length = ClientDefaults::peer_pattern_length;
+    std::size_t peer_pattern_memory = ClientDefaults::peer_pattern_memory;
+    std::size_t peer_max_evaluations = ClientDefaults::peer_max_evaluations;
 };
 
 // ---- The engine
@@ -568,13 +611,25 @@ public:
     // cancelled. Ignored for a call that ended.
     void cancel(RequestRef request, std::string reason = {});
 
-    // The answer to a server's request a handler took (ServerAsked). Ignored once the request ended.
+    // The answer to a server's request a handler took (ServerAsked). An accepted form whose content fails the form's
+    // schema is not sent: the request is answered with an internal error and a Diagnostic (answer_invalid) says so.
+    // InputRefused is answered as the revision prescribes a user's refusal. Ignored once the request ended.
     void answer(InputRef request, InputReply reply);
 
     // The answers of a round (InputRoundStarted): the call goes out again, with a new id, the answers under the keys
-    // they answer and the state exactly as received. The call fails when the answers cannot be written or the state
-    // cannot be sent back unchanged. Ignored unless the call waits for this round.
+    // they answer and the state exactly as received. The call fails when the answers cannot be written, when the
+    // state cannot be sent back unchanged, and when an accepted form's content fails its schema (answer_invalid);
+    // then nothing is sent. Ignored unless the call waits for this round.
     void answer_round(RequestRef request, InputResponses answers);
+
+    // Ends a call that waits for a round (InputRoundStarted) with `failure`, such as a handler that failed or a user
+    // who refused; nothing is sent, as no retry follows. Ignored unless the call waits for a round.
+    void fail_round(RequestRef request, CallFailure failure);
+
+    // Tells the server that the client's roots changed, where the governing profile has a notification for that and
+    // the client declared that it sends it (InputSupport::roots_list_changed). False, and nothing is sent, otherwise,
+    // and when contact is not open.
+    bool roots_changed();
 
     // stdio: a new server process runs (after a restart output, or on the transport's own account). Every request
     // still pending ends server_exited; ids go on counting; the verdict stays, and under a revision that keeps a
@@ -591,6 +646,8 @@ public:
     std::uint64_t dropped_events() const noexcept;
 
     const ContactState& contact() const noexcept;
+    // The requests of a server the client has handlers for (EngineOptions::input).
+    const InputSupport& input() const noexcept;
     // The enabled profiles that define the engine's transport, newest revision first.
     std::span<const profile::ProfilePtr> profiles() const noexcept;
     // Calls of the application pending now (sent or held), the bound of max_pending_requests.

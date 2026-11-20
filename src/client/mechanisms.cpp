@@ -9,8 +9,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 #include "core/input.h"
@@ -487,12 +489,87 @@ std::unique_ptr<InputMechanism> server_input(std::string_view name) {
 }
 
 // Shared by both halves: the notification that tells of new roots, where the profile lets a client send it.
-constexpr std::string_view roots_changed_method = "notifications/roots/list_changed";
-
 std::optional<ClientMessage> roots_notification(const profile::Profile& profile) {
-    const profile::Message* entry = profile.notification(roots_changed_method);
-    if (entry == nullptr || !entry->from_client) return std::nullopt;
-    return ClientMessage{std::string(roots_changed_method), nullptr};
+    const auto method = detail::roots_changed_notification(profile);
+    if (!method) return std::nullopt;
+    return ClientMessage{std::string(*method), nullptr};
+}
+
+// ---- the restricted form of a form's requested schema, shared by both halves
+
+// The members the root of a requested schema may have: what a form is (its type and its properties), which of its
+// properties are required, and the dialect it is written in.
+constexpr std::string_view form_type_member = "type";
+constexpr std::string_view form_properties_member = "properties";
+constexpr std::string_view form_required_member = "required";
+constexpr std::string_view form_dialect_member = "$schema";
+constexpr std::string_view form_root_members[] = {form_type_member, form_properties_member, form_required_member,
+                                                  form_dialect_member};
+// The union of the schemas one property of a form may have, in the profile's wire tables.
+constexpr std::string_view primitive_schema_union = "PrimitiveSchemaDefinition";
+
+// The object types a union resolves to: its alternatives, through unions that name unions. `depth` bounds a table
+// that names itself.
+void union_members(const profile::Profile& profile, std::string_view name, std::vector<const profile::Type*>& out,
+                   int depth) {
+    if (depth <= 0) return;
+    if (const profile::Type* type = profile.type(name)) {
+        out.push_back(type);
+        return;
+    }
+    if (const profile::Union* alternatives = profile.union_type(name)) {
+        for (const auto& alternative : alternatives->alternatives) union_members(profile, alternative, out, depth - 1);
+    }
+}
+
+// Whether a property schema has every member the type requires and no member the type lacks.
+bool fits(const json::object_t& property, const profile::Type& type) {
+    for (const auto& [keyword, unused] : property) {
+        static_cast<void>(unused);
+        if (!type.has_property(keyword)) return false;
+    }
+    return std::all_of(type.required.begin(), type.required.end(),
+                       [&](const std::string& name) { return property.find(name) != property.end(); });
+}
+
+// The tables name the members of each primitive schema definition but not the values of their members, so this check
+// compares member names only: a property whose `type` names something other than its alternative's passes here
+// (the engine compiles the schema too, and the accepted content is validated against it).
+std::optional<std::string> restricted_form_problem(const json& schema, const profile::Profile& profile) {
+    constexpr int union_depth = 8;
+    const auto* root = schema.get_ptr<const json::object_t*>();
+    if (root == nullptr) return std::string("the requested schema is not an object");
+    for (const auto& [keyword, unused] : *root) {
+        static_cast<void>(unused);
+        if (std::find(std::begin(form_root_members), std::end(form_root_members), keyword) ==
+            std::end(form_root_members)) {
+            return std::string("the requested schema has a member a form does not define at its root");
+        }
+    }
+    if (root->find(std::string(form_type_member)) == root->end()) {
+        return std::string("the requested schema has no type");
+    }
+    const auto properties = root->find(std::string(form_properties_member));
+    if (properties == root->end() || !properties->second.is_object()) {
+        return std::string("the requested schema has no object of properties");
+    }
+    std::vector<const profile::Type*> alternatives;
+    union_members(profile, primitive_schema_union, alternatives, union_depth);
+    if (alternatives.empty()) return std::string("the revision defines no form");
+    std::size_t position = 0;
+    for (const auto& [name, property] : properties->second.get_ref<const json::object_t&>()) {
+        static_cast<void>(name);
+        const auto* fields = property.get_ptr<const json::object_t*>();
+        const bool fitting =
+            fields != nullptr && std::any_of(alternatives.begin(), alternatives.end(),
+                                             [&](const profile::Type* alternative) { return fits(*fields, *alternative); });
+        if (!fitting) {
+            return "property " + std::to_string(position + 1) +
+                   " of the requested schema fits none of the revision's primitive schema definitions";
+        }
+        ++position;
+    }
+    return std::nullopt;
 }
 
 RequestError not_applicable(std::string_view what) {
@@ -590,13 +667,21 @@ public:
                                                                    const profile::Profile&) const override {
         return RequestError{error_code::method_not_found, "Method not found"};
     }
-    RequestError refusal(const InputRequest&, const profile::Profile&) const override {
+    RequestError refusal(const InputRequest&, const json&, const profile::Profile&) const override {
+        return not_applicable("an answer to a server's request");
+    }
+    RequestError user_refusal(const profile::Profile&) const override {
         return not_applicable("an answer to a server's request");
     }
     WireRead<json> answer(const RequestId&, const InputResponse&, const profile::Profile&) const override {
         return std::string("under this mechanism the client answers no request of the server");
     }
     json ping_answer(const RequestId& id) const override { return make_result(id, json::object()); }
+
+    std::optional<std::string> form_problem(const json& requested_schema,
+                                            const profile::Profile& profile) const override {
+        return restricted_form_problem(requested_schema, profile);
+    }
 
     std::optional<ClientMessage> roots_changed(const profile::Profile& profile) const override {
         return roots_notification(profile);
@@ -646,14 +731,22 @@ public:
         return ServerAsk{request.method, std::move(std::get<InputRequest>(read))};
     }
 
-    // A mode of elicitation the client did not declare is answered with Invalid params; the other kinds of request it
-    // declared no support for, as methods it does not have.
-    RequestError refusal(const InputRequest& request, const profile::Profile&) const override {
-        if (std::holds_alternative<ElicitationForm>(request) || std::holds_alternative<ElicitationUrl>(request)) {
-            return RequestError{error_code::invalid_params,
-                                "Invalid params: the client does not support this mode of elicitation"};
+    // The error a user's refusal of a sampling request is answered with (the sampling page's code for it).
+    static constexpr int user_rejected_code = -1;
+    static constexpr std::string_view user_rejected_message = "User rejected sampling request";
+
+    // A kind of request the client declares nothing of (no elicitation, no sampling, no roots) is answered as a method
+    // the client does not have. A request of a kind it declares that asks for something it did not declare within
+    // that kind (a mode of elicitation, sampling with tools, sampling with context) is answered with Invalid params.
+    RequestError refusal(const InputRequest& request, const json& declared, const profile::Profile&) const override {
+        if (member(declared, detail::capability_of(request)) == nullptr) {
+            return RequestError{error_code::method_not_found, "Method not found"};
         }
-        return RequestError{error_code::method_not_found, "Method not found"};
+        return RequestError{error_code::invalid_params,
+                            "Invalid params: the client does not support what this request asks for"};
+    }
+    RequestError user_refusal(const profile::Profile&) const override {
+        return RequestError{user_rejected_code, std::string(user_rejected_message)};
     }
 
     WireRead<json> answer(const RequestId& id, const InputResponse& response,
@@ -663,6 +756,11 @@ public:
         return make_result(id, std::move(std::get<json>(written)));
     }
     json ping_answer(const RequestId& id) const override { return make_result(id, json::object()); }
+
+    std::optional<std::string> form_problem(const json& requested_schema,
+                                            const profile::Profile& profile) const override {
+        return restricted_form_problem(requested_schema, profile);
+    }
 
     std::optional<ClientMessage> roots_changed(const profile::Profile& profile) const override {
         return roots_notification(profile);

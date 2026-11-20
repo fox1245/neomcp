@@ -3,6 +3,7 @@
 #pragma once
 
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -23,6 +24,20 @@ json required_capabilities(const InputRequest& request);
 // Whether the client's capabilities object declares what the request needs. An `elicitation` object without `form`
 // and without `url` declares forms only, as the pages that define the modes say.
 bool capabilities_declare(const InputRequest& request, const json& capabilities);
+
+// The notification that tells a server the client's roots changed, where the profile lets a client send it.
+std::optional<std::string_view> roots_changed_notification(const profile::Profile& profile);
+
+// The ClientCapabilities object that declares the kinds of `kinds` (each one as required_capabilities gives it) under
+// the profile, with that the roots change when asked: a nested member only where the profile carries what it declares
+// (a mode of elicitation where the form params have a mode, URLs where the profile has URL params, tools where the
+// sampling params have tools, the change of roots where the client may send its notification), kept to the members of
+// the profile's ClientCapabilities type.
+json declared_capabilities(std::span<const InputRequest> kinds, bool roots_list_changed,
+                           const profile::Profile& profile);
+
+// The member of ClientCapabilities that declares the kind of the request at all: elicitation, sampling or roots.
+std::string_view capability_of(const InputRequest& request);
 
 // The params of the request written for the profile, where `mechanism` names the revision's tables; or why the
 // revision cannot carry it (a mode or a member it lacks), as a clause for a message. Every member the revision's

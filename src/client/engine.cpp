@@ -17,6 +17,7 @@
 
 #include "core/input.h"
 #include "neomcp/argument_headers.h"
+#include "neomcp/json_schema.h"
 #include "neomcp/wire.h"
 
 namespace neomcp {
@@ -37,10 +38,6 @@ constexpr std::string_view code_member = "code";
 constexpr std::string_view id_member = "id";
 // The member of a tool call's params whose values a revision may mirror into headers.
 constexpr std::string_view arguments_member = "arguments";
-// The type a client's capabilities are written for, and the flag that says the client tells of new roots.
-constexpr std::string_view capabilities_type = "ClientCapabilities";
-constexpr std::string_view roots_capability = "roots";
-constexpr std::string_view list_changed_flag = "listChanged";
 // The name, in a profile's `errors`, of the code a server gives a request whose headers it refuses.
 constexpr std::string_view header_mismatch_error = "header_mismatch";
 // The media types of an HTTP answer that carry messages of the protocol.
@@ -57,6 +54,9 @@ constexpr std::string_view busy_message = "The client is answering as many reque
 constexpr std::string_view unanswered_message = "The client did not answer in time";
 constexpr std::string_view unwritable_message = "The client's answer cannot be written for the revision";
 constexpr std::string_view timed_out_reason = "The request timed out";
+constexpr std::string_view unrestricted_form_message =
+    "Invalid params: the requested schema is outside the restricted form of a form";
+constexpr std::string_view invalid_content_message = "The client's answer does not fit the requested schema";
 
 bool is_success(int status) { return status >= 200 && status < 300; }
 
@@ -101,40 +101,38 @@ std::optional<std::uint64_t> wire_number(const std::optional<RequestId>& id) {
     return value.get<std::uint64_t>();
 }
 
-// Merges the members of `add` into `into`, objects member by member.
-void merge(json& into, const json& add) {
-    const auto* members = add.get_ptr<const json::object_t*>();
-    if (members == nullptr || !into.is_object()) return;
-    for (const auto& [name, value] : *members) {
-        json& slot = into[name];
-        if (slot.is_object() && value.is_object()) {
-            merge(slot, value);
-        } else {
-            slot = value;
-        }
-    }
-}
-
-// The capabilities that declare what InputSupport takes, before they are written for a revision. They are the
-// capabilities the server's half requires of each kind of request, so the two cannot disagree.
-json support_capabilities(const InputSupport& support) {
-    json capabilities = json::object();
-    if (support.form) merge(capabilities, detail::required_capabilities(ElicitationForm{}));
-    if (support.url) merge(capabilities, detail::required_capabilities(ElicitationUrl{}));
+// One request of each kind InputSupport takes, as much as it takes of it: the capabilities the server's half requires
+// of these are the ones the client declares, so the two cannot disagree.
+std::vector<InputRequest> supported_kinds(const InputSupport& support) {
+    std::vector<InputRequest> kinds;
+    if (support.form) kinds.emplace_back(ElicitationForm{});
+    if (support.url) kinds.emplace_back(ElicitationUrl{});
     if (support.sampling) {
         SamplingRequest request;
         if (support.sampling_tools) request.tools.emplace_back();
         if (support.sampling_context) request.include_context = IncludeContext::this_server;
-        merge(capabilities, detail::required_capabilities(request));
+        kinds.emplace_back(std::move(request));
     }
-    if (support.roots) {
-        merge(capabilities, detail::required_capabilities(RootsRequest{}));
-        if (support.roots_list_changed) {
-            capabilities[std::string(roots_capability)][std::string(list_changed_flag)] = true;
+    if (support.roots) kinds.emplace_back(RootsRequest{});
+    return kinds;
+}
+
+// The capabilities that declare what InputSupport takes, for no revision in particular.
+json support_capabilities(const InputSupport& support) {
+    json capabilities = json::object();
+    for (const InputRequest& kind : supported_kinds(support)) {
+        const json needed = detail::required_capabilities(kind);
+        for (const auto& [name, inner] : needed.get_ref<const json::object_t&>()) {
+            json& slot = capabilities[name];
+            if (!slot.is_object()) slot = json::object();
+            for (const auto& [nested, value] : inner.get_ref<const json::object_t&>()) slot[nested] = value;
         }
     }
     return capabilities;
 }
+
+// The name a refusal or a failure gives a kind of request: its method, never a text the server sent.
+std::string kind_name(const InputRequest& request) { return std::string(detail::method_of(request)); }
 
 }  // namespace
 
@@ -144,6 +142,11 @@ bool InputSupport::takes(const InputRequest& request) const noexcept {
     } catch (...) {
         return false;
     }
+}
+
+json client_capabilities(const InputSupport& support, const profile::Profile& profile) {
+    const std::vector<InputRequest> kinds = supported_kinds(support);
+    return detail::declared_capabilities(kinds, support.roots && support.roots_list_changed, profile);
 }
 
 namespace detail {
@@ -187,6 +190,7 @@ struct Call {
     bool in_round = false;              // waits for the answers of a round
     std::size_t round = 0;              // rounds of input so far (server requests tied to it, where they come so)
     std::optional<InputAsking> asking;
+    std::map<std::string, json_schema::Validator> forms;  // the round's forms by key, their schemas compiled
     std::size_t pausers = 0;            // server requests whose answers its clocks wait for
     Clock wait;
     Clock total;
@@ -200,6 +204,7 @@ struct Ask {
     const Speaker* speaker = nullptr;
     std::vector<RequestRef> paused;
     Clock input;
+    std::optional<json_schema::Validator> form;  // a form's requested schema, compiled
 };
 
 struct WireEntry {
@@ -399,7 +404,21 @@ public:
         if (closed_) return;
         const auto found = asks_.find(ref);
         if (found == asks_.end()) return;
-        finish_ask(ref, response_of(found->second, reply), false, false);
+        const Ask& ask = found->second;
+        if (const auto* response = std::get_if<InputResponse>(&reply); response != nullptr && ask.form) {
+            if (!content_fits(*response, *ask.form)) {
+                // The content is reported, never sent: the server learns only that the client could not answer.
+                push(Diagnostic{DiagnosticKind::answer_invalid,
+                                "an accepted form's content does not fit its requested schema and was not sent",
+                                std::nullopt, ref},
+                     true);
+                reply = RequestError{error_code::internal_error, std::string(invalid_content_message)};
+            }
+        }
+        if (std::holds_alternative<InputRefused>(reply)) {
+            reply = ask.speaker->halves.server_input->user_refusal(*ask.speaker->halves.profile);
+        }
+        finish_ask(ref, response_of(ask, reply), false, false);
     }
 
     void answer_round(RequestRef ref, InputResponses answers) {
@@ -409,6 +428,14 @@ public:
         Call& call = found->second;
         const ClientInputMechanism& input = *call.speaker->halves.server_input;
         const profile::Profile& profile = *call.speaker->halves.profile;
+        for (const auto& [key, given] : answers) {
+            const auto form = call.forms.find(key);
+            if (form != call.forms.end() && !content_fits(given, form->second)) {
+                end_call(ref, CallFailure{CallFailureKind::answer_invalid,
+                                          "an accepted form's content does not fit its requested schema; nothing was sent"});
+                return;
+            }
+        }
         // The state alone first: what fails then is the state, which cannot be sent back unchanged.
         auto echoed = input.retry_params(call.message.params, {}, call.asking->state, profile);
         if (std::holds_alternative<std::string>(echoed)) {
@@ -423,12 +450,28 @@ public:
         call.round_params = std::move(std::get<json>(retry));
         call.in_round = false;
         call.asking.reset();
+        call.forms.clear();
         clock_stop(ref, DeadlineKind::input, call.input);
         if (auto failure = build_and_send(call, *call.speaker)) {
             end_call(ref, *failure);
             return;
         }
         resume_call(calls_.at(ref));
+    }
+
+    void fail_round(RequestRef ref, CallFailure failure) {
+        if (closed_) return;
+        const auto found = calls_.find(ref);
+        if (found == calls_.end() || !found->second.in_round) return;
+        end_call(ref, std::move(failure));
+    }
+
+    bool roots_changed() {
+        if (closed_ || !options_.input.roots || !options_.input.roots_list_changed) return false;
+        if (contact_.phase != ContactPhase::open || governing_ == nullptr) return false;
+        auto notification = governing_->halves.server_input->roots_changed(*governing_->halves.profile);
+        if (!notification) return false;
+        return !send_notification(*notification, *governing_).has_value();
     }
 
     void transport_restarted() {
@@ -474,8 +517,48 @@ public:
     const ContactState& contact() const noexcept { return contact_; }
     std::span<const profile::ProfilePtr> profiles() const noexcept { return profiles_; }
     std::size_t pending() const noexcept { return application_calls_; }
+    const InputSupport& input() const noexcept { return options_.input; }
 
 private:
+    // ---- forms
+
+    json_schema::Limits peer_limits() const {
+        json_schema::Limits limits;
+        limits.max_schema_depth = options_.peer_schema_depth;
+        limits.max_pattern_length = options_.peer_pattern_length;
+        limits.max_pattern_memory = options_.peer_pattern_memory;
+        limits.max_evaluations = options_.peer_max_evaluations;
+        return limits;
+    }
+
+    // The form's requested schema, compiled when it fits the restricted form; else why not, in words that repeat
+    // nothing the server sent.
+    std::variant<json_schema::Validator, std::string> check_form(const ElicitationForm& form,
+                                                                 const Speaker& speaker) const {
+        if (auto problem = speaker.halves.server_input->form_problem(form.requested_schema, *speaker.halves.profile)) {
+            return std::move(*problem);
+        }
+        // Slice 4.4 counts this compile against the client's budget of schema compiles of a server.
+        auto compiled = json_schema::Validator::compile(form.requested_schema, peer_limits());
+        if (std::holds_alternative<json_schema::Issue>(compiled)) {
+            return std::string("the requested schema cannot be compiled within the limits for a server's schemas");
+        }
+        return std::get<json_schema::Validator>(std::move(compiled));
+    }
+
+    // Whether an answer to a form may go out: anything but an accepted form, or accepted content that its schema
+    // takes.
+    static bool content_fits(const InputResponse& response, const json_schema::Validator& form) {
+        const auto* elicited = std::get_if<ElicitationAnswer>(&response);
+        if (elicited == nullptr || elicited->action != ElicitationAction::accept) return true;
+        return !form.validate(elicited->content).has_value();
+    }
+
+    // Whether the client declared, under the speaker's profile, what the request needs.
+    static bool declared(const InputRequest& request, const Speaker& speaker) {
+        return detail::capabilities_declare(request, speaker.self.capabilities);
+    }
+
     // ---- events and outputs
 
     void push(EngineEvent event, bool droppable) {
@@ -487,7 +570,7 @@ private:
     }
 
     void diagnose(DiagnosticKind kind, std::string message, std::optional<UnitId> unit = std::nullopt) {
-        push(Diagnostic{kind, std::move(message), unit}, true);
+        push(Diagnostic{kind, std::move(message), unit, std::nullopt}, true);
     }
 
     void set_phase(ContactPhase phase) {
@@ -1269,11 +1352,17 @@ private:
             }
             auto& asking = std::get<std::optional<InputAsking>>(read);
             if (asking) {
-                const bool taken =
-                    std::all_of(asking->requests.begin(), asking->requests.end(),
-                                [&](const AskedInput& one) { return options_.input.takes(one.request); });
-                if (!taken) {
-                    end_call(ref, AskedForInput{std::move(*asking), message.outcome});
+                for (const AskedInput& one : asking->requests) {
+                    if (!declared(one.request, speaker)) {
+                        end_call(ref, CallFailure{CallFailureKind::server_asked_undeclared,
+                                                  "the server asked for " + kind_name(one.request) +
+                                                      " in a way the client did not declare"});
+                        return;
+                    }
+                }
+                if (asking->requests.size() > options_.max_input_requests_per_round) {
+                    end_call(ref, CallFailure{CallFailureKind::input_requests_exceeded,
+                                              "the server asked for more inputs in one round than the client allows"});
                     return;
                 }
                 if (call.round >= options_.max_input_rounds) {
@@ -1281,12 +1370,24 @@ private:
                                               "the server asked for input more often than the client allows"});
                     return;
                 }
+                std::map<std::string, json_schema::Validator> forms;
+                for (const AskedInput& one : asking->requests) {
+                    const auto* form = std::get_if<ElicitationForm>(&one.request);
+                    if (form == nullptr) continue;
+                    auto checked = check_form(*form, speaker);
+                    if (auto* problem = std::get_if<std::string>(&checked)) {
+                        end_call(ref, CallFailure{CallFailureKind::form_not_restricted, std::move(*problem)});
+                        return;
+                    }
+                    forms.emplace(one.key, std::get<json_schema::Validator>(std::move(checked)));
+                }
                 ++call.round;
                 call.in_round = true;
                 call.asking = *asking;
+                call.forms = std::move(forms);
                 pause_call(call);
                 clock_start(ref, DeadlineKind::input, call.input, options_.input_handler_timeout);
-                push(InputRoundStarted{ref, std::move(*asking), call.round}, false);
+                push(InputRoundStarted{ref, std::move(*asking), call.round, speaker.halves.profile}, false);
                 return;
             }
         }
@@ -1313,8 +1414,8 @@ private:
             return;
         }
         auto& asked = std::get<ServerAsk>(read);
-        if (!options_.input.takes(asked.request)) {
-            const RequestError refusal = input.refusal(asked.request, profile);
+        if (!declared(asked.request, speaker)) {
+            const RequestError refusal = input.refusal(asked.request, speaker.self.capabilities, profile);
             send_response(make_error(message.id, refusal.code, refusal.message, refusal.data), speaker);
             return;
         }
@@ -1328,6 +1429,18 @@ private:
         if (asks_.size() >= options_.max_concurrent_server_requests) {
             send_response(make_error(message.id, error_code::internal_error, std::string(busy_message)), speaker);
             return;
+        }
+        std::optional<json_schema::Validator> form;
+        if (const auto* asked_form = std::get_if<ElicitationForm>(&asked.request)) {
+            auto checked = check_form(*asked_form, speaker);
+            if (std::holds_alternative<std::string>(checked)) {
+                diagnose(DiagnosticKind::form_not_restricted,
+                         "a server's form was refused: " + std::get<std::string>(checked), unit);
+                send_response(make_error(message.id, error_code::invalid_params, std::string(unrestricted_form_message)),
+                              speaker);
+                return;
+            }
+            form = std::get<json_schema::Validator>(std::move(checked));
         }
         std::vector<RequestRef> paused;
         if (tied) {
@@ -1347,7 +1460,7 @@ private:
             }
         }
         const InputRef ref{next_input_++};
-        Ask ask{ref, *message.id, asked.request, &speaker, paused, Clock{}};
+        Ask ask{ref, *message.id, asked.request, &speaker, paused, Clock{}, std::move(form)};
         auto& stored = asks_.emplace(ref, std::move(ask)).first->second;
         for (const RequestRef one : paused) {
             Call& call = calls_.at(one);
@@ -1653,6 +1766,11 @@ std::variant<std::unique_ptr<ClientEngine>, ClientMechanismsError> ClientEngine:
     if (options.max_nesting_depth == 0) problem("max_nesting_depth is zero");
     if (options.max_input_rounds == 0) problem("max_input_rounds is zero");
     if (options.max_concurrent_server_requests == 0) problem("max_concurrent_server_requests is zero");
+    if (options.max_input_requests_per_round == 0) problem("max_input_requests_per_round is zero");
+    if (options.peer_schema_depth == 0) problem("peer_schema_depth is zero");
+    if (options.peer_pattern_length == 0) problem("peer_pattern_length is zero");
+    if (options.peer_pattern_memory == 0) problem("peer_pattern_memory is zero");
+    if (options.peer_max_evaluations == 0) problem("peer_max_evaluations is zero");
 
     const ClientMechanismRegistry& registry =
         options.mechanisms != nullptr ? *options.mechanisms : builtin_client_mechanisms();
@@ -1668,7 +1786,6 @@ std::variant<std::unique_ptr<ClientEngine>, ClientMechanismsError> ClientEngine:
     }
     if (!error.message.empty()) return error;
 
-    const json capabilities = support_capabilities(options.input);
     std::vector<detail::Speaker> speakers;
     speakers.reserve(halves.size());
     for (auto& half : halves) {
@@ -1677,8 +1794,7 @@ std::variant<std::unique_ptr<ClientEngine>, ClientMechanismsError> ClientEngine:
         speaker.handshake = half.open->handshakes();
         speaker.self.info = options.client_info;
         speaker.self.log_level = options.log_level;
-        speaker.self.capabilities = capabilities;
-        keep_members(speaker.self.capabilities, capabilities_type, *half.profile);
+        speaker.self.capabilities = client_capabilities(options.input, *half.profile);
         speaker.halves = std::move(half);
         speakers.push_back(std::move(speaker));
     }
@@ -1726,6 +1842,14 @@ void ClientEngine::answer_round(RequestRef request, InputResponses answers) {
     core_->guard();
     core_->answer_round(request, std::move(answers));
 }
+void ClientEngine::fail_round(RequestRef request, CallFailure failure) {
+    core_->guard();
+    core_->fail_round(request, std::move(failure));
+}
+bool ClientEngine::roots_changed() {
+    core_->guard();
+    return core_->roots_changed();
+}
 void ClientEngine::transport_restarted() {
     core_->guard();
     core_->transport_restarted();
@@ -1742,5 +1866,6 @@ std::uint64_t ClientEngine::dropped_events() const noexcept { return core_->drop
 const ContactState& ClientEngine::contact() const noexcept { return core_->contact(); }
 std::span<const profile::ProfilePtr> ClientEngine::profiles() const noexcept { return core_->profiles(); }
 std::size_t ClientEngine::pending() const noexcept { return core_->pending(); }
+const InputSupport& ClientEngine::input() const noexcept { return core_->input(); }
 
 }  // namespace neomcp

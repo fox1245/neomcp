@@ -808,10 +808,23 @@ TEST(ClientMechanismInput, TheServersRequestsAreRecognisedAndAnswered) {
         const auto response = input->read_request(neomcp::classify(J(R"({"jsonrpc":"2.0","id":1,"result":{}})")), *p);
         ASSERT_TRUE(std::holds_alternative<neomcp::RequestError>(response));
 
-        // What the revision prescribes for kinds the client did not declare.
-        EXPECT_EQ(input->refusal(neomcp::RootsRequest{}, *p).code, neomcp::error_code::method_not_found);
-        EXPECT_EQ(input->refusal(neomcp::SamplingRequest{}, *p).code, neomcp::error_code::method_not_found);
-        EXPECT_EQ(input->refusal(neomcp::ElicitationUrl{}, *p).code, neomcp::error_code::invalid_params);
+        // A kind the client declares nothing of is a method it does not have; what it did not declare within a kind
+        // it declares (a mode of elicitation, sampling with tools or with context) is invalid params.
+        const json nothing = json::object();
+        EXPECT_EQ(input->refusal(neomcp::RootsRequest{}, nothing, *p).code, neomcp::error_code::method_not_found);
+        EXPECT_EQ(input->refusal(neomcp::SamplingRequest{}, nothing, *p).code, neomcp::error_code::method_not_found);
+        EXPECT_EQ(input->refusal(neomcp::ElicitationUrl{}, nothing, *p).code, neomcp::error_code::method_not_found);
+        EXPECT_EQ(input->refusal(neomcp::ElicitationForm{}, nothing, *p).code, neomcp::error_code::method_not_found);
+        const json forms = J(R"({"elicitation":{"form":{}},"sampling":{}})");
+        EXPECT_EQ(input->refusal(neomcp::ElicitationUrl{}, forms, *p).code, neomcp::error_code::invalid_params);
+        neomcp::SamplingRequest with_tools;
+        with_tools.tools.emplace_back();
+        EXPECT_EQ(input->refusal(with_tools, forms, *p).code, neomcp::error_code::invalid_params);
+        neomcp::SamplingRequest with_context;
+        with_context.include_context = neomcp::IncludeContext::all_servers;
+        EXPECT_EQ(input->refusal(with_context, forms, *p).code, neomcp::error_code::invalid_params);
+        // A user's refusal of a sampling request.
+        EXPECT_EQ(input->user_refusal(*p).code, -1);
         // Retrying with answers does not apply.
         EXPECT_TRUE(std::holds_alternative<std::string>(input->retry_params(json::object(), {}, std::nullopt, *p)));
     }

@@ -1,6 +1,5 @@
-// The client engine paired in process with the server's session: every revision, over stdio and the header rules of
-// Streamable HTTP, without sockets. The server's handlers run on its own threads, so what the session writes is queued
-// and the test waits for it with a bound; the engine is touched on the test's thread only.
+// The client engine paired in process with the server's session (pair.h): every revision, over stdio and the header
+// rules of Streamable HTTP, without sockets.
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -13,6 +12,7 @@
 
 #include "engine_rig.h"
 #include "neomcp/server.h"
+#include "pair.h"
 #include "neomcp/wire_read.h"
 
 namespace pair_test {
@@ -47,10 +47,6 @@ namespace {
 using namespace client_core_test;
 using neomcp::ContactPhase;
 using neomcp::profile::Transport;
-using Clock = std::chrono::steady_clock;
-
-constexpr auto wait_bound = std::chrono::seconds(20);
-
 // A tool whose arguments are marked for headers, where a revision mirrors arguments into headers.
 neomcp::ToolDefinition marked_tool() {
     neomcp::ToolDefinition tool;
@@ -100,141 +96,11 @@ std::vector<neomcp::profile::ProfilePtr> revisions(std::initializer_list<std::st
     return profiles;
 }
 
-// What the session wrote, as the transport would hand it on.
-struct Written {
-    std::optional<neomcp::UnitId> unit;
-    std::string line;
-    bool last = false;
-    bool end = false;
-};
-
-class Pair {
+// The pair with this file's server.
+class EnginePair : public Pair {
 public:
-    Pair(neomcp::EngineOptions options, Transport transport, std::vector<neomcp::profile::ProfilePtr> served = {})
-        : server_(server_options(std::move(served))), rig_(std::move(options), transport), transport_(transport) {
-        populate(server_);
-        const auto lines = [this](std::string line) { push(Written{std::nullopt, line, false, false}); };
-        const auto outputs = [this](neomcp::Output output) {
-            push(Written{output.unit, output.line, output.last, output.kind == neomcp::OutputKind::end});
-        };
-        auto connected =
-            transport == Transport::stdio ? server_.connect(lines) : server_.connect_tagged(transport, outputs);
-        if (auto* error = std::get_if<neomcp::CreateError>(&connected)) throw std::runtime_error(error->message);
-        session_ = std::move(std::get<std::unique_ptr<neomcp::Session>>(connected));
-    }
-
-    Rig& rig() { return rig_; }
-
-    // Hands what the engine wrote to the session and what the session wrote to the engine, until `done` holds or
-    // the bound passes.
-    bool pump(const std::function<bool()>& done) {
-        const auto deadline = Clock::now() + wait_bound;
-        while (true) {
-            forward();
-            if (done()) return true;
-            Written written;
-            {
-                std::unique_lock lock(mutex_);
-                if (!ready_.wait_until(lock, deadline, [&] { return !queue_.empty(); })) return done();
-                written = std::move(queue_.front());
-                queue_.pop_front();
-            }
-            deliver(written);
-        }
-    }
-
-    void open() {
-        rig_.engine->open();
-        ASSERT_TRUE(pump([&] {
-            const auto phase = rig_.engine->contact().phase;
-            return phase == ContactPhase::open || phase == ContactPhase::failed;
-        }));
-        ASSERT_EQ(rig_.engine->contact().phase, ContactPhase::open);
-        // The ready notification of a handshake reaches the server before anything else does.
-        pump([] { return true; });
-    }
-
-    neomcp::RequestEnded call(neomcp::OutgoingCall outgoing) {
-        const auto ref = rig_.send(std::move(outgoing));
-        std::optional<neomcp::RequestEnded> ended;
-        pump([&] { return (ended = rig_.ended(ref)).has_value(); });
-        if (!ended) throw std::runtime_error("the call did not end in time");
-        return *ended;
-    }
-
-    neomcp::RequestEnded call(std::string method, json params, json input_schema = nullptr) {
-        neomcp::OutgoingCall outgoing;
-        outgoing.message.method = std::move(method);
-        outgoing.message.params = std::move(params);
-        outgoing.input_schema = std::move(input_schema);
-        return call(std::move(outgoing));
-    }
-
-    // The result of a call that must be answered with one.
-    json result(std::string method, json params, json input_schema = nullptr) {
-        const auto ended = call(method, std::move(params), std::move(input_schema));
-        if (const auto* answered = std::get_if<neomcp::Answered>(&ended.outcome)) return answered->result;
-        if (const auto* error = std::get_if<neomcp::ErrorAnswered>(&ended.outcome)) {
-            throw std::runtime_error(method + " was answered with an error: " + error->error.message);
-        }
-        if (const auto* failure = std::get_if<neomcp::CallFailure>(&ended.outcome)) {
-            throw std::runtime_error(method + " failed: " + failure->message);
-        }
-        throw std::runtime_error(method + " asked for input");
-    }
-
-    const neomcp::profile::Profile& profile() const { return *rig_.engine->contact().profile; }
-
-private:
-    void push(Written written) {
-        {
-            std::lock_guard lock(mutex_);
-            queue_.push_back(std::move(written));
-        }
-        ready_.notify_all();
-    }
-
-    void forward() {
-        for (; forwarded_ < rig_.out.size(); ++forwarded_) {
-            const neomcp::Outgoing outgoing = rig_.out[forwarded_];
-            switch (outgoing.kind) {
-                case neomcp::OutgoingKind::request:
-                case neomcp::OutgoingKind::notification:
-                case neomcp::OutgoingKind::response:
-                    if (transport_ == Transport::stdio) {
-                        session_->receive(outgoing.line);
-                    } else {
-                        std::vector<neomcp::HeaderField> fields;
-                        for (const auto& header : outgoing.headers) fields.push_back({header.name, header.value});
-                        session_->receive(outgoing.unit, outgoing.line, fields);
-                    }
-                    break;
-                case neomcp::OutgoingKind::end_unit:
-                    if (transport_ != Transport::stdio) session_->abandon(outgoing.unit);
-                    break;
-                default: break;
-            }
-        }
-    }
-
-    void deliver(const Written& written) {
-        if (transport_ == Transport::stdio) {
-            rig_.engine->received(neomcp::connection_unit, written.line);
-            return;
-        }
-        const auto unit = written.unit.value_or(neomcp::connection_unit);
-        if (!written.end) rig_.engine->received(unit, written.line);
-        if (written.end || written.last) rig_.engine->stream_event(unit, neomcp::StreamEnded{});
-    }
-
-    std::mutex mutex_;
-    std::condition_variable ready_;
-    std::deque<Written> queue_;
-    neomcp::Server server_;
-    Rig rig_;
-    Transport transport_;
-    std::size_t forwarded_ = 0;
-    std::unique_ptr<neomcp::Session> session_;
+    EnginePair(neomcp::EngineOptions options, Transport transport, std::vector<neomcp::profile::ProfilePtr> served = {})
+        : Pair(std::move(options), transport, server_options(std::move(served)), populate) {}
 };
 
 struct Cell {
@@ -271,7 +137,7 @@ const json* find_named(const json& list, std::string_view name) {
 
 TEST_P(ClientEnginePair, OpensAndServesEveryKindOfRequest) {
     const Cell cell = GetParam();
-    Pair pair(only({cell.revision}), cell.transport);
+    EnginePair pair(only({cell.revision}), cell.transport);
     pair.open();
     const auto& contact = pair.rig().engine->contact();
     EXPECT_EQ(contact.verdict->revision, cell.revision);
@@ -341,7 +207,7 @@ TEST_P(ClientEnginePair, InputRequestsReachTheSeamAndTheirAnswersComplete) {
     }
     auto options = only({cell.revision});
     options.input.form = true;
-    Pair pair(options, cell.transport);
+    EnginePair pair(options, cell.transport);
     pair.open();
     neomcp::OutgoingCall outgoing;
     outgoing.message.method = "tools/call";
@@ -401,7 +267,7 @@ TEST(ClientEnginePairDualEra, AClientOfEveryRevisionFindsWhichKindOfServerAnswer
             neomcp::EngineOptions options;
             options.client_info.name = "engine-test";
             options.client_info.version = "1.0.0";
-            Pair pair(options, transport, era.served);
+            EnginePair pair(options, transport, era.served);
             pair.open();
             const auto& contact = pair.rig().engine->contact();
             ASSERT_TRUE(contact.verdict);

@@ -31,6 +31,12 @@ namespace neomcp {
 struct ElicitationForm {
     std::string message;
     json requested_schema = json::object();
+
+    // The defaults the requested schema gives its properties, as the content of an answer would hold them: an object
+    // with one member per property that has a `default`, in the schema's order; empty when none has one. A client
+    // offers them to the user as the form's starting values. The library never adds them to an answer itself: the
+    // content of an answer is what its handler returns.
+    json prefilled() const;
 };
 
 // Asks the user to visit a URL out of band, for interactions that must not pass through the client (elicitation in

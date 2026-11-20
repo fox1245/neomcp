@@ -44,6 +44,18 @@ constexpr std::string_view tools_capability = "tools";
 constexpr std::string_view context_capability = "context";
 constexpr std::string_view roots_capability = "roots";
 
+// The notification that tells a server the client's roots changed, and the flag of the roots capability that
+// declares the client sends it.
+constexpr std::string_view roots_changed_method = "notifications/roots/list_changed";
+constexpr std::string_view list_changed_flag = "listChanged";
+// The params type of a sampling request; whether it has tools decides whether a client declares tools.
+constexpr std::string_view sampling_params_type = "CreateMessageRequestParams";
+// The type a client's capabilities are written for.
+constexpr std::string_view client_capabilities_type = "ClientCapabilities";
+// The keywords of a form's requested schema that prefilled() reads.
+constexpr std::string_view properties_keyword = "properties";
+constexpr std::string_view default_keyword = "default";
+
 constexpr std::string_view mode_member = "mode";
 constexpr std::string_view form_mode = "form";
 constexpr std::string_view url_mode = "url";
@@ -826,4 +838,77 @@ std::variant<InputResponse, std::string> read_answer(std::string_view method, co
     return std::string("no request of this kind was asked");
 }
 
+std::optional<std::string_view> roots_changed_notification(const profile::Profile& profile) {
+    const profile::Message* entry = profile.notification(roots_changed_method);
+    if (entry == nullptr || !entry->from_client) return std::nullopt;
+    return roots_changed_method;
+}
+
+json declared_capabilities(std::span<const InputRequest> kinds, bool roots_list_changed,
+                           const profile::Profile& profile) {
+    json capabilities = json::object();
+    for (const InputRequest& kind : kinds) {
+        const json needed = required_capabilities(kind);
+        for (const auto& [name, inner] : needed.get_ref<const json::object_t&>()) {
+            json& slot = capabilities[name];
+            if (!slot.is_object()) slot = json::object();
+            for (const auto& [nested, value] : inner.get_ref<const json::object_t&>()) slot[nested] = value;
+        }
+    }
+    // Elicitation: a mode is declared only where the revision's form params name a mode; elsewhere an empty object
+    // declares forms, and a client that takes URLs only declares nothing. URLs only where the revision has them.
+    if (json* elicitation = capabilities.contains(std::string(elicitation_capability))
+                                ? &capabilities[std::string(elicitation_capability)]
+                                : nullptr) {
+        const profile::Type* form_type = profile.type(form_params_type);
+        const bool modes = form_type != nullptr && form_type->has_property(mode_member);
+        const bool form = elicitation->contains(std::string(form_capability));
+        if (profile.type(url_params_type) == nullptr) elicitation->erase(std::string(url_capability));
+        if (!modes) {
+            const bool url = elicitation->contains(std::string(url_capability));
+            *elicitation = json::object();
+            if (!form && !url) capabilities.erase(std::string(elicitation_capability));
+        }
+    }
+    // Sampling with tools only where the revision's sampling params carry tools.
+    if (capabilities.contains(std::string(sampling_capability))) {
+        const profile::Type* type = profile.type(sampling_params_type);
+        if (type == nullptr || !type->has_property(tools_member)) {
+            capabilities[std::string(sampling_capability)].erase(std::string(tools_capability));
+        }
+    }
+    // That the roots change only where the client may send the notification that says so.
+    if (roots_list_changed && capabilities.contains(std::string(roots_capability)) &&
+        roots_changed_notification(profile)) {
+        capabilities[std::string(roots_capability)][std::string(list_changed_flag)] = true;
+    }
+    keep_members(capabilities, client_capabilities_type, profile);
+    return capabilities;
+}
+
+std::string_view capability_of(const InputRequest& request) {
+    if (std::holds_alternative<SamplingRequest>(request)) return sampling_capability;
+    if (std::holds_alternative<RootsRequest>(request)) return roots_capability;
+    return elicitation_capability;
+}
+
 }  // namespace neomcp::detail
+
+namespace neomcp {
+
+json ElicitationForm::prefilled() const {
+    json values = json::object();
+    const auto* schema = requested_schema.get_ptr<const json::object_t*>();
+    if (schema == nullptr) return values;
+    const auto properties = schema->find(std::string(detail::properties_keyword));
+    if (properties == schema->end() || !properties->second.is_object()) return values;
+    for (const auto& [name, property] : properties->second.get_ref<const json::object_t&>()) {
+        const auto* fields = property.get_ptr<const json::object_t*>();
+        if (fields == nullptr) continue;
+        const auto found = fields->find(std::string(detail::default_keyword));
+        if (found != fields->end()) values[name] = found->second;
+    }
+    return values;
+}
+
+}  // namespace neomcp

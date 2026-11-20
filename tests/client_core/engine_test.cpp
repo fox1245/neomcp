@@ -699,19 +699,14 @@ neomcp::OutgoingCall tool_call() {
     return call;
 }
 
-TEST(ClientEngineRounds, WithoutAHandlerTheAskingIsTheCallsAnswer) {
+TEST(ClientEngineRounds, WithoutAHandlerTheCallFailsAsAskingForWhatTheClientDidNotDeclare) {
     Rig rig(with_prior(only({newest}), Transport::stdio, newest));
     rig.engine->open();
     const auto ref = rig.send(tool_call());
     rig.answer("tools/call", asking_result("s1"));
-    const auto ended = rig.ended(ref);
-    ASSERT_TRUE(ended);
-    const auto* asked = std::get_if<neomcp::AskedForInput>(&ended->outcome);
-    ASSERT_NE(asked, nullptr);
-    ASSERT_EQ(asked->asking.requests.size(), 1u);
-    EXPECT_EQ(asked->asking.requests[0].key, "confirm");
-    EXPECT_EQ(asked->asking.state, json("s1"));
+    EXPECT_EQ(failure_of(rig.ended(ref)), CallFailureKind::server_asked_undeclared);
     EXPECT_TRUE(rig.all<neomcp::InputRoundStarted>().empty());
+    EXPECT_EQ(count_requests(rig, "tools/call"), 1u);  // no retry
 }
 
 TEST(ClientEngineRounds, WithAHandlerTheCallIsRetriedWithTheAnswersAndTheStateUnderANewId) {
