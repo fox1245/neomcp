@@ -36,6 +36,18 @@ const profile::Profile& newest() {
 
 bool starts_with(const std::string& text, const std::string& prefix) { return text.rfind(prefix, 0) == 0; }
 
+// The profile of the revision after `edit` changed its document; null (and a failure) when it no longer loads.
+profile::ProfilePtr edited(std::string_view revision, const std::function<void(json&)>& edit) {
+    json document = json::parse(profile::builtin_text(revision));
+    edit(document);
+    auto loaded = profile::load(document.dump());
+    if (const auto* problem = std::get_if<profile::Error>(&loaded)) {
+        ADD_FAILURE() << revision << ": " << problem->pointer << " " << problem->message;
+        return nullptr;
+    }
+    return std::get<profile::ProfilePtr>(loaded);
+}
+
 // Generates values of every fill, many of them at random, from seeds that do not change.
 constexpr std::size_t random_values = 120;
 
@@ -310,7 +322,7 @@ TEST(WireRead, NothingThePeerSentIsRepeatedInAMessage) {
 TEST(WireRead, ObjectsOnlyWhereTheSchemasSayObject) {
     const profile::Profile& profile = newest();
     for (const char* text : {R"({"name":"a","inputSchema":true})", R"({"name":"a","inputSchema":{},"outputSchema":[]})",
-                             R"({"name":"a","inputSchema":{},"_meta":"x"})"}) {
+                             R"({"name":"a","inputSchema":{},"_meta":"x"})", R"({"name":"a","inputSchema":[]})"}) {
         auto read = from_wire<ToolDefinition>(parsed(text), profile);
         EXPECT_TRUE(std::holds_alternative<std::string>(read)) << text;
     }
@@ -429,6 +441,29 @@ TEST(WireRead, ARevisionWithoutCachingHintsHasNone) {
     }
 }
 
+TEST(WireRead, WhenTheTypeDoesNotRequireTheHintsAResultWithoutThemHasNone) {
+    // The newest document with the two hints taken out of the required members: a result that gives neither has no hints.
+    const std::string_view revision = profile::builtin_revisions().back();
+    const profile::ProfilePtr lenient = edited(revision, [](json& document) {
+        json& type = document["wire"]["types"]["ReadResourceResult"];
+        json kept = json::array();
+        for (const json& name : type["required"].get_ref<const json::array_t&>()) {
+            const auto* text = name.get_ptr<const std::string*>();
+            if (text != nullptr && *text != "ttlMs" && *text != "cacheScope") kept.push_back(name);
+        }
+        type["required"] = kept;
+    });
+    ASSERT_NE(lenient, nullptr);
+    ASSERT_FALSE(lenient->type("ReadResourceResult")->is_required("ttlMs"));
+    auto none = read_cache_hints(parsed(R"({"contents":[]})"), "ReadResourceResult", *lenient);
+    ASSERT_TRUE(std::holds_alternative<std::optional<CacheHints>>(none)) << std::get<std::string>(none);
+    EXPECT_FALSE(std::get<std::optional<CacheHints>>(none).has_value());
+    auto ttl_only = read_cache_hints(parsed(R"({"ttlMs":7})"), "ReadResourceResult", *lenient);
+    ASSERT_TRUE(std::holds_alternative<std::optional<CacheHints>>(ttl_only));
+    ASSERT_TRUE(std::get<std::optional<CacheHints>>(ttl_only).has_value());
+    EXPECT_EQ(std::get<std::optional<CacheHints>>(ttl_only)->ttl_ms, 7U);
+}
+
 TEST(WireRead, AReadResultWithoutHintsIsLeftToTheEngineToJudge) {
     // The writer does not write the hints (the engine adds them), so a result as the writer wrote it has none.
     const profile::Profile& profile = newest();
@@ -468,6 +503,141 @@ TEST(WireRead, NoReaderAcceptsAValueThatIsNotAnObject) {
         expect_error_for_every_non_object<CompletionResult>(*profile);
         expect_error_for_every_non_object<ToolResult>(*profile);
     }
+}
+
+// ---- What a reader says about a value of the wrong shape, pinned member by member
+
+TEST(WireRead, ANonObjectIsNamedAtTheGivenPlace) {
+    for (const auto& profile : all_profiles()) {
+        SCOPED_TRACE(profile->revision());
+        const auto tool = from_wire<ToolDefinition>(json(5), *profile);
+        ASSERT_TRUE(std::holds_alternative<std::string>(tool));
+        EXPECT_EQ(std::get<std::string>(tool), "$: must be an object");
+        const auto icon = from_wire<Icon>(json::array(), *profile, "$.icon");
+        ASSERT_TRUE(std::holds_alternative<std::string>(icon));
+        EXPECT_EQ(std::get<std::string>(icon), "$.icon: must be an object");
+        const auto block = from_wire<ContentBlock>(json("s"), *profile);
+        ASSERT_TRUE(std::holds_alternative<std::string>(block));
+        EXPECT_EQ(std::get<std::string>(block), "$: must be an object");
+        const auto contents = from_wire<ResourceContents>(json(nullptr), *profile);
+        ASSERT_TRUE(std::holds_alternative<std::string>(contents));
+        EXPECT_EQ(std::get<std::string>(contents), "$: must be an object");
+    }
+}
+
+TEST(WireRead, ABlockNamesItsTypeMemberWhenThatIsMissingOrWrong) {
+    for (const auto& profile : all_profiles()) {
+        SCOPED_TRACE(profile->revision());
+        const auto missing = from_wire<ContentBlock>(parsed(R"({"text":"a"})"), *profile);
+        ASSERT_TRUE(std::holds_alternative<std::string>(missing));
+        EXPECT_EQ(std::get<std::string>(missing), "$.type: is required");
+        const auto wrong = from_wire<ContentBlock>(parsed(R"({"type":5,"text":"a"})"), *profile);
+        ASSERT_TRUE(std::holds_alternative<std::string>(wrong));
+        EXPECT_EQ(std::get<std::string>(wrong), "$.type: must be a string");
+    }
+}
+
+TEST(WireRead, AnIconThemeThatIsNeitherLightNorDarkIsAnError) {
+    for (const auto& profile : all_profiles()) {
+        SCOPED_TRACE(profile->revision());
+        const auto read = from_wire<Icon>(parsed(R"({"src":"a","theme":"blue"})"), *profile);
+        ASSERT_TRUE(std::holds_alternative<std::string>(read));
+        EXPECT_EQ(std::get<std::string>(read), "$.theme: must be light or dark");
+    }
+}
+
+TEST(WireRead, AnAudienceEntryThatIsNotARoleIsAnErrorAtItsIndex) {
+    for (const auto& profile : all_profiles()) {
+        SCOPED_TRACE(profile->revision());
+        const auto read = from_wire<ContentBlock>(
+            parsed(R"({"type":"text","text":"a","annotations":{"audience":["user","robot"]}})"), *profile);
+        ASSERT_TRUE(std::holds_alternative<std::string>(read));
+        EXPECT_EQ(std::get<std::string>(read), "$.annotations.audience[1]: must be user or assistant");
+    }
+}
+
+TEST(WireRead, ASizeIsReadWhateverIntegerKindTheValueHolds) {
+    // A size built in code is a signed integer, one parsed from text an unsigned one; both are sizes, also zero.
+    for (const auto& profile : all_profiles()) {
+        SCOPED_TRACE(profile->revision());
+        for (const std::int64_t size : {std::int64_t{0}, std::int64_t{12}}) {
+            json built = parsed(R"({"type":"resource_link","uri":"u","name":"n"})");
+            built["size"] = size;
+            for (const json& wire : {built, json::parse(built.dump())}) {
+                const auto read = from_wire<ContentBlock>(wire, *profile);
+                if (!has_content_kind(ContentKind::resource_link, *profile)) continue;
+                ASSERT_TRUE(std::holds_alternative<ContentBlock>(read)) << std::get<std::string>(read);
+                EXPECT_EQ(std::get<ResourceLink>(std::get<ContentBlock>(read)).size,
+                          std::optional<std::uint64_t>(static_cast<std::uint64_t>(size)));
+            }
+        }
+    }
+}
+
+TEST(WireRead, ACachingTtlOfZeroIsReadWhateverIntegerKindItHolds) {
+    const profile::Profile& profile = newest();
+    json built = parsed(R"({"cacheScope":"public"})");
+    built["ttlMs"] = std::int64_t{0};
+    for (const json& wire : {built, json::parse(built.dump())}) {
+        const auto read = read_cache_hints(wire, "ReadResourceResult", profile);
+        ASSERT_TRUE(std::holds_alternative<std::optional<CacheHints>>(read)) << std::get<std::string>(read);
+        ASSERT_TRUE(std::get<std::optional<CacheHints>>(read).has_value());
+        EXPECT_EQ(std::get<std::optional<CacheHints>>(read)->ttl_ms, 0U);
+    }
+    // A negative ttl is read as 0 and not as a huge unsigned number.
+    json negative = parsed(R"({"cacheScope":"public"})");
+    negative["ttlMs"] = std::int64_t{-1};
+    const auto read = read_cache_hints(negative, "ReadResourceResult", profile);
+    ASSERT_TRUE(std::holds_alternative<std::optional<CacheHints>>(read));
+    EXPECT_EQ(std::get<std::optional<CacheHints>>(read)->ttl_ms, 0U);
+}
+
+// ---- Members the profile's type has and the model has no member for
+
+// The profile of a revision whose text block type also has the member `x-note`.
+profile::ProfilePtr with_text_note(std::string_view revision) {
+    return edited(revision, [](json& document) {
+        document["wire"]["types"]["TextContent"]["properties"].push_back("x-note");
+    });
+}
+
+TEST(WireRead, AMemberTheTypeHasAndTheModelDoesNotIsKeptAsExtra) {
+    for (const std::string_view revision : profile::builtin_revisions()) {
+        SCOPED_TRACE(std::string(revision));
+        const profile::ProfilePtr profile = with_text_note(revision);
+        ASSERT_NE(profile, nullptr);
+        const json wire = parsed(R"({"type":"text","text":"a","x-note":[1,2],"x-other":3})");
+        const auto read = from_wire<ContentBlock>(wire, *profile);
+        ASSERT_TRUE(std::holds_alternative<ContentBlock>(read)) << std::get<std::string>(read);
+        const auto& block = std::get<TextContent>(std::get<ContentBlock>(read));
+        // The member of the type is kept; one that the type does not have is not.
+        EXPECT_EQ(block.extra, parsed(R"({"x-note":[1,2]})"));
+        // And the writer puts it back.
+        EXPECT_EQ(to_wire(std::get<ContentBlock>(read), *profile).at("x-note"), parsed("[1,2]"));
+        // Another kind of block, whose type lacks the member, keeps nothing.
+        const auto image = from_wire<ContentBlock>(
+            parsed(R"({"type":"image","data":"AAAA","mimeType":"image/png","x-note":1})"), *profile);
+        ASSERT_TRUE(std::holds_alternative<ContentBlock>(image));
+        EXPECT_TRUE(std::get<ImageContent>(std::get<ContentBlock>(image)).extra.empty());
+    }
+}
+
+TEST(WireRead, AMemberTheProfileRequiresIsRequiredWhateverTheModelSays) {
+    // `title` of a tool is optional in the model and in every revision; a revision that required it would have it so.
+    const std::string_view revision = profile::builtin_revisions().back();
+    ASSERT_TRUE(has(newest(), "Tool", "title"));
+    const profile::ProfilePtr strict = edited(revision, [](json& document) {
+        document["wire"]["types"]["Tool"]["required"].push_back("title");
+    });
+    ASSERT_NE(strict, nullptr);
+    ASSERT_TRUE(strict->type("Tool")->is_required("title"));
+    const auto without = from_wire<ToolDefinition>(parsed(R"({"name":"a","inputSchema":{}})"), *strict);
+    ASSERT_TRUE(std::holds_alternative<std::string>(without));
+    EXPECT_EQ(std::get<std::string>(without), "$.title: is required");
+    EXPECT_TRUE(std::holds_alternative<ToolDefinition>(
+        from_wire<ToolDefinition>(parsed(R"({"name":"a","inputSchema":{},"title":"t"})"), *strict)));
+    EXPECT_TRUE(std::holds_alternative<ToolDefinition>(
+        from_wire<ToolDefinition>(parsed(R"({"name":"a","inputSchema":{}})"), newest())));
 }
 
 // ---- Sweeps over the members of generated values

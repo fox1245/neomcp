@@ -3,6 +3,7 @@
 #include <array>
 #include <cctype>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <variant>
@@ -406,6 +407,145 @@ TEST(ReadRequest, TheUrlOfAUrlRequestIsKeptAsGiven) {
     }
 }
 
+// The profile of the revision after `edit` changed its document; null (and a failure) when it no longer loads.
+profile::ProfilePtr edited(std::string_view revision, const std::function<void(json&)>& edit) {
+    json document = json::parse(profile::builtin_text(revision));
+    edit(document);
+    auto loaded = profile::load(document.dump());
+    if (const auto* problem = std::get_if<profile::Error>(&loaded)) {
+        ADD_FAILURE() << revision << ": " << problem->pointer << " " << problem->message;
+        return nullptr;
+    }
+    return std::get<profile::ProfilePtr>(loaded);
+}
+
+// A list of names without one of them.
+json without_name(const json& list, std::string_view name) {
+    json out = json::array();
+    for (const json& item : list.get_ref<const json::array_t&>()) {
+        const auto* text = item.get_ptr<const std::string*>();
+        if (text == nullptr || *text != name) out.push_back(item);
+    }
+    return out;
+}
+
+TEST(ReadRequest, AModeIsNotReadWhereTheFormParamsOfTheRevisionLackIt) {
+    // A revision whose form params have no `mode` (the 2025-11-25 document with the member taken out).
+    const profile::ProfilePtr profile = edited(profile::builtin_revisions()[profile::builtin_revisions().size() - 2], [](json& document) {
+        json& form = document["wire"]["types"]["ElicitRequestFormParams"];
+        form["properties"] = without_name(form["properties"], "mode");
+    });
+    ASSERT_NE(profile, nullptr);
+    ASSERT_FALSE(defines_modes(*profile));
+    const auto mechanism = make_mechanism(profile->mechanism(profile::Slot::server_input));
+    json params{{"message", "m"}, {"requestedSchema", json::object()}};
+    for (const json& mode : {json("form"), json("video"), json(5), json("url")}) {
+        params["mode"] = mode;
+        auto read = read_request(elicit, params, *profile, *mechanism);
+        ASSERT_TRUE(std::holds_alternative<InputRequest>(read)) << mode.dump() << ": " << std::get<std::string>(read);
+        EXPECT_TRUE(std::holds_alternative<ElicitationForm>(std::get<InputRequest>(read))) << mode.dump();
+    }
+}
+
+TEST(ReadRequest, TheUrlModeNeedsAnUrlTypeInTheRevision) {
+    // The 2025-11-25 document without its URL params type and without the union alternative that names it.
+    const profile::ProfilePtr profile = edited(profile::builtin_revisions()[profile::builtin_revisions().size() - 2], [](json& document) {
+        document["wire"]["types"].get_ref<json::object_t&>().erase("ElicitRequestURLParams");
+        for (auto& [name, alternatives] : document["wire"]["unions"].get_ref<json::object_t&>()) {
+            alternatives = without_name(alternatives, "ElicitRequestURLParams");
+        }
+        document["wire"]["requests"]["elicitation/create"]["params_required"] = json::array({"message", "requestedSchema"});
+    });
+    ASSERT_NE(profile, nullptr);
+    ASSERT_EQ(profile->type("ElicitRequestURLParams"), nullptr);
+    const auto mechanism = make_mechanism(profile->mechanism(profile::Slot::server_input));
+    const json params{{"mode", "url"}, {"message", "m"}, {"url", "https://example.test/"}};
+    auto read = read_request(elicit, params, *profile, *mechanism);
+    ASSERT_TRUE(std::holds_alternative<std::string>(read));
+    EXPECT_EQ(std::get<std::string>(read), "the revision has no elicitation in URL mode");
+}
+
+TEST(ReadRequest, ParamsThatAreNotAnObjectAreRefusedForTheirKind) {
+    const auto modern = profile::builtin(profile::builtin_revisions().back());
+    const auto mechanism = make_mechanism(modern->mechanism(profile::Slot::server_input));
+    for (const std::string_view method : {elicit, sampling}) {
+        for (const json& params : {json(5), json("x"), json::array(), json(nullptr)}) {
+            auto read = read_request(method, params, *modern, *mechanism);
+            ASSERT_TRUE(std::holds_alternative<std::string>(read));
+            EXPECT_EQ(std::get<std::string>(read), "the params of a request must be an object") << params.dump();
+        }
+    }
+    const json message_that_is_not_an_object = json::array({json(5)});
+    auto read = read_request(sampling, json{{"messages", message_that_is_not_an_object}, {"maxTokens", 5}}, *modern, *mechanism);
+    ASSERT_TRUE(std::holds_alternative<std::string>(read));
+    EXPECT_EQ(std::get<std::string>(read), "messages[0] must be an object");
+}
+
+TEST(ReadRequest, AnElicitationIdIsReadOnlyWhereTheRevisionsUrlParamsHaveIt) {
+    for (const auto& profile : all_profiles()) {
+        const auto mechanism = make_mechanism(profile->mechanism(profile::Slot::server_input));
+        if (!mechanism->carries(*profile, elicit) || profile->type("ElicitRequestURLParams") == nullptr) continue;
+        SCOPED_TRACE(profile->revision());
+        const json params{{"mode", "url"}, {"message", "m"}, {"url", "https://example.test/"}, {"elicitationId", "e-1"}};
+        auto read = read_request(elicit, params, *profile, *mechanism);
+        ASSERT_TRUE(std::holds_alternative<InputRequest>(read)) << std::get<std::string>(read);
+        const auto& request = std::get<ElicitationUrl>(std::get<InputRequest>(read));
+        const bool has_id = allows(profile->type("ElicitRequestURLParams"), "elicitationId");
+        EXPECT_EQ(request.elicitation_id, has_id ? std::optional<std::string>("e-1") : std::nullopt);
+    }
+}
+
+TEST(ReadRequest, ToolsAndToolChoiceAreReadOnlyWhereTheRevisionsParamsHaveThem) {
+    for (const auto& profile : all_profiles()) {
+        const auto mechanism = make_mechanism(profile->mechanism(profile::Slot::server_input));
+        if (!mechanism->carries(*profile, sampling)) continue;
+        SCOPED_TRACE(profile->revision());
+        const profile::Type* type = params_type_of(*profile, *mechanism, sampling);
+        const json message{{"role", "user"}, {"content", json{{"type", "text"}, {"text", "t"}}}};
+        const json base{{"messages", json::array({message})}, {"maxTokens", 1}};
+        for (const char* member : {"tools", "toolChoice"}) {
+            json params = base;
+            params[member] = "x";  // of the wrong kind in every revision
+            const bool read_here = type != nullptr && type->has_property(member);
+            EXPECT_EQ(std::holds_alternative<std::string>(read_request(sampling, params, *profile, *mechanism)), read_here)
+                << member;
+        }
+    }
+}
+
+TEST(ReadRequest, MaxTokensOfZeroIsReadWhateverIntegerKindItHolds) {
+    for (const auto& profile : all_profiles()) {
+        const auto mechanism = make_mechanism(profile->mechanism(profile::Slot::server_input));
+        if (!mechanism->carries(*profile, sampling)) continue;
+        SCOPED_TRACE(profile->revision());
+        const json message{{"role", "user"}, {"content", json{{"type", "text"}, {"text", "t"}}}};
+        json built{{"messages", json::array({message})}};
+        built["maxTokens"] = std::int64_t{0};
+        for (const json& params : {built, json::parse(built.dump())}) {
+            auto read = read_request(sampling, params, *profile, *mechanism);
+            ASSERT_TRUE(std::holds_alternative<InputRequest>(read)) << std::get<std::string>(read);
+            EXPECT_EQ(std::get<SamplingRequest>(std::get<InputRequest>(read)).max_tokens, 0U);
+        }
+    }
+}
+
+TEST(ReadRequest, AHintWithoutANameSaysNothingAndAHintWhoseNameIsNotAStringIsAnError) {
+    const auto modern = profile::builtin(profile::builtin_revisions().back());
+    const auto mechanism = make_mechanism(modern->mechanism(profile::Slot::server_input));
+    const json message{{"role", "user"}, {"content", json{{"type", "text"}, {"text", "t"}}}};
+    json params{{"messages", json::array({message})}, {"maxTokens", 5}};
+    params["modelPreferences"] = json{{"hints", json::array({json::object(), json{{"name", "a"}}, json{{"name", "b"}}})}};
+    auto read = read_request(sampling, params, *modern, *mechanism);
+    ASSERT_TRUE(std::holds_alternative<InputRequest>(read)) << std::get<std::string>(read);
+    const auto& preferences = std::get<SamplingRequest>(std::get<InputRequest>(read)).model_preferences;
+    ASSERT_TRUE(preferences.has_value());
+    EXPECT_EQ(preferences->hints, (std::vector<std::string>{"a", "b"}));
+    params["modelPreferences"] = json{{"hints", json::array({json{{"name", 5}}, json{{"name", "b"}}})}};
+    EXPECT_TRUE(std::holds_alternative<std::string>(read_request(sampling, params, *modern, *mechanism)));
+    params["modelPreferences"] = json{{"hints", json::array({json(5), json{{"name", "b"}}})}};
+    EXPECT_TRUE(std::holds_alternative<std::string>(read_request(sampling, params, *modern, *mechanism)));
+}
+
 // ---- Answers
 
 InputResponse make_answer(Generator& g, const profile::Profile& profile, std::string_view method) {
@@ -592,6 +732,58 @@ TEST(WriteAnswer, TheActionIsTheOneAnswered) {
     }
 }
 
+TEST(WriteAnswer, AnAcceptanceWithoutFieldsHasNoContentMember) {
+    for (const auto& profile : all_profiles()) {
+        const auto mechanism = make_mechanism(profile->mechanism(profile::Slot::server_input));
+        if (!mechanism->carries(*profile, elicit)) continue;
+        SCOPED_TRACE(profile->revision());
+        ElicitationAnswer accepted;
+        accepted.action = ElicitationAction::accept;
+        const auto written = write_answer(InputResponse(accepted), *profile, *mechanism);
+        ASSERT_TRUE(std::holds_alternative<json>(written));
+        EXPECT_EQ(std::get<json>(written), (json{{"action", "accept"}}));
+    }
+}
+
+TEST(WriteAnswer, TheFieldsOfAnAcceptanceAreStringsNumbersBooleansOrListsOfStrings) {
+    const auto modern = profile::builtin(profile::builtin_revisions().back());
+    const auto mechanism = make_mechanism(modern->mechanism(profile::Slot::server_input));
+    const auto writes = [&](const json& content) {
+        ElicitationAnswer answer;
+        answer.action = ElicitationAction::accept;
+        answer.content = content;
+        return std::holds_alternative<json>(write_answer(InputResponse(answer), *modern, *mechanism));
+    };
+    EXPECT_TRUE(writes(json{{"a", "s"}, {"b", 1.5}, {"c", true}, {"d", json::array({"x", "y"})}, {"e", json::array()}}));
+    EXPECT_FALSE(writes(json{{"a", json::array({1})}}));
+    EXPECT_FALSE(writes(json{{"a", json::array({"x", 2})}}));
+    EXPECT_FALSE(writes(json{{"a", json::array({json::array({"x"})})}}));
+    EXPECT_FALSE(writes(json{{"a", json(nullptr)}}));
+    EXPECT_FALSE(writes(json{{"a", json::object()}}));
+}
+
+TEST(WriteAnswer, TheContentOfASamplingResultIsBlocksThatAllHaveAType) {
+    const auto modern = profile::builtin(profile::builtin_revisions().back());
+    const auto mechanism = make_mechanism(modern->mechanism(profile::Slot::server_input));
+    ASSERT_NE(modern->union_type("SamplingMessageContentBlock"), nullptr);
+    const json block{{"type", "text"}, {"text", "a"}};
+    const auto writes = [&](const json& content) {
+        SamplingAnswer answer;
+        answer.model = "m";
+        answer.content = content;
+        return std::holds_alternative<json>(write_answer(InputResponse(answer), *modern, *mechanism));
+    };
+    EXPECT_TRUE(writes(block));
+    EXPECT_TRUE(writes(json::array({block, block})));
+    EXPECT_FALSE(writes(json::array({block, json(5)})));
+    EXPECT_FALSE(writes(json::array({json(5), block})));
+    EXPECT_FALSE(writes(json::array({json(5)})));
+    EXPECT_FALSE(writes(json::array({json::object()})));
+    EXPECT_FALSE(writes(json::array({block, json{{"text", "no type"}}})));
+    EXPECT_FALSE(writes(json{{"text", "no type"}}));
+    EXPECT_FALSE(writes(json{{"type", 5}, {"text", "type is not a string"}}));
+}
+
 TEST(WriteAnswer, WhatTheResultTypeOfTheRevisionHasIsWritten) {
     // Roots: `_meta` is a member of a root where the revision's Root type has it. ElicitResult and ListRootsResult:
     // only the members of the revision's type.
@@ -609,6 +801,37 @@ TEST(WriteAnswer, WhatTheResultTypeOfTheRevisionHasIsWritten) {
             EXPECT_EQ(result.contains("_meta"), false);
         }
     }
+}
+
+TEST(WriteAnswer, AResultHoldsOnlyTheMembersOfTheRevisionsResultTypeAndAllItRequires) {
+    const std::string_view revision = profile::builtin_revisions().back();
+    // A revision whose sampling result has no `stopReason`: it is not written.
+    const profile::ProfilePtr without_reason = edited(revision, [](json& document) {
+        json& type = document["wire"]["types"]["CreateMessageResult"];
+        type["properties"] = without_name(type["properties"], "stopReason");
+    });
+    ASSERT_NE(without_reason, nullptr);
+    const auto mechanism = make_mechanism(without_reason->mechanism(profile::Slot::server_input));
+    SamplingAnswer sampled;
+    sampled.model = "m";
+    sampled.content = json{{"type", "text"}, {"text", "a"}};
+    sampled.stop_reason = "endTurn";
+    auto written = write_answer(InputResponse(sampled), *without_reason, *mechanism);
+    ASSERT_TRUE(std::holds_alternative<json>(written)) << std::get<std::string>(written);
+    EXPECT_FALSE(std::get<json>(written).contains("stopReason"));
+    EXPECT_TRUE(std::get<json>(written).contains("model"));
+    // A revision whose elicitation result requires a member that an answer does not carry: no answer can be written.
+    const profile::ProfilePtr demanding = edited(revision, [](json& document) {
+        json& type = document["wire"]["types"]["ElicitResult"];
+        type["properties"].push_back("x-needed");
+        type["required"].push_back("x-needed");
+    });
+    ASSERT_NE(demanding, nullptr);
+    ElicitationAnswer accepted;
+    accepted.action = ElicitationAction::accept;
+    auto refused = write_answer(InputResponse(accepted), *demanding, *mechanism);
+    ASSERT_TRUE(std::holds_alternative<std::string>(refused));
+    EXPECT_NE(std::get<std::string>(refused).find("x-needed"), std::string::npos) << std::get<std::string>(refused);
 }
 
 TEST(WriteAnswer, AnswersThatCannotBeWrittenAreErrors) {

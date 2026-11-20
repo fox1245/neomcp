@@ -197,6 +197,41 @@ TEST(HeaderValue, ValuesThatCannotBeMirroredAreIssues) {
     }
 }
 
+TEST(HeaderValue, NullHasNoHeaderAndIsNotAnIssue) {
+    for (const Framing& framing : framings()) {
+        const auto result = encode_header_value(json(nullptr), *framing.encoded);
+        const auto* made = std::get_if<std::optional<std::string>>(&result);
+        ASSERT_NE(made, nullptr);
+        EXPECT_FALSE(made->has_value());
+    }
+}
+
+TEST(HeaderValue, WholeFloatsAreMirroredUpToTheSafeIntegerLimitAndNoFurther) {
+    for (const Framing& framing : framings()) {
+        const auto text = [&](double value) {
+            const auto result = encode_header_value(json(value), *framing.encoded);
+            const auto* made = std::get_if<std::optional<std::string>>(&result);
+            return made != nullptr && made->has_value() ? **made : std::string("<issue>");
+        };
+        EXPECT_EQ(text(9007199254740991.0), "9007199254740991");
+        EXPECT_EQ(text(-9007199254740991.0), "-9007199254740991");
+        EXPECT_EQ(text(9007199254740992.0), "<issue>");
+        EXPECT_EQ(text(-9007199254740992.0), "<issue>");
+        EXPECT_EQ(text(0.5), "<issue>");
+    }
+}
+
+TEST(HeaderValue, TextThatIsExactlyTheFramingIsEncodedWhateverTheFraming) {
+    // The sentinel rule holds for any framing, also when the text is no longer than the prefix or the suffix.
+    const profile::EncodedHeaderValue prefix_is_longer{"ab", "b"};
+    EXPECT_EQ(encode_header_text("ab", prefix_is_longer), "abYWI=b");
+    EXPECT_EQ(encode_header_text("a", prefix_is_longer), "a");
+    EXPECT_EQ(encode_header_text("b", prefix_is_longer), "b");
+    const profile::EncodedHeaderValue suffix_is_longer{"a", "ab"};
+    EXPECT_EQ(encode_header_text("ab", suffix_is_longer), "aYWI=ab");
+    EXPECT_EQ(encode_header_text("a", suffix_is_longer), "a");
+}
+
 TEST(HeaderValue, AnIssueNeverRepeatsTheValue) {
     const Framing framing = framings().front();
     const auto result = encode_header_value(json::array({"the-secret-value-0451"}), *framing.encoded);
