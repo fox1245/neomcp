@@ -1,0 +1,601 @@
+// The protocol engine of a client, without I/O.
+//
+// A ClientEngine writes what a client sends and reads what a server answers, for every enabled profile, and owns no
+// thread, socket, process, clock or file. A transport feeds it what it read (received, stream_event) and carries out
+// what it writes (Outgoing, through the sink); a driver keeps the timers the engine asks for (DeadlineChange) and calls
+// expire() when one lapses; the application layer takes the engine's events (next_event) and gives it calls (send) and
+// answers. How each thing is written and read is asked of the client halves of the mechanisms the profiles name
+// (neomcp/client/mechanism.h); the engine never compares revision strings or looks at a profile's era to decide what to
+// do. The one place it orders revisions is "newest first", which it does as the server's session does.
+//
+// What the engine owns:
+// - request ids: integers from 1, never used twice for the engine's whole life, also across restarts of the server;
+// - the pending table, which binds every request on the wire to the unit it went out on, so that an answer counts
+//   only on that unit; an answer with an unknown id, a second answer, and an answer on another unit are dropped and
+//   reported;
+// - the header fields of every output, from the profile's entry for the transport;
+// - opening contact: a probe that asks the server which revisions it serves, a handshake, or both, and the verdict on
+//   which kind of server answers (ContactState);
+// - the corrective retry of a request whose revision the server refuses, once, at the newest revision both serve;
+// - clocks as data: every request has a deadline, which pauses while the client itself is answering the server;
+// - cancellation, progress, pings in both directions, and the server's notifications as events;
+// - the rounds of a call that asks for input, through one seam (InputSupport, ServerAsked, InputRoundStarted).
+//
+// Units. A transport that carries each message in an exchange of its own (one HTTP POST per message) has one unit per
+// exchange; the engine numbers them and says on every output which unit it opens or belongs to. The connection itself
+// is unit `connection_unit`: on stdio every message travels on it, on HTTP it is the stream the client opens to hear
+// the server outside any exchange. It is the same unit for the engine's whole life, across restarts of the server and
+// reopenings of that stream; the number of an exchange is never used twice.
+//
+// Threads. Every method is called on one executor, the client's thread, and none is safe to call from two threads. The
+// sink is called from inside the engine's methods, with the engine in the middle of a change: it must not call back
+// into the engine (a transport queues what it is given and acts on it after the call returned). A call made from
+// inside the sink throws std::logic_error. A sink that throws closes the engine: every pending call ends `closed`,
+// nothing more is written (`close` included), and the exception propagates out of the method that was writing.
+//
+// What a server sends is not trusted: no method throws because of it, and no description the engine writes repeats a
+// text the server sent.
+#pragma once
+
+#include <chrono>
+#include <compare>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <variant>
+#include <vector>
+
+#include "neomcp/client/mechanism.h"
+#include "neomcp/input.h"
+#include "neomcp/json.h"
+#include "neomcp/jsonrpc.h"
+#include "neomcp/mechanism.h"
+#include "neomcp/model.h"
+#include "neomcp/profile.h"
+
+namespace neomcp {
+
+namespace detail {
+class ClientEngineCore;
+}  // namespace detail
+
+// The number of a unit: what one exchange of the transport carries (see above). The same alias as the server's in
+// neomcp/session.h, declared again so that this header does not depend on the server's; a program may include both.
+using UnitId = std::uint64_t;
+
+// The unit of the connection: on stdio the one stream each way; on HTTP the stream the client opens to hear the
+// server outside a request (the GET stream, or the event stream of the older transport).
+inline constexpr UnitId connection_unit = 0;
+
+// One application call (or one request the engine makes itself: the probe, the handshake, a ping it was asked for). It
+// stays the same while the call is sent again under a new request id (a corrective retry, a round of input), so the
+// deadlines, the cancellation and the end of a call are all named by it. Never used twice.
+struct RequestRef {
+    std::uint64_t value = 0;
+    friend bool operator==(const RequestRef&, const RequestRef&) = default;
+    friend auto operator<=>(const RequestRef&, const RequestRef&) = default;
+};
+
+// One request of the server that the client answers (under the mechanism whose server sends requests). Never used
+// twice.
+struct InputRef {
+    std::uint64_t value = 0;
+    friend bool operator==(const InputRef&, const InputRef&) = default;
+    friend auto operator<=>(const InputRef&, const InputRef&) = default;
+};
+
+// One header field of an HTTP exchange, owned. Names compare without regard to ASCII case.
+struct HttpHeader {
+    std::string name;
+    std::string value;
+};
+
+// ---- What the engine writes
+
+enum class OutgoingKind {
+    request,                 // a request of the client; on HTTP it opens its unit (a POST) and the answer comes there
+    notification,            // a notification of the client; on HTTP it opens its unit, which carries nothing back
+    response,                // the client's answer to a server's request; on HTTP it opens its unit
+    end_unit,                // no message: the transport ends the unit's exchange (its answer arrived, or the
+                             // request was cancelled by ending it); ignored for a unit that ended already
+    open_connection_stream,  // no message: the transport opens the stream of `connection_unit`, with the headers
+    restart,                 // no message: stdio, start the server process again, then call transport_restarted()
+    close                    // no message: end the transport (an unanswered handshake, or close() of the engine)
+};
+
+// One output. The headers are the ones the profile's entry for the transport puts on this message (none on stdio);
+// a transport adds its own (the content type, what it accepts) besides.
+struct Outgoing {
+    std::string line;  // the message on one line, without a line terminator; empty for the kinds that carry none
+    UnitId unit = connection_unit;
+    std::vector<HttpHeader> headers;
+    OutgoingKind kind = OutgoingKind::request;
+};
+
+// Receives each output. See the threading rules above: it must not call into the engine.
+using OutgoingSink = std::function<void(Outgoing outgoing)>;
+
+// ---- What a transport tells the engine besides messages
+
+// HTTP: the head of a response arrived; its body follows as messages (received) and the unit ends with StreamEnded.
+struct ResponseHead {
+    int status = 0;
+    std::optional<std::string> media_type;  // the type and subtype of the content, lower case; empty when none
+    std::vector<HttpHeader> headers;        // the response's header fields, as many as the transport's bound keeps
+};
+
+// HTTP event streams: the id of the last event seen on the unit, and the server's advice on how long to wait before
+// reconnecting. Kept for resuming a stream; nothing ends because of them.
+struct StreamEventId {
+    std::string id;
+};
+struct StreamRetryAdvice {
+    std::chrono::milliseconds delay{0};
+};
+
+// The unit's exchange ended in order (HTTP: the body is complete). A request still waiting on it lost its answer.
+struct StreamEnded {};
+
+// The unit's stream broke before its end (the connection was reset, the stream stayed idle too long).
+struct StreamLost {
+    std::string cause;  // written by the transport, for diagnostics
+};
+
+// The unit's message could not be delivered at all (a connection could not be made, a write failed).
+struct SendFailed {
+    std::string cause;
+};
+
+// stdio, on `connection_unit`: the server process ended. Every request pending on it lost its answer.
+struct ProcessExited {
+    std::optional<int> status;  // the exit status, when the process exited rather than being ended by a signal
+};
+
+using StreamEvent =
+    std::variant<ResponseHead, StreamEventId, StreamRetryAdvice, StreamEnded, StreamLost, SendFailed, ProcessExited>;
+
+// What received() made of one message, so that a transport can count what it must bound (stdio counts the lines that
+// are not MCP messages).
+enum class Reception {
+    accepted,     // a JSON-RPC message, or an array of them where the revision allows one, and was handled
+    too_large,    // longer than max_message_bytes: not parsed
+    too_deep,     // nested deeper than max_nesting_depth: not parsed
+    not_json,     // not JSON
+    not_message,  // JSON, but not a JSON-RPC message (or an array where the revision allows none)
+    ignored       // after close(), or on a unit the engine does not know or has ended
+};
+
+// ---- Clocks
+
+// Which clock of a call or of a server's request.
+enum class DeadlineKind {
+    wait,   // how long a request waits for its answer (the request's timeout); started again by progress when the
+            // call asked for that
+    total,  // the longest a call that is started again by progress may wait in all
+    input   // how long the client may take to answer the server: one server request, or one round of a call
+};
+
+// Whose clock it is.
+using DeadlineOwner = std::variant<RequestRef, InputRef>;
+
+// Names one running stretch of a clock. Every change of a clock gives it a new epoch, so that a timer the driver set
+// for an older stretch (one that lapsed while the change was on its way) is recognised and ignored by expire().
+struct Deadline {
+    DeadlineOwner owner;
+    DeadlineKind kind = DeadlineKind::wait;
+    std::uint64_t epoch = 0;
+    friend bool operator==(const Deadline&, const Deadline&) = default;
+};
+
+enum class DeadlineAction {
+    start,   // run for `duration` from now; replaces what ran before for the same owner and kind
+    pause,   // stop counting and keep what is left
+    resume,  // go on counting what was left at the pause
+    stop     // the clock is gone
+};
+
+// A change of one clock, for the driver. On pause the driver keeps the time left; on resume it sets a timer for that
+// time under the new epoch. When a timer lapses it calls expire() with the Deadline of the change that set it.
+struct DeadlineChange {
+    Deadline deadline;
+    DeadlineAction action = DeadlineAction::start;
+    std::chrono::milliseconds duration{0};  // start only
+};
+
+// ---- Contact
+
+// How a server is opened, named by what the open mechanism does.
+enum class ServerKind {
+    per_request,  // every request names its revision; the server serves each on its own
+    handshake     // a handshake fixes the revision for the connection
+};
+
+// Which kind of server answers, on which transport, at which revision: what a probe found out, kept as data so that an
+// application can give it back to a later engine for the same server (EngineOptions::prior). The transport is the one
+// the server answered on: an HTTP endpoint that turns out to serve only the older event-stream transport is reported
+// as such, and a later client goes to it directly. The revision is data: the engine finds the enabled profile of that
+// revision and never decides anything from the text.
+struct ContactVerdict {
+    ServerKind kind = ServerKind::per_request;
+    profile::Transport transport = profile::Transport::stdio;
+    std::string revision;
+    friend bool operator==(const ContactVerdict&, const ContactVerdict&) = default;
+};
+
+enum class ContactPhase {
+    unopened,     // before open()
+    probing,      // the request that asks which revisions the server serves is out
+    handshaking,  // the handshake is out
+    open,         // requests go out under `profile`
+    lost,         // stdio: the server process ended; the next request starts it again (restart)
+    failed,       // contact cannot be made; `failure` says why; every request fails
+    closed        // after close()
+};
+
+// Why contact failed.
+enum class ContactFailureKind {
+    no_common_revision,   // the server serves none of the enabled revisions (`server_revisions` lists its)
+    unserved_revision,    // the handshake's answer names a revision none of the candidates is
+    handshake_refused,    // the handshake was answered with an error, after its one retry where that applies
+    handshake_timed_out,  // the handshake was not answered in time (it is never cancelled: the transport ends)
+    malformed_answer,     // the answer that opens contact cannot be read
+    authorization_required,  // HTTP: the server asks for authorization the client cannot give
+    http_status,          // HTTP: a status after which no step of opening goes on (a server error, an unknown 4xx)
+    transport,            // the transport failed while contact was being made
+    too_many_restarts     // stdio: the process ended max_restarts times in a row without an answer between
+};
+
+struct ContactFailure {
+    ContactFailureKind kind = ContactFailureKind::transport;
+    std::string message;
+    std::vector<std::string> server_revisions;  // what the server said it serves, when it said
+};
+
+// What one step of opening contact met, in order, so that a failure can name every answer.
+struct ContactStep {
+    RequestRef request;
+    std::string method;
+    std::string outcome;  // in words; never a text the server sent
+};
+
+struct ContactState {
+    ContactPhase phase = ContactPhase::unopened;
+    std::optional<ContactVerdict> verdict;
+    profile::ProfilePtr profile;                      // the profile requests go out under; null until open
+    ServerAnnouncement server;                        // from the discovery result or the handshake's result
+    std::optional<std::vector<std::string>> revisions;  // the revisions a discovery result listed
+    std::optional<ContactFailure> failure;
+    std::vector<ContactStep> steps;
+};
+
+// ---- Calls
+
+// A request the application makes: the method and params as the application gives them. The engine adds what the open
+// mechanism puts on every request, a progress token where asked, and the request id.
+struct OutgoingCall {
+    ClientMessage message;
+    // How long the call waits for its answer; empty: EngineOptions::request_timeout. Zero is an error.
+    std::optional<std::chrono::milliseconds> timeout;
+    // Each progress notification starts the wait again, never beyond EngineOptions::max_total_timeout in all.
+    bool reset_timeout_on_progress = false;
+    // Ask the server for progress notifications of the call.
+    bool progress = false;
+    // tools/call on a transport whose profile mirrors tool arguments into headers: the tool's input schema, from which
+    // the marked arguments are mirrored. Null: no argument is mirrored.
+    json input_schema = nullptr;
+};
+
+// Why a call ended without an answer from the server, or was refused before it went out.
+enum class CallFailureKind {
+    timed_out,           // its wait (or its total) lapsed; it was cancelled as its transport prescribes
+    cancelled,           // the application cancelled it
+    server_exited,       // stdio: the process ended while it was pending
+    stream_lost,         // HTTP: the exchange that carried it ended or broke before its answer
+    send_failed,         // the transport could not deliver it
+    http_status,         // HTTP: its exchange was answered with a status that carries no answer of the protocol
+    bad_content_type,    // HTTP: its exchange was answered with content of a type the protocol does not use
+    authorization_required,  // HTTP: the server asks for authorization the client cannot give
+    message_too_large,   // its answer was longer than max_message_bytes or nested deeper than max_nesting_depth
+    malformed_answer,    // its answer is no result of its kind (such as a result that asks for input on a request
+                         // that cannot ask, or of a kind the client does not know)
+    version_refused,     // the server refused its revision a second time after the corrective retry
+    no_common_revision,  // the server's refusal names no revision this client can speak without a handshake
+    contact_failed,      // contact could not be made (ContactState::failure)
+    too_many_pending,    // max_pending_requests calls are pending already
+    unsupported_method,  // the governing revision has no such client request, or the message is malformed
+    header_value,        // an argument cannot be mirrored into a header (an integer out of range)
+    input_timed_out,     // a round of input was not answered within input_handler_timeout
+    input_rounds_exceeded,  // the server asked for input more than max_input_rounds times
+    state_not_echoable,  // the state of a round cannot be sent back exactly as it was received
+    closed               // the engine was closed
+};
+
+struct CallFailure {
+    CallFailureKind kind = CallFailureKind::closed;
+    std::string message;
+};
+
+// How a call ended.
+struct Answered {
+    json result;  // the result as the server sent it
+};
+struct ErrorAnswered {
+    RequestError error;  // the server's error answer: its code, message and data
+};
+// The result asks for input, and no handler takes every request it asks (InputSupport): the asking is the call's
+// answer. With handlers the call goes on instead (InputRoundStarted).
+struct AskedForInput {
+    InputAsking asking;
+    json result;  // the result as the server sent it
+};
+using RequestOutcome = std::variant<Answered, ErrorAnswered, AskedForInput, CallFailure>;
+
+// What the client answers to a server's request: the answer, or an error answer.
+using InputReply = std::variant<InputResponse, RequestError>;
+
+// ---- Input: which requests of a server the client takes
+
+// The kinds of input request the client has handlers for. The capabilities the client declares are written from it
+// for each profile, and a request of a kind it does not name is refused (or, for a result that asks, handed to the
+// caller as the call's answer) without reaching a handler.
+struct InputSupport {
+    bool form = false;              // elicitation in form mode
+    bool url = false;               // elicitation in URL mode
+    bool sampling = false;
+    bool sampling_tools = false;    // sampling with tools; only with `sampling`
+    bool sampling_context = false;  // sampling that includes context; only with `sampling`
+    bool roots = false;
+    bool roots_list_changed = false;  // the client tells when its roots change; only with `roots`
+
+    // Whether the client takes the request.
+    bool takes(const InputRequest& request) const noexcept;
+};
+
+// ---- Events
+
+// A call ended. Its ref is not used again.
+struct RequestEnded {
+    RequestRef request;
+    RequestOutcome outcome;
+    profile::ProfilePtr profile;  // the profile it went out under last; null when it never went out
+};
+
+// The server reported progress of a call that asked for it.
+struct ProgressEvent {
+    RequestRef request;
+    double progress = 0;
+    std::optional<double> total;
+    std::optional<std::string> message;
+};
+
+// The server sent a log message.
+struct LogEvent {
+    LogLevel level = LogLevel::info;
+    std::optional<std::string> logger;
+    json data;
+    std::optional<RequestRef> request;  // the call whose exchange carried it, when one did
+};
+
+// A message of a change feed (a change, an acknowledgement, an end).
+struct ChangeEvent {
+    FeedEvent feed;
+    std::optional<RequestRef> subscription;  // the call that opened the subscription, when the feed names one
+};
+
+// A request of the server that a handler takes (InputSupport). The engine waits for answer(); meanwhile the clocks of
+// `paused` wait, and the input clock of `ref` runs. When that clock lapses the engine answers itself (a form or URL
+// request with a cancel, any other kind with an error), and ServerAskEnded follows.
+struct ServerAsked {
+    InputRef ref;
+    std::string method;
+    InputRequest request;
+    std::optional<RequestRef> call;  // the call whose exchange carried the request, when the wire says which
+    std::vector<RequestRef> paused;  // the calls whose clocks wait for the answer
+    profile::ProfilePtr profile;
+};
+
+// A server's request ended without answer(): the server cancelled it, or its input clock lapsed and the engine
+// answered it. An answer() for it is ignored.
+struct ServerAskEnded {
+    InputRef ref;
+    bool cancelled_by_server = false;
+};
+
+// A call's result asks for input, and handlers take every request it asks. The call waits, with its clocks paused and
+// its input clock running, until answer_round() or cancel().
+struct InputRoundStarted {
+    RequestRef request;
+    InputAsking asking;
+    std::size_t round = 1;  // 1 for the first result that asks
+};
+
+// The phase of contact changed; contact() has the whole state.
+struct ContactChanged {
+    ContactPhase phase = ContactPhase::unopened;
+};
+
+enum class DiagnosticKind {
+    unknown_id,          // an answer whose id names no pending request
+    repeated_answer,     // a second answer for a request that was answered
+    wrong_unit,          // an answer on another unit than the one its request went out on
+    too_large,           // a message longer than max_message_bytes
+    too_deep,            // a message nested deeper than max_nesting_depth
+    not_json,            // a message that is not JSON
+    not_message,         // JSON that is not a JSON-RPC message
+    malformed_message,   // a JSON-RPC message the revision does not allow as it is (a malformed notification, a
+                         // request the mechanism does not let a server send)
+    malformed_contact,   // an answer that opens contact could not be read, and the engine went on as for another kind
+    server_defect,       // the server answered in a way only a wrong server does (such as refusing a header this
+                         // client writes as the revision says)
+    events_dropped,      // events were dropped because max_queued_events were queued
+    level_refused        // the server refused the log level the client asked for
+};
+
+struct Diagnostic {
+    DiagnosticKind kind = DiagnosticKind::not_json;
+    std::string message;          // in words; never a text the server sent
+    std::optional<UnitId> unit;   // the unit it concerns, when one
+};
+
+using EngineEvent = std::variant<RequestEnded, ProgressEvent, LogEvent, ChangeEvent, ServerAsked, ServerAskEnded,
+                                 InputRoundStarted, DeadlineChange, ContactChanged, Diagnostic>;
+
+// ---- Options
+
+// The defaults of EngineOptions. They are constants and not read from an options object in a default member
+// initializer, for the reason SessionDefaults gives (neomcp/session.h): the options of the client hold these options,
+// and are initialized as aggregates.
+struct ClientDefaults {
+    static constexpr std::chrono::milliseconds request_timeout{60'000};
+    static constexpr std::chrono::milliseconds max_total_timeout{600'000};
+    static constexpr std::chrono::milliseconds discover_probe_timeout{10'000};
+    static constexpr std::chrono::milliseconds input_handler_timeout{600'000};
+    static constexpr std::size_t max_pending_requests = 256;
+    static constexpr std::size_t max_queued_events = 1024;
+    static constexpr std::size_t max_message_bytes = std::size_t{16} * 1024 * 1024;
+    static constexpr std::size_t max_nesting_depth = 128;
+    static constexpr std::size_t max_input_rounds = 10;
+    static constexpr std::size_t max_concurrent_server_requests = 16;
+    static constexpr std::size_t max_restarts = 3;
+};
+
+struct EngineOptions {
+    // The revisions the client speaks; empty: every built-in profile. Two profiles of the same revision are an error.
+    // Only the profiles that define the engine's transport take part.
+    std::vector<profile::ProfilePtr> profiles;
+
+    // What the client says about itself, written for each revision where it has a place.
+    Implementation client_info;
+    // The level the client asks the server's log messages at; empty: it asks none.
+    std::optional<LogLevel> log_level;
+    // The requests of a server the client has handlers for.
+    InputSupport input;
+
+    // A verdict an earlier engine reached for the same server: contact starts at it without a probe. When the server
+    // answers as the other kind does, the engine probes once.
+    std::optional<ContactVerdict> prior;
+
+    // Where the client halves come from; null: builtin_client_mechanisms(). Must outlive the engine's creation.
+    const ClientMechanismRegistry* mechanisms = nullptr;
+
+    // How long a call waits for its answer unless it says otherwise. Zero is an error. Default 60 s.
+    std::chrono::milliseconds request_timeout = ClientDefaults::request_timeout;
+    // The longest a call whose wait progress starts again may wait in all. Zero is an error. Default 10 min.
+    std::chrono::milliseconds max_total_timeout = ClientDefaults::max_total_timeout;
+    // How long the probe waits on stdio before the server is taken for one that opens with a handshake (whose answer
+    // to an unknown request may be none at all). Zero is an error. Default 10 s.
+    std::chrono::milliseconds discover_probe_timeout = ClientDefaults::discover_probe_timeout;
+    // How long one server request, or one round of a call's input, may wait for the client's answer. Zero is an
+    // error. Default 600 s.
+    std::chrono::milliseconds input_handler_timeout = ClientDefaults::input_handler_timeout;
+
+    // Calls of the application pending at once (the engine's own requests do not count); one more fails at once with
+    // too_many_pending. Zero is an error. Default 256.
+    std::size_t max_pending_requests = ClientDefaults::max_pending_requests;
+    // Events queued for next_event() at once: when this many are queued, progress, log, change and diagnostic events
+    // are dropped (and counted); the end of a call, a server's request, a round, a clock change and a change of
+    // contact never are. Zero is an error. Default 1024.
+    std::size_t max_queued_events = ClientDefaults::max_queued_events;
+    // A longer message is not parsed: on stdio it is dropped, on HTTP the call its unit carries fails and the unit
+    // ends. Zero is an error. Default 16 MiB.
+    std::size_t max_message_bytes = ClientDefaults::max_message_bytes;
+    // A message nested deeper is treated as one that is too long. Zero is an error. Default 128.
+    std::size_t max_nesting_depth = ClientDefaults::max_nesting_depth;
+    // Rounds of input one call may take; the call fails with input_rounds_exceeded when the server asks once more.
+    // Zero is an error. Default 10.
+    std::size_t max_input_rounds = ClientDefaults::max_input_rounds;
+    // Requests of a server that wait for the client's answer at once (ServerAsked); one more is answered at once with
+    // an internal error, without reaching a handler. A ping does not count. Zero is an error. Default 16.
+    std::size_t max_concurrent_server_requests = ClientDefaults::max_concurrent_server_requests;
+    // stdio: how many times in a row the server process may end without an answer between before contact fails;
+    // zero: it is never started again after it ended. The one start that follows a process that ended while the probe
+    // was out (to make the handshake with a fresh process) belongs to finding out which kind of server it is and does
+    // not count. Default 3.
+    std::size_t max_restarts = ClientDefaults::max_restarts;
+};
+
+// ---- The engine
+
+class ClientEngine {
+public:
+    // Selects the client halves of every enabled profile that defines `transport`. An error names every missing half
+    // and every bad option; no profile left for the transport is an error, and so is an empty sink.
+    static std::variant<std::unique_ptr<ClientEngine>, ClientMechanismsError> create(EngineOptions options,
+                                                                                    profile::Transport transport,
+                                                                                    OutgoingSink sink);
+
+    ClientEngine(const ClientEngine&) = delete;
+    ClientEngine& operator=(const ClientEngine&) = delete;
+    ~ClientEngine();
+
+    // Starts contact: under a prior verdict, at it; else the probe when a revision that names itself per request is
+    // enabled (it asks the server which revisions it serves, before anything else), the handshake when only handshake
+    // revisions are. Calls made before contact is open wait in the engine and go out once it is (a ping may go out
+    // during a handshake). Ignored unless the phase is unopened.
+    void open();
+
+    // Sends a call under the governing profile, or keeps it until contact is open. Fails at once (and nothing is
+    // queued) when the bound of pending calls is reached, when contact failed or the engine was closed, when the
+    // governing revision has no such client request, when the params are neither null nor an object, and when an
+    // argument cannot be mirrored into a header.
+    std::variant<RequestRef, CallFailure> send(OutgoingCall call);
+
+    // Sends a notification of the client (such as one that tells the server the client's roots changed) under the
+    // governing profile. An error when contact is not open or the revision has no such client notification.
+    std::optional<CallFailure> notify(ClientMessage message);
+
+    // One message read on a unit: a line on stdio, a JSON body or one event's data on HTTP.
+    Reception received(UnitId unit, std::string_view message);
+
+    // Something about a unit's exchange other than a message (see StreamEvent).
+    void stream_event(UnitId unit, StreamEvent event);
+
+    // A timer the driver set for `deadline` lapsed. Ignored when the clock has changed since (another epoch), is
+    // paused, or is gone. The call ends timed_out (or input_timed_out) and is cancelled as its transport prescribes;
+    // the probe gives the verdict that the server opens with a handshake; the handshake ends the transport.
+    void expire(const Deadline& deadline);
+
+    // The application cancels a call: it is cancelled as its transport prescribes (a notification, ending its
+    // exchange, or both) and ends `cancelled`; between rounds of input nothing is sent. The handshake is never
+    // cancelled. Ignored for a call that ended.
+    void cancel(RequestRef request, std::string reason = {});
+
+    // The answer to a server's request a handler took (ServerAsked). Ignored once the request ended.
+    void answer(InputRef request, InputReply reply);
+
+    // The answers of a round (InputRoundStarted): the call goes out again, with a new id, the answers under the keys
+    // they answer and the state exactly as received. The call fails when the answers cannot be written or the state
+    // cannot be sent back unchanged. Ignored unless the call waits for this round.
+    void answer_round(RequestRef request, InputResponses answers);
+
+    // stdio: a new server process runs (after a restart output, or on the transport's own account). Every request
+    // still pending ends server_exited; ids go on counting; the verdict stays, and under a revision that keeps a
+    // connection the handshake is made again before held calls go out.
+    void transport_restarted();
+
+    // Ends every pending call `closed`, stops every clock, and writes `close`. Later calls are refused and later input
+    // is ignored.
+    void close();
+
+    // The next event, oldest first; empty when none is queued. Events are queued by the methods above.
+    std::optional<EngineEvent> next_event();
+    // How many events were dropped because the queue was full, since the engine was created.
+    std::uint64_t dropped_events() const noexcept;
+
+    const ContactState& contact() const noexcept;
+    // The enabled profiles that define the engine's transport, newest revision first.
+    std::span<const profile::ProfilePtr> profiles() const noexcept;
+    // Calls of the application pending now (sent or held), the bound of max_pending_requests.
+    std::size_t pending() const noexcept;
+
+private:
+    explicit ClientEngine(std::unique_ptr<detail::ClientEngineCore> core);
+    std::unique_ptr<detail::ClientEngineCore> core_;
+};
+
+}  // namespace neomcp
