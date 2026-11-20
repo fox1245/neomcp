@@ -356,7 +356,9 @@ TEST_P(ClientEnginePair, InputRequestsReachTheSeamAndTheirAnswersComplete) {
     const neomcp::ElicitationAnswer yes{neomcp::ElicitationAction::accept, json{{"ok", true}}};
     if (const auto asked = rig.all<neomcp::ServerAsked>(); !asked.empty()) {
         EXPECT_TRUE(std::holds_alternative<neomcp::ElicitationForm>(asked[0].request));
-        if (cell.transport != Transport::stdio) EXPECT_EQ(asked[0].call, ref);
+        if (cell.transport != Transport::stdio) {
+            EXPECT_EQ(asked[0].call, ref);
+        }
         rig.engine->answer(asked[0].ref, neomcp::InputResponse(yes));
     } else {
         const auto round = rig.all<neomcp::InputRoundStarted>().at(0);
