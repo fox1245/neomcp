@@ -15,6 +15,7 @@ add_executable(neomcp_client_http_test
     streams_test.cpp
     transfer_loop_test.cpp
     transport_test.cpp
+    url_guard_edges_test.cpp
     url_guard_test.cpp
     ../support/http_sse_server.cpp
     ../support/scripted_http_server.cpp)
