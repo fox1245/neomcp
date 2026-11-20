@@ -473,9 +473,9 @@ using EngineEvent = std::variant<RequestEnded, ProgressEvent, LogEvent, ChangeEv
 
 // ---- Options
 
-// The defaults of EngineOptions. They are constants and not read from an options object in a default member
-// initializer, for the reason SessionDefaults gives (neomcp/session.h): the options of the client hold these options,
-// and are initialized as aggregates.
+// The defaults of EngineOptions and of the client's options (ClientOptions, which repeats those of EngineOptions). They
+// are constants and not read from an options object in a default member initializer, for the reason SessionDefaults
+// gives (neomcp/session.h): options objects are initialized as aggregates.
 struct ClientDefaults {
     static constexpr std::chrono::milliseconds request_timeout{60'000};
     static constexpr std::chrono::milliseconds max_total_timeout{600'000};
@@ -494,6 +494,10 @@ struct ClientDefaults {
     static constexpr std::size_t peer_pattern_length = 256;
     static constexpr std::size_t peer_pattern_memory = std::size_t{512} * 1024;
     static constexpr std::size_t peer_max_evaluations = 1'000'000;
+    // The client's own (ClientOptions, neomcp/client/options.h).
+    static constexpr std::size_t max_concurrent_input_handlers = 4;
+    static constexpr std::chrono::milliseconds state_retry_first_delay{50};
+    static constexpr std::chrono::milliseconds state_retry_max_delay{250};
 };
 
 struct EngineOptions {
