@@ -7,14 +7,17 @@
 //   server.program = "calc-server";
 //   auto client = neomcp::Client::open(options, server);
 //   if (!client) { /* client.error() */ }
-//   auto sum = client->call_tool("add", {{"a", 1}, {"b", 2}});
+//   auto sum = client->call<int>("add", AddArgs{1, 2});
 //   if (!sum) { /* sum.error() */ }
+//
+// A typed call serializes its arguments with neomcp::to_json, checks the result's structured content against the
+// tool's output schema and decodes it with neomcp::from_json (neomcp/describe.h, neomcp/client/calls.h); call_tool()
+// takes and gives JSON.
 //
 // Every operation has two forms: a blocking one under its plain name, which returns Result<T> when the operation has
 // ended, and a coroutine under the same name with the prefix `async_`, which an asio coroutine awaits:
 //
-//   neomcp::json arguments = {{"a", 1}, {"b", 2}};
-//   auto sum = co_await client->async_call_tool("add", std::move(arguments));
+//   auto sum = co_await client->async_call<int>("add", AddArgs{1, 2});
 //
 // (GCC 13 stops with an internal failure on a braced list of JSON values written inside a co_await expression; build
 // the value before the co_await, as above.)
@@ -53,6 +56,7 @@
 #pragma once
 
 #include <concepts>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -63,6 +67,7 @@
 
 #include <asio/awaitable.hpp>
 
+#include "neomcp/client/calls.h"
 #include "neomcp/client/engine.h"
 #include "neomcp/client/input_handlers.h"
 #include "neomcp/client/methods.h"
@@ -70,6 +75,7 @@
 #include "neomcp/client/result.h"
 #include "neomcp/client/timers.h"
 #include "neomcp/client/transport.h"
+#include "neomcp/describe.h"
 #include "neomcp/json.h"
 #include "neomcp/model.h"
 #include "neomcp/profile.h"
@@ -157,10 +163,97 @@ public:
 
     // Calls a tool and returns its result, read for the governing revision: a result with `is_error` is a value (the
     // tool failed), never a ClientError. A result that cannot be read is malformed_answer. The structured content is
-    // returned as sent, without a check against the tool's output schema.
-    Result<ToolResult> call_tool(std::string name, json arguments = json::object(), RequestOptions options = {});
-    asio::awaitable<Result<ToolResult>> async_call_tool(std::string name, json arguments = json::object(),
-                                                        RequestOptions options = {});
+    // returned as sent, with the outcome of its check against the tool's output schema (ToolCall::check), which never
+    // fails the call. The tool's definition is the one of the latest list of tools; on a transport that mirrors
+    // arguments into headers, a tool the client has not seen listed makes it list the tools first (list_all_tools),
+    // and a failure of that list fails the call.
+    Result<ToolCall> call_tool(std::string name, json arguments = json::object(), RequestOptions options = {});
+    asio::awaitable<Result<ToolCall>> async_call_tool(std::string name, json arguments = json::object(),
+                                                      RequestOptions options = {});
+
+    // Calls a tool with arguments of a described type and decodes its result as R:
+    //
+    //   auto sum = client->call<int>("add", AddArgs{1, 2});
+    //   if (sum && !sum->is_error) std::cout << *sum->value;
+    //
+    // `args` is serialized with neomcp::to_json. A tool the client has not seen listed makes it list the tools first
+    // (list_all_tools; a failure of that list fails the call). The result's structured content must fit the tool's
+    // output schema: content that fails it is output_invalid, and content that cannot be checked (the schema cannot be
+    // compiled within the peer bounds or the budget of compiles, or the tool is not listed) is unverified, never taken
+    // as unchecked. A tool that declares no output schema has its content decoded as it came. R is decoded from the
+    // whole structured content when it is a described struct or neomcp::json, and from its member "result" when it is
+    // a bool, a number, a described enum, or a vector or map of such values (the form in which a server wraps a result
+    // that is not an object). A result without structured content, or one that does not decode as R, is
+    // output_undecodable; a revision whose tool results have no structured content fails at once with
+    // no_structured_results, and nothing is sent. A tool's own failure (`is_error`) is a value, with `value` empty.
+    template <class R, class Args>
+    Result<TypedCall<R>> call(std::string name, Args args, RequestOptions options = {});
+    template <class R, class Args>
+    asio::awaitable<Result<TypedCall<R>>> async_call(std::string name, Args args, RequestOptions options = {});
+
+    // ---- Lists
+    //
+    // One page, from the start or from a cursor of an earlier page (opaque, sent back exactly as it came; a cursor
+    // that cannot be is cursor_not_echoable). A page ends the list when its `nextCursor` is absent or null; any string,
+    // the empty one too, names a next page. A page that cannot be read (an item, the cursor or the caching hints) is
+    // malformed_answer. On a transport that mirrors tool arguments into headers, a tool whose input schema marks its
+    // parameters against the rules is left out of the page, and the diagnostics callback is told (ToolDropped); on
+    // another transport the marks are ignored. The tools listed become the definitions the client checks results of
+    // and mirrors arguments from.
+    //
+    // The list_all_ forms follow the pages until the last, bounded by ClientOptions::max_list_pages and
+    // max_list_items: past either, the call fails (list_pages_exceeded, list_items_exceeded) and gives no partial
+    // list. Each page is a request with the call's options (its clock is per page; its stop ends the whole list).
+
+    Result<Page<ToolDefinition>> list_tools(std::optional<std::string> cursor = {}, RequestOptions options = {});
+    asio::awaitable<Result<Page<ToolDefinition>>> async_list_tools(std::optional<std::string> cursor = {},
+                                                                   RequestOptions options = {});
+    Result<Listing<ToolDefinition>> list_all_tools(RequestOptions options = {});
+    asio::awaitable<Result<Listing<ToolDefinition>>> async_list_all_tools(RequestOptions options = {});
+
+    Result<Page<ResourceDefinition>> list_resources(std::optional<std::string> cursor = {},
+                                                    RequestOptions options = {});
+    asio::awaitable<Result<Page<ResourceDefinition>>> async_list_resources(std::optional<std::string> cursor = {},
+                                                                           RequestOptions options = {});
+    Result<Listing<ResourceDefinition>> list_all_resources(RequestOptions options = {});
+    asio::awaitable<Result<Listing<ResourceDefinition>>> async_list_all_resources(RequestOptions options = {});
+
+    Result<Page<ResourceTemplateDefinition>> list_resource_templates(std::optional<std::string> cursor = {},
+                                                                     RequestOptions options = {});
+    asio::awaitable<Result<Page<ResourceTemplateDefinition>>> async_list_resource_templates(
+        std::optional<std::string> cursor = {}, RequestOptions options = {});
+    Result<Listing<ResourceTemplateDefinition>> list_all_resource_templates(RequestOptions options = {});
+    asio::awaitable<Result<Listing<ResourceTemplateDefinition>>> async_list_all_resource_templates(
+        RequestOptions options = {});
+
+    Result<Page<PromptDefinition>> list_prompts(std::optional<std::string> cursor = {}, RequestOptions options = {});
+    asio::awaitable<Result<Page<PromptDefinition>>> async_list_prompts(std::optional<std::string> cursor = {},
+                                                                       RequestOptions options = {});
+    Result<Listing<PromptDefinition>> list_all_prompts(RequestOptions options = {});
+    asio::awaitable<Result<Listing<PromptDefinition>>> async_list_all_prompts(RequestOptions options = {});
+
+    // ---- Resources, prompts, completion
+
+    // Reads a resource: its contents and, where the revision has them, its caching hints (ReadResult::cache).
+    Result<ReadResult> read_resource(std::string uri, RequestOptions options = {});
+    asio::awaitable<Result<ReadResult>> async_read_resource(std::string uri, RequestOptions options = {});
+
+    // Gets a prompt with its arguments (strings by name).
+    Result<PromptResult> get_prompt(std::string name, std::map<std::string, std::string> arguments = {},
+                                    RequestOptions options = {});
+    asio::awaitable<Result<PromptResult>> async_get_prompt(std::string name,
+                                                           std::map<std::string, std::string> arguments = {},
+                                                           RequestOptions options = {});
+
+    // Asks for suggestions for the argument `argument` of a prompt or a resource template, of which `value` has been
+    // typed. `resolved` holds the arguments already chosen; it is sent where the revision's request has a place for
+    // it, and left out elsewhere.
+    Result<CompletionResult> complete(CompletionRef ref, std::string argument, std::string value,
+                                      std::map<std::string, std::string> resolved = {}, RequestOptions options = {});
+    asio::awaitable<Result<CompletionResult>> async_complete(CompletionRef ref, std::string argument,
+                                                             std::string value,
+                                                             std::map<std::string, std::string> resolved = {},
+                                                             RequestOptions options = {});
 
     // ---- Roots
 
@@ -185,8 +278,34 @@ private:
     // (for the targets that define those forms).
     static asio::awaitable<Result<Client>> failed_open(ClientError error);
 
+    // The tool call of call<R>: the tool's definition known first (listing the tools when it is not), a revision with
+    // structured results, and the check of the content. The typed forms decode what these give back.
+    Result<ToolCall> checked_call(std::string name, json arguments, RequestOptions options);
+    asio::awaitable<Result<ToolCall>> async_checked_call(std::string name, json arguments, RequestOptions options);
+
     std::shared_ptr<detail::ClientCore> core_;
 };
+
+// ---- Typed calls. Each form serializes its arguments before anything waits (the coroutine form in the ordinary
+// function that returns it, so that it keeps no reference to the Client or to `args`).
+
+template <class R, class Args>
+Result<TypedCall<R>> Client::call(std::string name, Args args, RequestOptions options) {
+    static_assert(detail::typed_result_supported<R>(),
+                  "neomcp: a typed call decodes a described struct, neomcp::json, a bool, a number, a described enum, "
+                  "or a vector or string-keyed map of such values; read text results with call_tool");
+    json arguments = neomcp::to_json(args);
+    return detail::decode_typed<R>(checked_call(std::move(name), std::move(arguments), std::move(options)));
+}
+
+template <class R, class Args>
+asio::awaitable<Result<TypedCall<R>>> Client::async_call(std::string name, Args args, RequestOptions options) {
+    static_assert(detail::typed_result_supported<R>(),
+                  "neomcp: a typed call decodes a described struct, neomcp::json, a bool, a number, a described enum, "
+                  "or a vector or string-keyed map of such values; read text results with call_tool");
+    json arguments = neomcp::to_json(args);
+    return detail::decode_typed_async<R>(async_checked_call(std::move(name), std::move(arguments), std::move(options)));
+}
 
 // ---- The forms that choose at run time. The forms for a ChildProcess and an HttpEndpoint are defined by the targets
 // of those transports, so that a program links only the transports it opens.

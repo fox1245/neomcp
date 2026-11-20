@@ -14,6 +14,7 @@
 #include <variant>
 #include <vector>
 
+#include "neomcp/argument_headers.h"
 #include "neomcp/client/engine.h"
 #include "neomcp/client/input_dispatch.h"
 #include "neomcp/client/input_handlers.h"
@@ -58,7 +59,18 @@ struct ServerRestarted {
     bool handshake_repeated = false;
 };
 
-using ClientDiagnostic = std::variant<Diagnostic, InputReport, ServerRestarted>;
+// A tool the server listed was left out of the list: its input schema marks parameters for HTTP headers in a way the
+// rules forbid (header_parameters, neomcp/argument_headers.h), on a transport that mirrors marked arguments into
+// headers. `tool` is the name the server gave it, `issue` the rule it breaks and where. Such a tool is not offered to
+// the application, and the client keeps no definition of it: a call of it by name still goes out, without mirrored
+// arguments, after the tools were listed again to look for its definition. On a transport without such headers the
+// marks are ignored.
+struct ToolDropped {
+    std::string tool;
+    HeaderMarkIssue issue;
+};
+
+using ClientDiagnostic = std::variant<Diagnostic, InputReport, ServerRestarted, ToolDropped>;
 
 // ---- The client
 
@@ -102,6 +114,18 @@ struct ClientOptions {
     std::size_t peer_pattern_length = ClientDefaults::peer_pattern_length;
     std::size_t peer_pattern_memory = ClientDefaults::peer_pattern_memory;
     std::size_t peer_max_evaluations = ClientDefaults::peer_max_evaluations;
+    std::size_t peer_patterns_per_schema = ClientDefaults::peer_patterns_per_schema;
+    std::size_t max_peer_schema_compiles = ClientDefaults::max_peer_schema_compiles;
+
+    // ---- Lists
+
+    // The list_all_ methods follow the server's pages until one has no next cursor, and fail (never giving back a
+    // partial list) when the server needs more than max_list_pages pages, or sends more than max_list_items items in
+    // all (counted as sent, also those the client leaves out). Zero is an error for either. Defaults 64, 10 000. The
+    // client also keeps the definitions of the tools it was given, for the checks of their results, and keeps at most
+    // max_list_items of them.
+    std::size_t max_list_pages = ClientDefaults::max_list_pages;
+    std::size_t max_list_items = ClientDefaults::max_list_items;
 
     // ---- Input
 

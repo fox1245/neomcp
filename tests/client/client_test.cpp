@@ -339,6 +339,8 @@ std::vector<Field> fields() {
         {"peer_pattern_length", [](O& o) { o.peer_pattern_length = 0; }},
         {"peer_pattern_memory", [](O& o) { o.peer_pattern_memory = 0; }},
         {"peer_max_evaluations", [](O& o) { o.peer_max_evaluations = 0; }},
+        {"peer_patterns_per_schema", [](O& o) { o.peer_patterns_per_schema = 0; }},
+        {"max_peer_schema_compiles", [](O& o) { o.max_peer_schema_compiles = 0; }},
     };
 }
 
@@ -365,7 +367,7 @@ TEST(Client, ACallWhoseClockLapsesEndsTimedOutAndMayHaveRun) {
     Pair pair(std::move(options), Transport::stdio);
     neomcp::RequestOptions call;
     call.timeout = std::chrono::milliseconds(30'000);
-    std::optional<neomcp::Result<neomcp::ToolResult>> result;
+    std::optional<neomcp::Result<neomcp::ToolCall>> result;
     std::thread caller([&] { result.emplace(pair.client->call_tool("slow", json::object(), call)); });
     const OnExit join_caller([&] { join(caller); });
     const OnExit close_first([&] { static_cast<void>(pair.client->close()); });
@@ -404,7 +406,7 @@ TEST(Client, AStopTokenCancelsACall) {
     std::stop_source stop;
     neomcp::RequestOptions call;
     call.stop = stop.get_token();
-    std::optional<neomcp::Result<neomcp::ToolResult>> result;
+    std::optional<neomcp::Result<neomcp::ToolCall>> result;
     std::thread caller([&] { result.emplace(pair.client->call_tool("slow", json::object(), call)); });
     const OnExit join_caller([&] { join(caller); });
     const OnExit close_first([&] { static_cast<void>(pair.client->close()); });
@@ -461,7 +463,7 @@ TEST(Client, CancellingTheAwaitingCoroutineCancelsTheCall) {
 
 TEST(Client, CloseEndsThePendingCallsClosed) {
     Pair pair(only({"2025-11-25"}), Transport::stdio);
-    std::optional<neomcp::Result<neomcp::ToolResult>> result;
+    std::optional<neomcp::Result<neomcp::ToolCall>> result;
     std::thread caller([&] { result.emplace(pair.client->call_tool("slow", json::object())); });
     const OnExit join_caller([&] { join(caller); });
     const OnExit close_first([&] { static_cast<void>(pair.client->close()); });

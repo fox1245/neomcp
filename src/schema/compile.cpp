@@ -178,6 +178,10 @@ private:
 
     std::shared_ptr<const Pattern> compile_pattern(const std::string& source, const std::string& pointer) {
         if (const auto known = patterns_.find(source); known != patterns_.end()) return known->second;
+        if (patterns_.size() >= limits_.max_patterns) {
+            fail(pointer, "the schema holds more than " + std::to_string(limits_.max_patterns) +
+                              " distinct patterns, the limit max_patterns");
+        }
         if (source.size() > limits_.max_pattern_length) {
             fail(pointer, "pattern is " + std::to_string(source.size()) +
                               " bytes long, longer than the limit max_pattern_length (" +

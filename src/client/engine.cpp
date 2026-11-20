@@ -528,19 +528,45 @@ private:
         limits.max_pattern_length = options_.peer_pattern_length;
         limits.max_pattern_memory = options_.peer_pattern_memory;
         limits.max_evaluations = options_.peer_max_evaluations;
+        limits.max_patterns = options_.peer_patterns_per_schema;
         return limits;
     }
 
+    // ---- schemas of the server, against one budget
+
+public:
+    PeerSchema compile_peer_schema(const json& schema) {
+        if (peer_compiles_ >= options_.max_peer_schema_compiles) {
+            if (!budget_reported_) {
+                budget_reported_ = true;
+                diagnose(DiagnosticKind::schema_budget_spent,
+                         "the client compiled as many schemas of the server as it allows (max_peer_schema_compiles); "
+                         "later ones are refused");
+            }
+            return PeerSchemaRefused{true, std::nullopt};
+        }
+        ++peer_compiles_;
+        auto compiled = json_schema::Validator::compile(schema, peer_limits());
+        if (auto* issue = std::get_if<json_schema::Issue>(&compiled)) {
+            return PeerSchemaRefused{false, std::move(*issue)};
+        }
+        return std::get<json_schema::Validator>(std::move(compiled));
+    }
+
+    std::size_t peer_schema_compiles() const noexcept { return peer_compiles_; }
+
+private:
     // The form's requested schema, compiled when it fits the restricted form; else why not, in words that repeat
-    // nothing the server sent.
-    std::variant<json_schema::Validator, std::string> check_form(const ElicitationForm& form,
-                                                                 const Speaker& speaker) const {
+    // nothing the server sent. The compile draws on the budget of the server's schemas.
+    std::variant<json_schema::Validator, std::string> check_form(const ElicitationForm& form, const Speaker& speaker) {
         if (auto problem = speaker.halves.server_input->form_problem(form.requested_schema, *speaker.halves.profile)) {
             return std::move(*problem);
         }
-        // Slice 4.4 counts this compile against the client's budget of schema compiles of a server.
-        auto compiled = json_schema::Validator::compile(form.requested_schema, peer_limits());
-        if (std::holds_alternative<json_schema::Issue>(compiled)) {
+        auto compiled = compile_peer_schema(form.requested_schema);
+        if (auto* refused = std::get_if<PeerSchemaRefused>(&compiled)) {
+            if (refused->budget_spent) {
+                return std::string("the requested schema was not compiled: the budget of schema compiles is spent");
+            }
             return std::string("the requested schema cannot be compiled within the limits for a server's schemas");
         }
         return std::get<json_schema::Validator>(std::move(compiled));
@@ -1721,6 +1747,8 @@ private:
     std::deque<std::uint64_t> answered_;
     std::set<std::uint64_t> answered_set_;
     std::size_t application_calls_ = 0;
+    std::size_t peer_compiles_ = 0;     // schemas of the server compiled or refused (compile_peer_schema)
+    bool budget_reported_ = false;
 
     std::deque<EngineEvent> events_;
     std::uint64_t dropped_ = 0;
@@ -1771,6 +1799,8 @@ std::variant<std::unique_ptr<ClientEngine>, ClientMechanismsError> ClientEngine:
     if (options.peer_pattern_length == 0) problem("peer_pattern_length is zero");
     if (options.peer_pattern_memory == 0) problem("peer_pattern_memory is zero");
     if (options.peer_max_evaluations == 0) problem("peer_max_evaluations is zero");
+    if (options.peer_patterns_per_schema == 0) problem("peer_patterns_per_schema is zero");
+    if (options.max_peer_schema_compiles == 0) problem("max_peer_schema_compiles is zero");
 
     const ClientMechanismRegistry& registry =
         options.mechanisms != nullptr ? *options.mechanisms : builtin_client_mechanisms();
@@ -1846,6 +1876,11 @@ void ClientEngine::fail_round(RequestRef request, CallFailure failure) {
     core_->guard();
     core_->fail_round(request, std::move(failure));
 }
+PeerSchema ClientEngine::compile_peer_schema(const json& schema) {
+    core_->guard();
+    return core_->compile_peer_schema(schema);
+}
+std::size_t ClientEngine::peer_schema_compiles() const noexcept { return core_->peer_schema_compiles(); }
 bool ClientEngine::roots_changed() {
     core_->guard();
     return core_->roots_changed();

@@ -2,7 +2,8 @@
 # in-process server), and against scripted peers where a test needs a server that loses answers or asks in rounds.
 add_executable(neomcp_client_test
     client_test.cpp
-    driver_test.cpp)
+    driver_test.cpp
+    typed_test.cpp)
 target_link_libraries(neomcp_client_test PRIVATE neomcp::client neomcp::client_in_process neomcp::server
     GTest::gtest_main Threads::Threads)
 neomcp_configure_target(neomcp_client_test)

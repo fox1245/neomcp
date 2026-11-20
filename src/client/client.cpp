@@ -28,6 +28,7 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -45,6 +46,8 @@
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 
+#include "neomcp/argument_headers.h"
+#include "neomcp/jsonrpc.h"
 #include "neomcp/wire_read.h"
 
 namespace neomcp {
@@ -351,6 +354,8 @@ public:
         if (!transport) return error_of(ClientErrorKind::invalid_options, "the client needs a transport");
         std::string problems;
         if (options.max_concurrent_input_handlers == 0) problems += "max_concurrent_input_handlers must be positive\n";
+        if (options.max_list_pages == 0) problems += "max_list_pages must be positive\n";
+        if (options.max_list_items == 0) problems += "max_list_items must be positive\n";
         if (options.state_retry_first_delay.count() <= 0 || options.state_retry_max_delay.count() <= 0) {
             problems += "the delays between retries of a call that asks for its state alone must be positive\n";
         } else if (options.state_retry_first_delay > options.state_retry_max_delay) {
@@ -593,6 +598,102 @@ public:
     }
     void join_thread() { runtime_->join(); }
 
+    // ---- The tools the server listed, on the client's thread
+
+    const ClientOptions& client_options() const noexcept { return options_; }
+
+    // The profile requests go out under; null until contact opened.
+    const profile::ProfilePtr& governing() const noexcept { return engine_->contact().profile; }
+
+    // Whether the governing revision's tool results carry structured content.
+    bool structured_results() const {
+        const profile::ProfilePtr& profile = governing();
+        if (!profile) return true;  // not open: the call fails as every call does then
+        const profile::Type* type = profile->type(tool_result_type);
+        return type != nullptr && type->has_property(structured_content_member);
+    }
+
+    // Whether the transport mirrors the marked arguments of a tool call into headers under `profile`.
+    bool mirrors_arguments(const profile::Profile& profile) const {
+        const auto& http = profile.streamable_http();
+        return transport_->kind() == profile::Transport::streamable_http && http && http->argument_headers;
+    }
+    bool mirrors_arguments() const {
+        const profile::ProfilePtr& profile = governing();
+        return profile && mirrors_arguments(*profile);
+    }
+
+    // Whether the governing revision's params of `method` have the member `name`.
+    bool params_have(std::string_view method, std::string_view name) const {
+        const profile::ProfilePtr& profile = governing();
+        const profile::Message* message = profile ? profile->request(method) : nullptr;
+        if (message == nullptr || !message->params) return false;
+        const profile::Type* type = profile->type(*message->params);
+        return type != nullptr && type->has_property(name);
+    }
+
+    bool tool_known(const std::string& name) const { return tools_.count(name) != 0; }
+
+    // The input schema of a listed tool, for the arguments the transport mirrors; null for one not listed.
+    json tool_input_schema(const std::string& name) const {
+        const auto found = tools_.find(name);
+        return found == tools_.end() ? json(nullptr) : found->second.definition.input_schema;
+    }
+
+    // The tools of a page the client keeps: on a transport that mirrors marked arguments, a tool whose marks break a
+    // rule is left out and reported; every other one becomes the definition of its name.
+    std::vector<ToolDefinition> admit_tools(std::vector<ToolDefinition> listed, const profile::Profile& profile) {
+        const bool marks = mirrors_arguments(profile);
+        std::vector<ToolDefinition> kept;
+        kept.reserve(listed.size());
+        for (ToolDefinition& tool : listed) {
+            if (marks) {
+                const std::string& keyword = profile.streamable_http()->argument_headers->schema_keyword;
+                auto checked = header_parameters(tool.input_schema, keyword, default_header_schema_depth);
+                if (auto* issue = std::get_if<HeaderMarkIssue>(&checked)) {
+                    tools_.erase(tool.name);
+                    diagnose(ClientDiagnostic(ToolDropped{tool.name, std::move(*issue)}));
+                    continue;
+                }
+            }
+            remember(tool);
+            kept.push_back(std::move(tool));
+        }
+        return kept;
+    }
+
+    // The check of a tool result's structured content against the output schema of the tool's definition, compiled
+    // the first time a structured result of that definition arrives.
+    OutputCheck check_output(const std::string& name, const ToolResult& result) {
+        OutputCheck check;
+        if (result.is_error || !result.structured_content) return check;
+        const auto found = tools_.find(name);
+        if (found == tools_.end()) {
+            check.kind = OutputCheckKind::not_listed;
+            return check;
+        }
+        ToolEntry& entry = found->second;
+        if (!entry.definition.output_schema) {
+            check.kind = OutputCheckKind::no_schema;
+            return check;
+        }
+        const bool compiled_now = !entry.output.has_value();
+        if (compiled_now) entry.output = engine_->compile_peer_schema(*entry.definition.output_schema);
+        if (const auto* refused = std::get_if<PeerSchemaRefused>(&*entry.output)) {
+            check.kind = OutputCheckKind::unverified;
+            check.budget_spent = refused->budget_spent;
+            check.issue = refused->issue;
+        } else if (auto issue = std::get<json_schema::Validator>(*entry.output).validate(*result.structured_content)) {
+            check.kind = OutputCheckKind::invalid;
+            check.issue = std::move(issue);
+        } else {
+            check.kind = OutputCheckKind::valid;
+        }
+        // The engine may have said that the budget is spent.
+        if (compiled_now) pump();
+        return check;
+    }
+
     // ---- TransportEvents
 
     Reception received(UnitId unit, std::string_view message) override {
@@ -655,6 +756,8 @@ private:
         engine.peer_pattern_length = options_.peer_pattern_length;
         engine.peer_pattern_memory = options_.peer_pattern_memory;
         engine.peer_max_evaluations = options_.peer_max_evaluations;
+        engine.peer_patterns_per_schema = options_.peer_patterns_per_schema;
+        engine.max_peer_schema_compiles = options_.max_peer_schema_compiles;
         auto made = ClientEngine::create(std::move(engine), transport_->kind(),
                                          [this](Outgoing outgoing) { outbox_.push_back(std::move(outgoing)); });
         if (auto* error = std::get_if<ClientMechanismsError>(&made)) {
@@ -973,6 +1076,29 @@ private:
         pump();
     }
 
+    // ---- The tools the server listed
+
+    static constexpr std::string_view tool_result_type = "CallToolResult";
+    static constexpr std::string_view structured_content_member = "structuredContent";
+
+    struct ToolEntry {
+        ToolDefinition definition;
+        std::optional<PeerSchema> output;  // its output schema, once compiled (or refused)
+    };
+
+    // The latest definition under the tool's name; a definition whose output schema is the same keeps what was
+    // compiled of it. New names are kept up to max_list_items.
+    void remember(const ToolDefinition& tool) {
+        const auto found = tools_.find(tool.name);
+        if (found != tools_.end()) {
+            if (found->second.definition.output_schema != tool.output_schema) found->second.output.reset();
+            found->second.definition = tool;
+            return;
+        }
+        if (tools_.size() >= options_.max_list_items) return;
+        tools_.emplace(tool.name, ToolEntry{tool, std::nullopt});
+    }
+
     // ---- State
 
     std::shared_ptr<Runtime> runtime_;
@@ -990,6 +1116,7 @@ private:
     std::map<RequestRef, std::shared_ptr<Waiter>> waiters_;
     std::map<std::pair<DeadlineOwner, DeadlineKind>, ClockTimer> clocks_;
     std::map<RequestRef, StateRetry> state_retries_;
+    std::map<std::string, ToolEntry, std::less<>> tools_;
     bool pumping_ = false;
     bool pump_again_ = false;
     bool engine_wrote_close_ = false;
@@ -1029,9 +1156,9 @@ private:
 
 // ---- Children: coroutines on the client's thread. Each holds the state by value.
 
-asio::awaitable<CallOutcome> run_call(std::shared_ptr<ClientCore> core, ClientMessage message,
-                                      RequestOptions options, json input_schema) {
-    const Admitted admitted(core);
+// One request, from its sending to its end; on the client's thread, inside an admitted operation.
+asio::awaitable<CallOutcome> perform_call(std::shared_ptr<ClientCore> core, ClientMessage message,
+                                          RequestOptions options, json input_schema) {
     co_await asio::this_coro::throw_if_cancelled(false);
     auto waiter = std::make_shared<ClientCore::Waiter>(core->io());
     std::optional<ClientError> refused =
@@ -1047,6 +1174,24 @@ asio::awaitable<CallOutcome> run_call(std::shared_ptr<ClientCore> core, ClientMe
     }
     CallOutcome outcome = core->finish_call(*waiter, std::move(refused));
     co_return outcome;
+}
+
+asio::awaitable<CallOutcome> run_call(std::shared_ptr<ClientCore> core, ClientMessage message,
+                                      RequestOptions options, json input_schema) {
+    const Admitted admitted(core);
+    co_await asio::this_coro::throw_if_cancelled(false);
+    CallOutcome outcome =
+        co_await perform_call(core, std::move(message), std::move(options), std::move(input_schema));
+    co_return outcome;
+}
+
+// Any work of the client's thread, admitted.
+template <class T>
+asio::awaitable<T> run_admitted(std::shared_ptr<ClientCore> core, asio::awaitable<T> work) {
+    const Admitted admitted(core);
+    co_await asio::this_coro::throw_if_cancelled(false);
+    T value = co_await std::move(work);
+    co_return value;
 }
 
 asio::awaitable<OpenOutcome> run_open(std::shared_ptr<ClientCore> core) {
@@ -1108,6 +1253,19 @@ asio::awaitable<CallOutcome> call_on(std::shared_ptr<ClientCore> core, ClientMes
     co_return outcome;
 }
 
+// The parent of `work`, a coroutine that runs on the client's thread and touches the client's state; it was made with
+// every parameter by value and has not started.
+template <class T>
+asio::awaitable<Result<T>> work_on(std::shared_ptr<ClientCore> core, asio::awaitable<Result<T>> work) {
+    if (!core || !core->admit()) {
+        Result<T> closed(closed_error());
+        co_return closed;
+    }
+    Result<T> result = co_await asio::co_spawn(core->executor(), run_admitted<Result<T>>(core, std::move(work)),
+                                               asio::use_awaitable);
+    co_return result;
+}
+
 asio::awaitable<void> close_on(std::shared_ptr<ClientCore> core) {
     co_await asio::this_coro::throw_if_cancelled(false);
     if (!core || !core->admit_close()) co_return;
@@ -1125,14 +1283,19 @@ Result<void> void_result(CallOutcome outcome) {
     return {};
 }
 
-Result<ToolResult> tool_result(CallOutcome outcome) {
+template <class T>
+Result<T> read_result(CallOutcome outcome, std::string_view what) {
     if (outcome.error) return std::move(*outcome.error);
-    if (!outcome.profile) return error_of(ClientErrorKind::malformed_answer, "the tool's result has no revision");
-    auto read = from_wire<ToolResult>(*outcome.result, *outcome.profile);
+    if (!outcome.profile) return error_of(ClientErrorKind::malformed_answer, std::string(what) + " has no revision");
+    auto read = from_wire<T>(*outcome.result, *outcome.profile);
     if (auto* problem = std::get_if<std::string>(&read)) {
-        return error_of(ClientErrorKind::malformed_answer, "the tool's result cannot be read: " + *problem);
+        return error_of(ClientErrorKind::malformed_answer, std::string(what) + " cannot be read: " + *problem);
     }
-    return std::get<ToolResult>(std::move(read));
+    return std::get<T>(std::move(read));
+}
+
+Result<ToolResult> tool_result(CallOutcome outcome) {
+    return read_result<ToolResult>(std::move(outcome), "the tool's result");
 }
 
 asio::awaitable<Result<json>> request_on(std::shared_ptr<ClientCore> core, std::string method, json params,
@@ -1150,17 +1313,286 @@ asio::awaitable<Result<void>> ping_on(std::shared_ptr<ClientCore> core, RequestO
     co_return result;
 }
 
+// ---- Names of the wire
+
 constexpr std::string_view name_member = "name";
 constexpr std::string_view arguments_member = "arguments";
+constexpr std::string_view cursor_member = "cursor";
+constexpr std::string_view next_cursor_member = "nextCursor";
+constexpr std::string_view uri_member = "uri";
+constexpr std::string_view type_member = "type";
+constexpr std::string_view ref_member = "ref";
+constexpr std::string_view argument_member = "argument";
+constexpr std::string_view value_member = "value";
+constexpr std::string_view context_member = "context";
+constexpr std::string_view prompt_reference_type = "ref/prompt";
+constexpr std::string_view resource_reference_type = "ref/resource";
 
-asio::awaitable<Result<ToolResult>> call_tool_on(std::shared_ptr<ClientCore> core, std::string name, json arguments,
-                                                 RequestOptions options) {
+// What each list is called on the wire: its method, the member of its result that holds the items, and the result's
+// type in the profile's wire tables (whose caching hints are read).
+template <class T>
+struct ListSpec;
+template <>
+struct ListSpec<ToolDefinition> {
+    static constexpr std::string_view method = client_method::tools_list;
+    static constexpr std::string_view items = "tools";
+    static constexpr std::string_view result_type = "ListToolsResult";
+};
+template <>
+struct ListSpec<ResourceDefinition> {
+    static constexpr std::string_view method = client_method::resources_list;
+    static constexpr std::string_view items = "resources";
+    static constexpr std::string_view result_type = "ListResourcesResult";
+};
+template <>
+struct ListSpec<ResourceTemplateDefinition> {
+    static constexpr std::string_view method = client_method::resources_templates_list;
+    static constexpr std::string_view items = "resourceTemplates";
+    static constexpr std::string_view result_type = "ListResourceTemplatesResult";
+};
+template <>
+struct ListSpec<PromptDefinition> {
+    static constexpr std::string_view method = client_method::prompts_list;
+    static constexpr std::string_view items = "prompts";
+    static constexpr std::string_view result_type = "ListPromptsResult";
+};
+
+const json* member(const json& object, std::string_view name) {
+    const auto* members = object.get_ptr<const json::object_t*>();
+    if (members == nullptr) return nullptr;
+    const auto found = members->find(std::string(name));
+    return found == members->end() ? nullptr : &found->second;
+}
+
+// Whether a text the server gave goes back on the wire exactly as it came: what the writer cannot write as it was
+// (text that is not well-formed UTF-8, such as a lone surrogate escape) comes back altered.
+bool echoable(const std::string& text) {
+    const json given = text;
+    const json echoed = json::parse(serialize(given), nullptr, false);
+    return !echoed.is_discarded() && echoed == given;
+}
+
+// ---- Lists
+
+template <class T>
+struct PageRead {
+    Result<Page<T>> page;
+    std::size_t sent = 0;  // items the server sent, before any was left out
+};
+
+// A page as the server sent it, read for `profile`.
+template <class T>
+std::variant<Page<T>, ClientError> read_page(const json& result, const profile::Profile& profile, std::size_t& sent) {
+    using Spec = ListSpec<T>;
+    const json* items = member(result, Spec::items);
+    const auto* array = items == nullptr ? nullptr : items->get_ptr<const json::array_t*>();
+    if (array == nullptr) {
+        return error_of(ClientErrorKind::malformed_answer,
+                        "the page has no array " + std::string(Spec::items) + " of items");
+    }
+    sent = array->size();
+    Page<T> page;
+    if (const json* next = member(result, next_cursor_member); next != nullptr && !next->is_null()) {
+        const auto* text = next->get_ptr<const std::string*>();
+        if (text == nullptr) {
+            return error_of(ClientErrorKind::malformed_answer, "the page's nextCursor is neither a string nor null");
+        }
+        page.next_cursor = *text;
+    }
+    auto hints = read_cache_hints(result, Spec::result_type, profile);
+    if (auto* problem = std::get_if<std::string>(&hints)) {
+        return error_of(ClientErrorKind::malformed_answer, "the page's caching hints cannot be read: " + *problem);
+    }
+    page.cache = std::get<std::optional<CacheHints>>(std::move(hints));
+    page.items.reserve(array->size());
+    const std::string path = std::string(wire_root_path) + "." + std::string(Spec::items);
+    std::size_t index = 0;
+    for (const json& item : *array) {
+        auto read = from_wire<T>(item, profile, path + "[" + std::to_string(index++) + "]");
+        if (auto* problem = std::get_if<std::string>(&read)) {
+            return error_of(ClientErrorKind::malformed_answer, "an item of the page cannot be read: " + *problem);
+        }
+        page.items.push_back(std::get<T>(std::move(read)));
+    }
+    return page;
+}
+
+template <class T>
+asio::awaitable<PageRead<T>> fetch_page(std::shared_ptr<ClientCore> core, std::optional<std::string> cursor,
+                                        RequestOptions options) {
+    PageRead<T> read;
+    if (cursor && !echoable(*cursor)) {
+        read.page = error_of(ClientErrorKind::cursor_not_echoable,
+                             "the server's cursor cannot be sent back exactly as it was received");
+        co_return read;
+    }
+    json params = nullptr;
+    if (cursor) {
+        params = json::object();
+        params[std::string(cursor_member)] = std::move(*cursor);
+    }
+    ClientMessage message{std::string(ListSpec<T>::method), std::move(params)};
+    CallOutcome outcome = co_await perform_call(core, std::move(message), std::move(options), nullptr);
+    if (outcome.error) {
+        read.page = std::move(*outcome.error);
+        co_return read;
+    }
+    if (!outcome.profile) {
+        read.page = error_of(ClientErrorKind::malformed_answer, "the page has no revision");
+        co_return read;
+    }
+    auto parsed = read_page<T>(*outcome.result, *outcome.profile, read.sent);
+    if (auto* error = std::get_if<ClientError>(&parsed)) {
+        read.page = std::move(*error);
+        co_return read;
+    }
+    Page<T> page = std::get<Page<T>>(std::move(parsed));
+    if constexpr (std::is_same_v<T, ToolDefinition>) {
+        page.items = core->admit_tools(std::move(page.items), *outcome.profile);
+    }
+    read.page = std::move(page);
+    co_return read;
+}
+
+template <class T>
+asio::awaitable<Result<Page<T>>> list_page(std::shared_ptr<ClientCore> core, std::optional<std::string> cursor,
+                                           RequestOptions options) {
+    PageRead<T> read = co_await fetch_page<T>(std::move(core), std::move(cursor), std::move(options));
+    co_return std::move(read.page);
+}
+
+template <class T>
+asio::awaitable<Result<Listing<T>>> list_all(std::shared_ptr<ClientCore> core, RequestOptions options) {
+    const std::size_t most_pages = core->client_options().max_list_pages;
+    const std::size_t most_items = core->client_options().max_list_items;
+    Listing<T> all;
+    std::optional<std::string> cursor;
+    std::size_t pages = 0;
+    std::size_t items = 0;
+    while (true) {
+        if (pages >= most_pages) {
+            Result<Listing<T>> failed(error_of(
+                ClientErrorKind::list_pages_exceeded,
+                "the server's list goes on beyond " + std::to_string(most_pages) + " pages, the limit max_list_pages"));
+            co_return failed;
+        }
+        PageRead<T> read = co_await fetch_page<T>(core, std::move(cursor), options);
+        if (!read.page) {
+            Result<Listing<T>> failed(std::move(read.page).error());
+            co_return failed;
+        }
+        ++pages;
+        items += read.sent;
+        if (items > most_items) {
+            Result<Listing<T>> failed(error_of(ClientErrorKind::list_items_exceeded,
+                                               "the server's list holds more than " + std::to_string(most_items) +
+                                                   " items, the limit max_list_items"));
+            co_return failed;
+        }
+        Page<T>& page = read.page.value();
+        for (T& item : page.items) all.items.push_back(std::move(item));
+        all.page_cache.push_back(page.cache);
+        if (!page.next_cursor) break;
+        cursor = std::move(page.next_cursor);
+    }
+    Result<Listing<T>> listed(std::move(all));
+    co_return listed;
+}
+
+// ---- Tools
+
+// A tool call: the tool listed first when the call needs its definition and the client has none (a typed call, which
+// checks the result, and a transport that mirrors marked arguments into headers), then the call, then the check of
+// its structured content.
+asio::awaitable<Result<ToolCall>> perform_tool_call(std::shared_ptr<ClientCore> core, std::string name,
+                                                    json arguments, RequestOptions options, bool typed) {
+    if (typed && !core->structured_results()) {
+        Result<ToolCall> refused(error_of(ClientErrorKind::no_structured_results,
+                                          "the governing revision's tool results carry no structured content"));
+        co_return refused;
+    }
+    if (!core->tool_known(name) && (typed || core->mirrors_arguments())) {
+        RequestOptions listing;
+        listing.timeout = options.timeout;
+        listing.stop = options.stop;
+        Result<Listing<ToolDefinition>> listed = co_await list_all<ToolDefinition>(core, std::move(listing));
+        if (!listed) {
+            Result<ToolCall> failed(std::move(listed).error());
+            co_return failed;
+        }
+    }
+    json input_schema = core->tool_input_schema(name);
     json params = json::object();
-    params[std::string(name_member)] = std::move(name);
+    params[std::string(name_member)] = name;
     params[std::string(arguments_member)] = std::move(arguments);
     ClientMessage message{std::string(client_method::tools_call), std::move(params)};
+    CallOutcome outcome =
+        co_await perform_call(core, std::move(message), std::move(options), std::move(input_schema));
+    Result<ToolResult> read = tool_result(std::move(outcome));
+    if (!read) {
+        Result<ToolCall> failed(std::move(read).error());
+        co_return failed;
+    }
+    ToolCall call;
+    static_cast<ToolResult&>(call) = std::move(read).value();
+    call.check = core->check_output(name, call);
+    Result<ToolCall> called(std::move(call));
+    co_return called;
+}
+
+// ---- Resources, prompts, completion
+
+asio::awaitable<Result<ReadResult>> read_resource_on(std::shared_ptr<ClientCore> core, std::string uri,
+                                                     RequestOptions options) {
+    json params = json::object();
+    params[std::string(uri_member)] = std::move(uri);
+    ClientMessage message{std::string(client_method::resources_read), std::move(params)};
     CallOutcome outcome = co_await call_on(std::move(core), std::move(message), std::move(options), nullptr);
-    Result<ToolResult> result = tool_result(std::move(outcome));
+    Result<ReadResult> result = read_result<ReadResult>(std::move(outcome), "the resource's contents");
+    co_return result;
+}
+
+asio::awaitable<Result<PromptResult>> get_prompt_on(std::shared_ptr<ClientCore> core, std::string name,
+                                                    std::map<std::string, std::string> arguments,
+                                                    RequestOptions options) {
+    json params = json::object();
+    params[std::string(name_member)] = std::move(name);
+    if (!arguments.empty()) {
+        json given = json::object();
+        for (auto& [key, text] : arguments) given[key] = std::move(text);
+        params[std::string(arguments_member)] = std::move(given);
+    }
+    ClientMessage message{std::string(client_method::prompts_get), std::move(params)};
+    CallOutcome outcome = co_await call_on(std::move(core), std::move(message), std::move(options), nullptr);
+    Result<PromptResult> result = read_result<PromptResult>(std::move(outcome), "the prompt");
+    co_return result;
+}
+
+// On the client's thread: whether the request has a place for the resolved arguments is the governing revision's.
+asio::awaitable<Result<CompletionResult>> perform_complete(std::shared_ptr<ClientCore> core, CompletionRef ref,
+                                                           std::string argument, std::string value,
+                                                           std::map<std::string, std::string> resolved,
+                                                           RequestOptions options) {
+    const bool prompt = ref.kind == CompletionRef::Kind::prompt;
+    json reference = json::object();
+    reference[std::string(type_member)] = std::string(prompt ? prompt_reference_type : resource_reference_type);
+    reference[std::string(prompt ? name_member : uri_member)] = std::move(ref.reference);
+    json typed = json::object();
+    typed[std::string(name_member)] = std::move(argument);
+    typed[std::string(value_member)] = std::move(value);
+    json params = json::object();
+    params[std::string(ref_member)] = std::move(reference);
+    params[std::string(argument_member)] = std::move(typed);
+    if (!resolved.empty() && core->params_have(client_method::completion_complete, context_member)) {
+        json chosen = json::object();
+        for (auto& [key, text] : resolved) chosen[key] = std::move(text);
+        json context = json::object();
+        context[std::string(arguments_member)] = std::move(chosen);
+        params[std::string(context_member)] = std::move(context);
+    }
+    ClientMessage message{std::string(client_method::completion_complete), std::move(params)};
+    CallOutcome outcome = co_await perform_call(core, std::move(message), std::move(options), nullptr);
+    Result<CompletionResult> result = read_result<CompletionResult>(std::move(outcome), "the completion");
     co_return result;
 }
 
@@ -1257,13 +1689,89 @@ asio::awaitable<Result<void>> Client::async_ping(RequestOptions options) {
     return detail::ping_on(core_, std::move(options));
 }
 
-Result<ToolResult> Client::call_tool(std::string name, json arguments, RequestOptions options) {
+Result<ToolCall> Client::call_tool(std::string name, json arguments, RequestOptions options) {
     if (core_ && core_->here()) return detail::own_thread_error();
     return detail::block_on(async_call_tool(std::move(name), std::move(arguments), std::move(options)));
 }
 
-asio::awaitable<Result<ToolResult>> Client::async_call_tool(std::string name, json arguments, RequestOptions options) {
-    return detail::call_tool_on(core_, std::move(name), std::move(arguments), std::move(options));
+asio::awaitable<Result<ToolCall>> Client::async_call_tool(std::string name, json arguments, RequestOptions options) {
+    return detail::work_on(core_, detail::perform_tool_call(core_, std::move(name), std::move(arguments),
+                                                            std::move(options), false));
+}
+
+Result<ToolCall> Client::checked_call(std::string name, json arguments, RequestOptions options) {
+    if (core_ && core_->here()) return detail::own_thread_error();
+    return detail::block_on(async_checked_call(std::move(name), std::move(arguments), std::move(options)));
+}
+
+asio::awaitable<Result<ToolCall>> Client::async_checked_call(std::string name, json arguments,
+                                                             RequestOptions options) {
+    return detail::work_on(core_, detail::perform_tool_call(core_, std::move(name), std::move(arguments),
+                                                            std::move(options), true));
+}
+
+// ---- Lists
+
+#define NEOMCP_CLIENT_LIST(Name, Type)                                                                               \
+    Result<Page<Type>> Client::list_##Name(std::optional<std::string> cursor, RequestOptions options) {             \
+        if (core_ && core_->here()) return detail::own_thread_error();                                              \
+        return detail::block_on(async_list_##Name(std::move(cursor), std::move(options)));                          \
+    }                                                                                                                \
+    asio::awaitable<Result<Page<Type>>> Client::async_list_##Name(std::optional<std::string> cursor,               \
+                                                                  RequestOptions options) {                          \
+        return detail::work_on(core_, detail::list_page<Type>(core_, std::move(cursor), std::move(options)));       \
+    }                                                                                                                \
+    Result<Listing<Type>> Client::list_all_##Name(RequestOptions options) {                                         \
+        if (core_ && core_->here()) return detail::own_thread_error();                                              \
+        return detail::block_on(async_list_all_##Name(std::move(options)));                                         \
+    }                                                                                                                \
+    asio::awaitable<Result<Listing<Type>>> Client::async_list_all_##Name(RequestOptions options) {                  \
+        return detail::work_on(core_, detail::list_all<Type>(core_, std::move(options)));                           \
+    }
+
+NEOMCP_CLIENT_LIST(tools, ToolDefinition)
+NEOMCP_CLIENT_LIST(resources, ResourceDefinition)
+NEOMCP_CLIENT_LIST(resource_templates, ResourceTemplateDefinition)
+NEOMCP_CLIENT_LIST(prompts, PromptDefinition)
+
+#undef NEOMCP_CLIENT_LIST
+
+// ---- Resources, prompts, completion
+
+Result<ReadResult> Client::read_resource(std::string uri, RequestOptions options) {
+    if (core_ && core_->here()) return detail::own_thread_error();
+    return detail::block_on(async_read_resource(std::move(uri), std::move(options)));
+}
+
+asio::awaitable<Result<ReadResult>> Client::async_read_resource(std::string uri, RequestOptions options) {
+    return detail::read_resource_on(core_, std::move(uri), std::move(options));
+}
+
+Result<PromptResult> Client::get_prompt(std::string name, std::map<std::string, std::string> arguments,
+                                        RequestOptions options) {
+    if (core_ && core_->here()) return detail::own_thread_error();
+    return detail::block_on(async_get_prompt(std::move(name), std::move(arguments), std::move(options)));
+}
+
+asio::awaitable<Result<PromptResult>> Client::async_get_prompt(std::string name,
+                                                               std::map<std::string, std::string> arguments,
+                                                               RequestOptions options) {
+    return detail::get_prompt_on(core_, std::move(name), std::move(arguments), std::move(options));
+}
+
+Result<CompletionResult> Client::complete(CompletionRef ref, std::string argument, std::string value,
+                                          std::map<std::string, std::string> resolved, RequestOptions options) {
+    if (core_ && core_->here()) return detail::own_thread_error();
+    return detail::block_on(
+        async_complete(std::move(ref), std::move(argument), std::move(value), std::move(resolved), std::move(options)));
+}
+
+asio::awaitable<Result<CompletionResult>> Client::async_complete(CompletionRef ref, std::string argument,
+                                                                 std::string value,
+                                                                 std::map<std::string, std::string> resolved,
+                                                                 RequestOptions options) {
+    return detail::work_on(core_, detail::perform_complete(core_, std::move(ref), std::move(argument),
+                                                           std::move(value), std::move(resolved), std::move(options)));
 }
 
 bool Client::roots_changed() {

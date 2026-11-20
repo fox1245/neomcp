@@ -32,6 +32,13 @@ std::string_view to_string(ClientErrorKind kind) noexcept {
         case ClientErrorKind::state_not_echoable: return "state_not_echoable";
         case ClientErrorKind::answer_not_writable: return "answer_not_writable";
         case ClientErrorKind::closed: return "closed";
+        case ClientErrorKind::unverified: return "unverified";
+        case ClientErrorKind::output_invalid: return "output_invalid";
+        case ClientErrorKind::output_undecodable: return "output_undecodable";
+        case ClientErrorKind::no_structured_results: return "no_structured_results";
+        case ClientErrorKind::list_pages_exceeded: return "list_pages_exceeded";
+        case ClientErrorKind::list_items_exceeded: return "list_items_exceeded";
+        case ClientErrorKind::cursor_not_echoable: return "cursor_not_echoable";
         case ClientErrorKind::unserved_revision: return "unserved_revision";
         case ClientErrorKind::handshake_refused: return "handshake_refused";
         case ClientErrorKind::handshake_timed_out: return "handshake_timed_out";

@@ -175,6 +175,7 @@ private:
 struct Seen {
     neomcp::UnitId unit = neomcp::connection_unit;
     json message;
+    std::vector<neomcp::HttpHeader> headers;
     std::string method() const { return message.contains("method") ? message["method"].get<std::string>() : ""; }
 };
 
@@ -204,7 +205,7 @@ public:
                 if (outgoing.kind == neomcp::OutgoingKind::restart && link_) link_->restarted();
                 return;
             }
-            Seen seen{outgoing.unit, json::parse(outgoing.line)};
+            Seen seen{outgoing.unit, json::parse(outgoing.line), outgoing.headers};
             written_.push_back(seen);
             if (outgoing.kind == neomcp::OutgoingKind::request) request = seen;
         }

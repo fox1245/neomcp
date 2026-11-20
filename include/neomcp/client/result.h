@@ -60,6 +60,19 @@ enum class ClientErrorKind {
     answer_not_writable,     // an answer of a round cannot be written for the revision
     closed,                  // the client was closed (or the Client was moved from)
 
+    // ---- The answer came, and the client does not take it as the result asked for (neomcp/client/calls.h)
+    unverified,              // a typed call: the structured content cannot be checked, because the tool's output
+                             // schema cannot be compiled within the peer bounds or budget, or the tool is not in the
+                             // server's list of tools
+    output_invalid,          // a typed call: the structured content fails the tool's output schema
+    output_undecodable,      // a typed call: the result has no structured content, or it does not have the shape of
+                             // the result type
+    no_structured_results,   // a typed call under a revision whose tool results carry no structured content; nothing
+                             // was sent
+    list_pages_exceeded,     // a list_all_ call: the server needed more than max_list_pages pages
+    list_items_exceeded,     // a list_all_ call: the server sent more than max_list_items items
+    cursor_not_echoable,     // a cursor the server gave cannot be sent back exactly as it was received
+
     // ---- Contact could not be made (ContactFailureKind)
     unserved_revision,       // the handshake's answer names a revision none of the client's is
     handshake_refused,       // the handshake was answered with an error, after its one retry where that applies

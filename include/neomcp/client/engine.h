@@ -56,6 +56,7 @@
 #include "neomcp/client/mechanism.h"
 #include "neomcp/input.h"
 #include "neomcp/json.h"
+#include "neomcp/json_schema.h"
 #include "neomcp/jsonrpc.h"
 #include "neomcp/mechanism.h"
 #include "neomcp/model.h"
@@ -457,8 +458,10 @@ enum class DiagnosticKind {
     events_dropped,      // events were dropped because max_queued_events were queued
     level_refused,       // the server refused the log level the client asked for
     form_not_restricted,  // a server's request for a form outside the restricted form was answered invalid params
-    answer_invalid       // an answer to a server's request held accepted content that fails the form's schema: it
+    answer_invalid,      // an answer to a server's request held accepted content that fails the form's schema: it
                          // was not sent, and the request was answered with an internal error
+    schema_budget_spent  // the budget of schema compiles of the server (max_peer_schema_compiles) is spent: every
+                         // later schema of the server is refused without being compiled; reported once
 };
 
 struct Diagnostic {
@@ -494,10 +497,15 @@ struct ClientDefaults {
     static constexpr std::size_t peer_pattern_length = 256;
     static constexpr std::size_t peer_pattern_memory = std::size_t{512} * 1024;
     static constexpr std::size_t peer_max_evaluations = 1'000'000;
+    static constexpr std::size_t peer_patterns_per_schema = 32;
+    // How many schemas of a server the client compiles in its whole life (forms, output schemas), refused ones too.
+    static constexpr std::size_t max_peer_schema_compiles = 128;
     // The client's own (ClientOptions, neomcp/client/options.h).
     static constexpr std::size_t max_concurrent_input_handlers = 4;
     static constexpr std::chrono::milliseconds state_retry_first_delay{50};
     static constexpr std::chrono::milliseconds state_retry_max_delay{250};
+    static constexpr std::size_t max_list_pages = 64;
+    static constexpr std::size_t max_list_items = 10'000;
 };
 
 struct EngineOptions {
@@ -559,15 +567,33 @@ struct EngineOptions {
     // not count. Default 3.
     std::size_t max_restarts = ClientDefaults::max_restarts;
 
-    // The bounds a form's requested schema is compiled and its accepted content validated under (json_schema::Limits:
-    // max_schema_depth, max_pattern_length, max_pattern_memory, max_evaluations). A schema that does not compile
-    // within them is treated as one outside the restricted form; content whose validation exceeds them is not sent.
-    // Zero is an error. Defaults 32, 256 bytes, 512 KiB, 1 000 000.
+    // The bounds every schema a server sent is compiled and validated under (compile_peer_schema; json_schema::Limits:
+    // max_schema_depth, max_pattern_length, max_pattern_memory, max_evaluations, max_patterns). A form's schema that
+    // does not compile within them is treated as one outside the restricted form; content whose validation exceeds
+    // them is not sent. Zero is an error. Defaults 32, 256 bytes, 512 KiB, 1 000 000, 32.
     std::size_t peer_schema_depth = ClientDefaults::peer_schema_depth;
     std::size_t peer_pattern_length = ClientDefaults::peer_pattern_length;
     std::size_t peer_pattern_memory = ClientDefaults::peer_pattern_memory;
     std::size_t peer_max_evaluations = ClientDefaults::peer_max_evaluations;
+    std::size_t peer_patterns_per_schema = ClientDefaults::peer_patterns_per_schema;
+    // How many schemas of the server the engine compiles in its whole life, through compile_peer_schema: a schema the
+    // validator refuses counts as one compiled. Once the budget is spent every later schema is refused without being
+    // compiled (and a Diagnostic, schema_budget_spent, says so once). The budget is never given back: not when the
+    // server lists its tools again, and not after a restart. It bounds the work a server can make the client do by
+    // sending schemas. Zero is an error. Default 128.
+    std::size_t max_peer_schema_compiles = ClientDefaults::max_peer_schema_compiles;
 };
+
+// Why compile_peer_schema gave no validator.
+struct PeerSchemaRefused {
+    // The budget of compiles was spent before this schema: it was not looked at.
+    bool budget_spent = false;
+    // Otherwise the validator's refusal: where in the schema, and why. The message may quote the schema (a pattern),
+    // which the server wrote.
+    std::optional<json_schema::Issue> issue;
+};
+
+using PeerSchema = std::variant<json_schema::Validator, PeerSchemaRefused>;
 
 // ---- The engine
 
@@ -629,6 +655,14 @@ public:
     // Ends a call that waits for a round (InputRoundStarted) with `failure`, such as a handler that failed or a user
     // who refused; nothing is sent, as no retry follows. Ignored unless the call waits for a round.
     void fail_round(RequestRef request, CallFailure failure);
+
+    // Compiles a schema the server sent (a form's requested schema, a tool's output schema) within the peer bounds of
+    // EngineOptions, and counts it against max_peer_schema_compiles. A `$ref` to another document is refused by the
+    // validator, never fetched. The engine compiles the forms of a server through this too, so that every schema of
+    // the server draws on one budget.
+    PeerSchema compile_peer_schema(const json& schema);
+    // Schemas compiled (or refused by the validator) so far.
+    std::size_t peer_schema_compiles() const noexcept;
 
     // Tells the server that the client's roots changed, where the governing profile has a notification for that and
     // the client declared that it sends it (InputSupport::roots_list_changed). False, and nothing is sent, otherwise,
