@@ -4,6 +4,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <memory>
 #include <filesystem>
 #include <future>
 #include <mutex>
@@ -13,6 +16,11 @@
 #include <vector>
 
 #include "support.h"
+
+#ifndef _WIN32
+#include <signal.h>
+#include <sys/types.h>
+#endif
 
 using namespace client_stdio_test;
 using neomcp::ChildProcessStep;
@@ -57,6 +65,29 @@ neomcp::Result<neomcp::Client> open_with(neomcp::ClientOptions options, neomcp::
         return error;
     }
     return neomcp::Client::open(std::move(options), std::move(transport));
+}
+
+// Opens on another thread and waits for it within the bound. An open that does not return would hold the test for
+// ever: the program ends then, and with it (POSIX) the groups of the processes the transport started.
+neomcp::Result<neomcp::Client> open_within_bound(neomcp::ClientOptions options, neomcp::ChildProcess process,
+                                                 Steps& steps) {
+    auto transport = transport_of(std::move(process), steps, options.max_message_bytes);
+    auto done = std::make_shared<std::promise<neomcp::Result<neomcp::Client>>>();
+    auto opened = done->get_future();
+    std::thread([options = std::move(options), transport = std::move(transport), done]() mutable {
+        done->set_value(neomcp::Client::open(std::move(options), std::move(transport)));
+    }).detach();
+    if (opened.wait_for(wait_bound) != std::future_status::ready) {
+        std::fprintf(stderr, "Client::open did not return within the bound\n");
+#ifndef _WIN32
+        for (const auto& event : steps.all()) {
+            if (event.step == ChildProcessStep::started) ::kill(-static_cast<pid_t>(event.pid), SIGKILL);
+        }
+#endif
+        std::fflush(stderr);
+        std::_Exit(1);
+    }
+    return opened.get();
 }
 
 }  // namespace
@@ -319,4 +350,61 @@ TEST(ClientStdio, ACallPendingWhenTheServerWritesTooMuchThatIsNotAMessageEndsSer
     const auto killed = steps.await(ChildProcessStep::kill_sent);
     ASSERT_TRUE(killed.has_value());
     EXPECT_EQ(killed->cause, neomcp::ChildProcessCause::output_refused);
+}
+
+TEST(ClientStdio, AServerThatEndsDuringEveryHandshakeFailsOpeningAfterMaxRestarts) {
+    Folder folder;
+    json rules = json::array();
+    rules.push_back(rule("initialize", json::array({action("exit", 5)})));
+    json script = json::object();
+    script["rules"] = rules;
+    neomcp::ClientOptions options = only({"2025-11-25"});
+    options.max_restarts = 2;
+    Steps steps;
+    auto client = open_within_bound(std::move(options), scripted(folder, script), steps);
+    ASSERT_FALSE(client);
+    EXPECT_EQ(client.error().kind, neomcp::ClientErrorKind::too_many_restarts);
+    EXPECT_EQ(steps.count(ChildProcessStep::started), 3u);
+}
+
+TEST(ClientStdio, AServerThatEndsDuringEveryProbeFailsOpeningAfterMaxRestarts) {
+    Folder folder;
+    json rules = json::array();
+    rules.push_back(rule("server/discover", json::array({action("exit", 5)})));
+    json script = json::object();
+    script["rules"] = rules;
+    neomcp::ClientOptions options = only({"2026-07-28"});
+    options.max_restarts = 1;
+    Steps steps;
+    auto client = open_within_bound(std::move(options), scripted(folder, script), steps);
+    ASSERT_FALSE(client);
+    EXPECT_EQ(client.error().kind, neomcp::ClientErrorKind::too_many_restarts);
+    // The first start after the probe does not count; the next ones do.
+    EXPECT_EQ(steps.count(ChildProcessStep::started), 3u);
+}
+
+TEST(ClientStdio, MaxRestartsHoldsUnderAHandshakeRevision) {
+    Folder folder;
+    json rules = json::array();
+    rules.push_back(rule("initialize", json::array({action("answer", initialize_result("2025-11-25"))})));
+    rules.push_back(tool_rule("die", json::array({action("exit", 3)})));
+    json script = json::object();
+    script["rules"] = rules;
+    neomcp::ClientOptions options = only({"2025-11-25"});
+    options.max_restarts = 1;
+    Steps steps;
+    auto client = open_with(std::move(options), scripted(folder, script), steps);
+    ASSERT_TRUE(client) << client.error().message;
+    // The answer to each new handshake is not an answer between the exits: the second exit in a row is past the
+    // bound.
+    for (int call = 0; call < 2; ++call) {
+        SCOPED_TRACE(call);
+        auto result = client->call_tool("die");
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().kind, neomcp::ClientErrorKind::server_exited);
+    }
+    auto refused = client->call_tool("die");
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().kind, neomcp::ClientErrorKind::too_many_restarts);
+    EXPECT_EQ(steps.count(ChildProcessStep::started), 2u);
 }

@@ -561,7 +561,7 @@ struct EngineOptions {
     // Requests of a server that wait for the client's answer at once (ServerAsked); one more is answered at once with
     // an internal error, without reaching a handler. A ping does not count. Zero is an error. Default 16.
     std::size_t max_concurrent_server_requests = ClientDefaults::max_concurrent_server_requests;
-    // stdio: how many times in a row the server process may end without an answer between before contact fails;
+    // stdio: how many times in a row the process may end, no application call answered between, before contact fails;
     // zero: it is never started again after it ended. The one start that follows a process that ended while the probe
     // was out (to make the handshake with a fresh process) belongs to finding out which kind of server it is and does
     // not count. Default 3.

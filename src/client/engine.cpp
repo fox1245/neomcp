@@ -485,9 +485,16 @@ public:
             case ContactPhase::closed: return;
             default: break;
         }
+        reopening_ = false;
         if (restart_for_probe_ || contact_.phase == ContactPhase::probing) {
             restart_for_probe_ = false;
-            fallback_handshake();
+            // The process ended while the probe was out: the new one gets the handshake when a revision that opens
+            // with one is enabled, and the probe again when none is.
+            if (newest(false) != nullptr) {
+                fallback_handshake();
+            } else {
+                start_contact();
+            }
             return;
         }
         if (contact_.verdict && contact_.verdict->kind == ServerKind::per_request && governing_ != nullptr) {
@@ -1300,8 +1307,10 @@ private:
         const RequestRef ref = found->second.ref;
         wires_.erase(found);
         remember_answered(*number);
-        exits_in_row_ = 0;
         Call& call = calls_.at(ref);
+        // Only an answer to a call of the application shows that the server serves: the answers to the engine's own
+        // requests (the probe, the handshake, the log level) come before any call can fail again.
+        if (call.purpose == Purpose::call) exits_in_row_ = 0;
         call.wire.reset();
         if (transport_ == profile::Transport::streamable_http) end_exchange(unit);
         switch (call.purpose) {
@@ -1684,22 +1693,30 @@ private:
     }
     void on_stream(UnitId unit, const ProcessExited&) {
         if (transport_ != profile::Transport::stdio || unit != connection_unit) return;
-        if (contact_.phase == ContactPhase::probing) {
-            // A server that opens with a handshake may end on a request it does not know: the handshake goes to a
-            // fresh process, a start that belongs to finding out which kind of server it is.
+        const ContactPhase phase = contact_.phase;
+        if (phase == ContactPhase::probing) {
             for (const auto& [ref, call] : calls_) {
                 if (call.purpose == Purpose::probe) step(ref, call.message.method, "the process ended first");
             }
-            lose_all_on_wire(CallFailureKind::server_exited, "the server process ended");
             restart_for_probe_ = true;
-            set_phase(ContactPhase::lost);
-            request_restart();
-            return;
+            if (!probe_restart_used_) {
+                // A server that opens with a handshake may end on a request it does not know: the handshake goes to
+                // a fresh process, a start that belongs to finding out which kind of server it is. Once only: a
+                // process that ends while the probe is out again counts as any other end.
+                probe_restart_used_ = true;
+                lose_all_on_wire(CallFailureKind::server_exited, "the server process ended");
+                reopening_ = true;
+                restarting_ = false;
+                set_phase(ContactPhase::lost);
+                request_restart();
+                return;
+            }
         }
         lose_all_on_wire(CallFailureKind::server_exited, "the server process ended");
         end_asks();
-        switch (contact_.phase) {
+        switch (phase) {
             case ContactPhase::open:
+            case ContactPhase::probing:
             case ContactPhase::handshaking:
             case ContactPhase::lost: break;
             default: return;
@@ -1711,8 +1728,10 @@ private:
                          "the server process ended more often in a row than the client starts it again");
             return;
         }
-        if (contact_.phase != ContactPhase::lost) set_phase(ContactPhase::lost);
-        if (!held_.empty()) request_restart();
+        // Contact that was being opened is still wanted, with or without a call that waits for it.
+        if (phase == ContactPhase::probing || phase == ContactPhase::handshaking) reopening_ = true;
+        if (phase != ContactPhase::lost) set_phase(ContactPhase::lost);
+        if (reopening_ || !held_.empty()) request_restart();
     }
 
     EngineOptions options_;
@@ -1731,6 +1750,8 @@ private:
     bool reprobed_ = false;
     bool restarting_ = false;
     bool restart_for_probe_ = false;
+    bool probe_restart_used_ = false;  // the one start after an end while the probe was out that does not count
+    bool reopening_ = false;           // the process ended while contact was being opened: a new one is wanted
     std::size_t exits_in_row_ = 0;
 
     std::uint64_t next_id_ = 1;

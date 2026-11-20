@@ -1059,6 +1059,72 @@ TEST(ClientEngineBounds, AnAnswerBetweenExitsStartsTheCountAgain) {
     EXPECT_EQ(rig.engine->contact().phase, ContactPhase::open);
 }
 
+TEST(ClientEngineBounds, AProcessThatEndsDuringTheHandshakeIsStartedAgainUntilMaxRestarts) {
+    auto options = only({handshake_revision});
+    options.max_restarts = 2;
+    Rig rig(options);
+    rig.engine->open();
+    ASSERT_EQ(count_requests(rig, "initialize"), 1u);
+    // No call is held: contact itself is wanted, so the process is started again.
+    for (int exit = 1; exit <= 2; ++exit) {
+        rig.engine->stream_event(neomcp::connection_unit, neomcp::ProcessExited{exit});
+        ASSERT_EQ(rig.engine->contact().phase, ContactPhase::lost) << exit;
+        ASSERT_EQ(rig.outputs(OutgoingKind::restart).size(), static_cast<std::size_t>(exit));
+        rig.engine->transport_restarted();
+        ASSERT_EQ(rig.engine->contact().phase, ContactPhase::handshaking);
+        ASSERT_EQ(count_requests(rig, "initialize"), static_cast<std::size_t>(exit + 1));
+    }
+    rig.engine->stream_event(neomcp::connection_unit, neomcp::ProcessExited{3});
+    EXPECT_EQ(rig.engine->contact().phase, ContactPhase::failed);
+    ASSERT_TRUE(rig.engine->contact().failure.has_value());
+    EXPECT_EQ(rig.engine->contact().failure->kind, neomcp::ContactFailureKind::too_many_restarts);
+    EXPECT_EQ(rig.outputs(OutgoingKind::restart).size(), 2u);
+}
+
+TEST(ClientEngineBounds, AProcessThatEndsDuringTheProbeMoreThanOnceCountsAfterTheFirst) {
+    auto options = only({newest});
+    options.max_restarts = 1;
+    Rig rig(options);
+    rig.engine->open();
+    ASSERT_EQ(count_requests(rig, "server/discover"), 1u);
+    // The first end while the probe is out belongs to finding out which kind of server it is.
+    rig.engine->stream_event(neomcp::connection_unit, neomcp::ProcessExited{1});
+    ASSERT_EQ(rig.outputs(OutgoingKind::restart).size(), 1u);
+    rig.engine->transport_restarted();
+    // With no revision that opens with a handshake, the new process is probed again.
+    ASSERT_EQ(rig.engine->contact().phase, ContactPhase::probing);
+    ASSERT_EQ(count_requests(rig, "server/discover"), 2u);
+    rig.engine->stream_event(neomcp::connection_unit, neomcp::ProcessExited{2});
+    ASSERT_EQ(rig.engine->contact().phase, ContactPhase::lost);
+    ASSERT_EQ(rig.outputs(OutgoingKind::restart).size(), 2u);
+    rig.engine->transport_restarted();
+    ASSERT_EQ(count_requests(rig, "server/discover"), 3u);
+    rig.engine->stream_event(neomcp::connection_unit, neomcp::ProcessExited{3});
+    EXPECT_EQ(rig.engine->contact().phase, ContactPhase::failed);
+    ASSERT_TRUE(rig.engine->contact().failure.has_value());
+    EXPECT_EQ(rig.engine->contact().failure->kind, neomcp::ContactFailureKind::too_many_restarts);
+}
+
+TEST(ClientEngineBounds, AnAnswerToTheHandshakeDoesNotStartTheCountAgain) {
+    auto options = only({handshake_revision});
+    options.max_restarts = 1;
+    Rig rig(options);
+    open_handshake(rig, handshake_revision);
+    rig.send("tools/list");
+    rig.engine->stream_event(neomcp::connection_unit, neomcp::ProcessExited{1});
+    ASSERT_EQ(rig.engine->contact().phase, ContactPhase::lost);
+    rig.send("tools/list");
+    rig.engine->transport_restarted();
+    rig.answer("initialize", initialize_result(handshake_revision));
+    ASSERT_EQ(rig.engine->contact().phase, ContactPhase::open);
+    // The held call went out after the new handshake; the process ends before answering it.
+    ASSERT_EQ(count_requests(rig, "tools/list"), 2u);
+    rig.engine->stream_event(neomcp::connection_unit, neomcp::ProcessExited{2});
+    EXPECT_EQ(rig.engine->contact().phase, ContactPhase::failed);
+    ASSERT_TRUE(rig.engine->contact().failure.has_value());
+    EXPECT_EQ(rig.engine->contact().failure->kind, neomcp::ContactFailureKind::too_many_restarts);
+}
+
 TEST(ClientEngineBounds, OptionsThatCannotWorkAreRefused) {
     auto zero = every_revision();
     zero.max_pending_requests = 0;
