@@ -8,7 +8,7 @@ name: CI
 # project) and run once: on Linux with Clang, and on Windows with MSVC, where the HTTP server's SIGTERM check is left out.
 # The client's HTTP transport runs on libcurl from the system: the Linux jobs install it with apt, macOS with Homebrew and
 # Windows with vcpkg; the jobs that build only servers configure without it (NEOMCP_HTTP_CLIENT=OFF), which shows that a
-# server needs no libcurl.
+# server needs no libcurl. One more job runs the official conformance suite against the client fixture.
 # One more job checks the translation of regular expressions for the schema keyword `pattern` against V8: Node writes
 # patterns with the answers of V8, and a test executable compares the validator with them.
 # One more job compares the wire data of every profile in profiles/ with the schema the protocol's specification
@@ -186,6 +186,83 @@ jobs:
           echo "--- fixture log"
           cat "$RUNNER_TEMP/fixture.log" || true
           python3 -I tests/conformance/summarize_checks.py "$RUNNER_TEMP/results-2026-07-28" "$RUNNER_TEMP/results-2025-11-25"
+
+  conformance-client:
+    name: conformance-client
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CC: clang
+      CXX: clang++
+      RUNNER_PACKAGE: "@modelcontextprotocol/conformance@0.2.0-alpha.12"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      # Before anything is judged: the client scenarios the pinned runner has, against those the expectations in
+      # tests/conformance/client-scenarios.json were written for.
+      - name: The client scenarios of the pinned runner
+        run: |
+          npx --yes "$RUNNER_PACKAGE" list --client | tee "$RUNNER_TEMP/client-scenarios.txt"
+          for revision in 2025-11-25 2026-07-28; do
+            npx --yes "$RUNNER_PACKAGE" list --requirements "$revision" | tee "$RUNNER_TEMP/requirements-$revision.txt"
+          done
+          python3 -I tests/conformance/summarize_checks.py --check-listing tests/conformance/client-scenarios.json \
+            "2025-11-25=$RUNNER_TEMP/requirements-2025-11-25.txt" "2026-07-28=$RUNNER_TEMP/requirements-2026-07-28.txt"
+      - name: Install libcurl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON
+      - name: Build the client fixture
+        run: |
+          cmake --build build --parallel --target neomcp_conformance_client
+          echo "FIXTURE=$GITHUB_WORKSPACE/build/tests/client_http/neomcp_conformance_client" >> "$GITHUB_ENV"
+      # Gate (a): each revision's requirement set, with the scenarios that cannot pass yet as expected failures.
+      - name: Conformance, revision 2025-11-25
+        run: >-
+          npx --yes "$RUNNER_PACKAGE" client --command "$FIXTURE --profiles=run" --requirements 2025-11-25
+          --expected-failures tests/conformance/client-expected-failures-2025-11-25.yml
+          --output-dir "$RUNNER_TEMP/requirements-2025-11-25"
+      - name: Conformance, revision 2026-07-28
+        if: ${{ !cancelled() }}
+        run: >-
+          npx --yes "$RUNNER_PACKAGE" client --command "$FIXTURE --profiles=run" --requirements 2026-07-28
+          --expected-failures tests/conformance/client-expected-failures-2026-07-28.yml
+          --output-dir "$RUNNER_TEMP/requirements-2026-07-28"
+      # Gate (b): every scenario the fixture runs, alone at its revision, in both profile modes, without a baseline
+      # (a single run then fails on a warning, a timeout or the client's exit status too).
+      - name: Single runs of every scenario, in both profile modes
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -I tests/conformance/summarize_checks.py --list-runs tests/conformance/client-scenarios.json \
+            > "$RUNNER_TEMP/runs.txt"
+          while read -r mode revision scenario; do
+            folder="$RUNNER_TEMP/single/$mode/$revision/$scenario"
+            mkdir -p "$folder"
+            status=0
+            npx --yes "$RUNNER_PACKAGE" client --command "$FIXTURE --profiles=$mode" --scenario "$scenario" \
+              --spec-version "$revision" --output-dir "$folder" > "$folder/runner.log" 2>&1 < /dev/null || status=$?
+            echo "$status" > "$folder/exit-code"
+            echo "$mode $revision $scenario: runner exited $status"
+          done < "$RUNNER_TEMP/runs.txt"
+      # Gate (c): what each single run reported, against the checks a passing run must have and the runs listed as
+      # expected to fail.
+      - name: Judge the single runs
+        if: ${{ !cancelled() }}
+        run: >-
+          python3 -I tests/conformance/summarize_checks.py --client tests/conformance/client-scenarios.json
+          "$RUNNER_TEMP/single"
+      - name: Show every check that did not succeed
+        if: ${{ failure() }}
+        run: |
+          python3 -I tests/conformance/summarize_checks.py "$RUNNER_TEMP/requirements-2025-11-25" "$RUNNER_TEMP/requirements-2026-07-28"
+          for log in "$RUNNER_TEMP"/single/*/*/*/runner.log; do
+            echo "--- $log"
+            tail -n 40 "$log"
+          done
 
   pattern-oracle:
     name: pattern-oracle

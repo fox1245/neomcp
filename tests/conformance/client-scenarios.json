@@ -1,0 +1,130 @@
+{
+  "comment": [
+    "The client scenarios of the conformance runner pinned in the CI job conformance-client, and what the job expects of each.",
+    "required: the client scenarios each revision's requirement set lists. The job's first step compares them with the listing of the pinned runner and fails on any difference, so every expectation below is written against scenarios the runner has.",
+    "run: the scenarios the fixture runs one by one at that revision, in both profile modes. The others need authorization, which the client does not have yet; they stay in the expected-failure files of the requirement runs.",
+    "checks: the check ids a passing run of the scenario must report, each SUCCESS. rows: check names that must be SUCCESS too (where one id has a row per method). Any FAILURE or WARNING fails the run.",
+    "expected_to_fail: runs (scenario@revision, per profile mode) that cannot pass yet; one of them that passes fails the job, so the list is kept exact."
+  ],
+  "required": {
+    "2025-11-25": [
+      "initialize",
+      "tools_call",
+      "elicitation-sep1034-client-defaults",
+      "sse-retry",
+      "auth/metadata-default",
+      "auth/metadata-var1",
+      "auth/metadata-var2",
+      "auth/metadata-var3",
+      "auth/basic-cimd",
+      "auth/scope-from-www-authenticate",
+      "auth/scope-from-scopes-supported",
+      "auth/scope-omitted-when-undefined",
+      "auth/scope-step-up",
+      "auth/scope-retry-limit",
+      "auth/token-endpoint-auth-basic",
+      "auth/token-endpoint-auth-post",
+      "auth/token-endpoint-auth-none",
+      "auth/pre-registration"
+    ],
+    "2026-07-28": [
+      "tools_call",
+      "request-metadata",
+      "auth/metadata-default",
+      "auth/metadata-var1",
+      "auth/metadata-var2",
+      "auth/metadata-var3",
+      "auth/basic-cimd",
+      "auth/scope-from-www-authenticate",
+      "auth/scope-from-scopes-supported",
+      "auth/scope-omitted-when-undefined",
+      "auth/scope-step-up",
+      "auth/scope-retry-limit",
+      "auth/token-endpoint-auth-basic",
+      "auth/token-endpoint-auth-post",
+      "auth/token-endpoint-auth-none",
+      "auth/pre-registration",
+      "auth/resource-mismatch",
+      "auth/offline-access-scope",
+      "auth/offline-access-not-supported",
+      "auth/authorization-server-migration",
+      "auth/iss-supported",
+      "auth/iss-not-advertised",
+      "auth/iss-supported-missing",
+      "auth/iss-wrong-issuer",
+      "auth/iss-unexpected",
+      "auth/iss-normalized",
+      "auth/metadata-issuer-mismatch",
+      "sep-2322-client-request-state",
+      "http-standard-headers",
+      "http-custom-headers",
+      "http-invalid-tool-headers",
+      "json-schema-ref-no-deref"
+    ]
+  },
+  "run": {
+    "2025-11-25": ["initialize", "tools_call", "elicitation-sep1034-client-defaults", "sse-retry"],
+    "2026-07-28": [
+      "tools_call",
+      "request-metadata",
+      "sep-2322-client-request-state",
+      "http-standard-headers",
+      "http-custom-headers",
+      "http-invalid-tool-headers",
+      "json-schema-ref-no-deref"
+    ]
+  },
+  "checks": {
+    "initialize": ["mcp-client-initialization"],
+    "tools_call": ["tool-add-numbers"],
+    "elicitation-sep1034-client-defaults": [
+      "client-elicitation-sep1034-string-default",
+      "client-elicitation-sep1034-integer-default",
+      "client-elicitation-sep1034-number-default",
+      "client-elicitation-sep1034-enum-default",
+      "client-elicitation-sep1034-boolean-default"
+    ],
+    "sse-retry": ["client-sse-graceful-reconnect", "client-sse-retry-timing", "client-sse-last-event-id"],
+    "request-metadata": [
+      "sep-2575-http-client-sends-version-header",
+      "sep-2575-client-populates-meta",
+      "sep-2575-client-sends-client-info",
+      "sep-2575-http-version-header-matches-meta",
+      "sep-2575-client-retry-supported-version"
+    ],
+    "sep-2322-client-request-state": [
+      "sep-2322-client-request-state-echoed",
+      "sep-2322-client-jsonrpc-id-different",
+      "sep-2322-client-no-state-omitted",
+      "sep-2322-client-parallel-isolation",
+      "sep-2322-default-result-type-complete"
+    ],
+    "http-standard-headers": ["sep-2243-client-includes-standard-headers"],
+    "http-custom-headers": [
+      "sep-2243-client-supports-custom-headers",
+      "sep-2243-client-mirrors-designated-params",
+      "sep-2243-client-encode-values",
+      "sep-2243-client-base64-unsafe",
+      "sep-2243-client-omit-null"
+    ],
+    "http-invalid-tool-headers": ["sep-2243-invalid-tool-tools-list-gate", "sep-2243-client-reject-invalid-tool"],
+    "json-schema-ref-no-deref": ["sep-2106-no-network-ref-deref"]
+  },
+  "rows": {
+    "http-standard-headers": [
+      "ClientMcpMethodHeader_tools_list",
+      "ClientMcpMethodHeader_tools_call",
+      "ClientMcpMethodHeader_resources_list",
+      "ClientMcpMethodHeader_resources_read",
+      "ClientMcpMethodHeader_prompts_list",
+      "ClientMcpMethodHeader_prompts_get",
+      "ClientMcpNameHeader_tools_call",
+      "ClientMcpNameHeader_resources_read",
+      "ClientMcpNameHeader_prompts_get"
+    ]
+  },
+  "expected_to_fail": {
+    "run": ["sse-retry@2025-11-25"],
+    "all": ["sse-retry@2025-11-25"]
+  }
+}
