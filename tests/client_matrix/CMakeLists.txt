@@ -60,3 +60,11 @@ add_test(NAME ClientMatrixPeer.LibraryServer
     COMMAND neomcp_client_matrix_peer_test --paged -- $<TARGET_FILE:neomcp_client_matrix_server>)
 set_tests_properties(ClientMatrixPeer.LibraryServer PROPERTIES TIMEOUT 600)
 
+if(NEOMCP_INTEROP_TESTS)
+    # The official Python SDK's servers as peers. Isolated mode (-I): the interpreter reads neither the environment nor
+    # the script's folder; the packages come from its own site-packages.
+    add_test(NAME interop_python_sdk_servers
+        COMMAND neomcp_client_matrix_peer_test -- "${NEOMCP_INTEROP_PYTHON}" -I
+            "${CMAKE_CURRENT_SOURCE_DIR}/../interop/python_server.py")
+    set_tests_properties(interop_python_sdk_servers PROPERTIES TIMEOUT 900)
+endif()

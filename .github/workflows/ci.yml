@@ -125,6 +125,11 @@ jobs:
         run: |
           python -m venv "$RUNNER_TEMP/interop-venv"
           "$RUNNER_TEMP/interop-venv/bin/python" -m pip install -r tests/interop/requirements.txt
+      # The SDK's version, the revisions it knows and the transports its servers offer, as the peers' test uses them.
+      # A failure here is reported by the peers' test as well; the other interoperability tests still run.
+      - name: Describe the Python SDK's servers
+        continue-on-error: true
+        run: '"$RUNNER_TEMP/interop-venv/bin/python" -I tests/interop/python_server.py describe'
       - name: Install libcurl (the client's HTTP transport)
         run: |
           sudo apt-get update
@@ -136,7 +141,12 @@ jobs:
       - name: Build
         run: cmake --build build --parallel 4
       - name: Test
-        run: ctest --test-dir build --output-on-failure --timeout 300
+        run: ctest --test-dir build --output-on-failure --timeout 300 -E interop_python_sdk_servers
+      # The client against the Python SDK's servers, with the whole output: every cell and step, and what the servers
+      # wrote to their standard error.
+      - name: The client against the Python SDK's servers
+        if: ${{ !cancelled() }}
+        run: ctest --test-dir build --verbose -R interop_python_sdk_servers
 
   conformance:
     name: conformance
