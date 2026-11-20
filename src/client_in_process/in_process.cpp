@@ -97,11 +97,18 @@ private:
         return std::nullopt;
     }
 
+    // The session's output reaches the client while its process runs: once the process ends, what the session still
+    // writes as it closes (the graceful end of its subscriptions, say) is not something a process that is gone sends.
     std::variant<std::unique_ptr<Session>, CreateError> connect(const MemoryLink& link) {
+        auto running = std::make_shared<std::atomic<bool>>(true);
+        running_ = running;
         if (kind_ == profile::Transport::stdio) {
-            return server_.connect([link](std::string line) { link.message(connection_unit, std::move(line)); });
+            return server_.connect([link, running](std::string line) {
+                if (running->load()) link.message(connection_unit, std::move(line));
+            });
         }
-        return server_.connect_tagged(kind_, [link](Output output) {
+        return server_.connect_tagged(kind_, [link, running](Output output) {
+            if (!running->load()) return;
             const UnitId unit = output.unit.value_or(connection_unit);
             const bool end = output.kind == OutputKind::end;
             if (!end) link.message(unit, std::move(output.line));
@@ -117,6 +124,7 @@ private:
 
     void end_session() {
         if (!session_) return;
+        if (running_) running_->store(false);
         std::unique_ptr<Session> ended = std::move(session_);
         ended->close();
     }
@@ -126,6 +134,7 @@ private:
     mutable std::mutex mutex_;
     std::optional<MemoryLink> link_;
     std::unique_ptr<Session> session_;
+    std::shared_ptr<std::atomic<bool>> running_;  // whether the current process's output reaches the client
     std::atomic<std::size_t> processes_{0};
     bool transport_taken_ = false;
     bool detached_ = false;

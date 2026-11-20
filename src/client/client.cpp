@@ -46,8 +46,10 @@
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 
+#include "client/feed.h"
 #include "neomcp/argument_headers.h"
 #include "neomcp/jsonrpc.h"
+#include "neomcp/random.h"
 #include "neomcp/wire_read.h"
 
 namespace neomcp {
@@ -361,6 +363,12 @@ public:
         } else if (options.state_retry_first_delay > options.state_retry_max_delay) {
             problems += "state_retry_first_delay must not exceed state_retry_max_delay\n";
         }
+        if (options.max_subscriptions == 0) problems += "max_subscriptions must be positive\n";
+        if (options.subscription_reopen_first_delay.count() <= 0 || options.subscription_reopen_max_delay.count() <= 0) {
+            problems += "the delays before a lost subscription is reopened must be positive\n";
+        } else if (options.subscription_reopen_first_delay > options.subscription_reopen_max_delay) {
+            problems += "subscription_reopen_first_delay must not exceed subscription_reopen_max_delay\n";
+        }
         if (!problems.empty()) {
             problems.pop_back();
             return error_of(ClientErrorKind::invalid_options, std::move(problems));
@@ -544,6 +552,179 @@ public:
         return sent;
     }
 
+    // ---- Change feeds, on the client's thread (neomcp/client/subscription.h)
+
+    // One subscription of the application.
+    struct Feed {
+        explicit Feed(asio::io_context& context) : wake(context) {
+            wake.expires_at(asio::steady_timer::time_point::max());
+        }
+        std::uint64_t id = 0;
+        ChangeFilter asked;
+        ChangeFilter honoured;
+        FeedDelivery delivery = FeedDelivery::subscription;
+        std::optional<std::chrono::milliseconds> ack_timeout;
+        std::optional<RequestRef> call;  // subscriptions: the request that opened it, while it is pending
+        bool acknowledged = false;       // listen() returned: the first acknowledgement (or the watches) came
+        bool closing = false;            // the application closed it
+        std::vector<std::string> held;   // the connection: the resources it holds a watch of (watched_)
+        std::size_t reopens = 0;         // reopens in a row since the last acknowledgement
+        std::optional<TimerId> reopen_timer;
+        PendingChanges pending;
+        std::optional<ClientError> end;  // why it ended; set once
+        asio::steady_timer wake;         // listen() and next() wait on it; cancelled at every change of state
+    };
+
+    // A new subscription of `asked`, not yet opened; refused when the client closes, when max_subscriptions are open,
+    // and when contact is not open. A feed on the connection listens there from now on.
+    std::variant<std::shared_ptr<Feed>, ClientError> new_feed(ChangeFilter asked,
+                                                              std::optional<std::chrono::milliseconds> timeout) {
+        if (closing_) return closed_error();
+        std::size_t open = 0;
+        for (const auto& [id, feed] : feeds_) open += feed->end ? 0 : 1;
+        if (open >= options_.max_subscriptions) {
+            return error_of(ClientErrorKind::too_many_subscriptions,
+                            "as many subscriptions as the client allows are open (max_subscriptions)");
+        }
+        const std::optional<FeedDelivery> delivery = engine_->feed_delivery();
+        if (!delivery) {
+            auto error = contact_result();
+            return error ? std::move(*error) : closed_error();
+        }
+        auto feed = std::make_shared<Feed>(io());
+        feed->id = next_feed_++;
+        feed->asked = distinct_resources(std::move(asked));
+        feed->delivery = *delivery;
+        feed->ack_timeout = timeout;
+        feed->honoured = *delivery == FeedDelivery::connection ? engine_->offered(feed->asked) : feed->asked;
+        feeds_.emplace(feed->id, feed);
+        if (*delivery == FeedDelivery::connection && connection_listeners_++ == 0) {
+            engine_->listen_on_connection(true);
+            pump();
+        }
+        return feed;
+    }
+
+    std::shared_ptr<Feed> find_feed(std::uint64_t id) const {
+        const auto found = feeds_.find(id);
+        return found == feeds_.end() ? nullptr : found->second;
+    }
+
+    // On subscriptions: sends the request that opens (or reopens) the feed.
+    std::optional<ClientError> send_listen(Feed& feed) {
+        auto sent = engine_->listen(feed.asked, feed.ack_timeout);
+        if (auto* failure = std::get_if<CallFailure>(&sent)) {
+            ClientError error = call_error(*failure, false, engine_->contact());
+            pump();
+            return error;
+        }
+        const RequestRef ref = std::get<RequestRef>(sent);
+        feed.call = ref;
+        feed_calls_[ref] = feed.id;
+        pump();
+        return std::nullopt;
+    }
+
+    // On the connection: the feed holds a watch of `uri` from now on; whether it is the first, which then sends the
+    // request. A feed lets go only of what it holds, so a listen that stops halfway gives back no other's watch.
+    bool hold_watch(Feed& holder, const std::string& uri) {
+        holder.held.push_back(uri);
+        return ++watched_[uri] == 1;
+    }
+
+    // `uri` cannot be watched (the server refused it, or the request failed): no feed honours or holds it.
+    void drop_watch(const std::string& uri) {
+        watched_.erase(uri);
+        for (auto& [id, feed] : feeds_) {
+            if (feed->delivery != FeedDelivery::connection) continue;
+            for (auto* uris : {&feed->honoured.resources, &feed->held}) {
+                uris->erase(std::remove(uris->begin(), uris->end(), uri), uris->end());
+            }
+        }
+    }
+
+    // A feed lets go of `uri`: whether no feed holds it any more, so that it is no longer watched.
+    bool release_watch(const std::string& uri) {
+        const auto found = watched_.find(uri);
+        if (found == watched_.end()) return false;
+        if (--found->second > 0) return false;
+        watched_.erase(found);
+        return true;
+    }
+
+    std::vector<std::string> watched_resources() const {
+        std::vector<std::string> uris;
+        for (const auto& [uri, holders] : watched_) uris.push_back(uri);
+        return uris;
+    }
+
+    // The request that watches `uri` (or stops watching it) under the governing revision.
+    std::variant<ClientMessage, ClientError> watch_message(const std::string& uri, bool watch) const {
+        auto written = engine_->watch_request(uri, watch);
+        if (auto* failure = std::get_if<CallFailure>(&written)) {
+            return call_error(*failure, false, engine_->contact());
+        }
+        return std::get<ClientMessage>(std::move(written));
+    }
+
+    void end_feed(Feed& feed, ClientError error) {
+        if (feed.end) return;
+        feed.end = std::move(error);
+        if (feed.reopen_timer) timers_->cancel(*feed.reopen_timer);
+        feed.reopen_timer.reset();
+        feed.wake.cancel();
+    }
+
+    // The application's stop of a listen() still waiting for its acknowledgement; callable from any thread.
+    std::function<void()> feed_stopper(std::uint64_t id) {
+        return [weak = weak_from_this(), runtime = std::weak_ptr<Runtime>(runtime_), id] {
+            post_to(runtime, [weak, id] {
+                const std::shared_ptr<ClientCore> core = weak.lock();
+                if (!core) return;
+                const std::shared_ptr<Feed> one = core->find_feed(id);
+                if (one && !one->acknowledged) {
+                    core->end_feed(*one, error_of(ClientErrorKind::cancelled, "the subscription was cancelled"));
+                }
+            });
+        };
+    }
+
+    // Ends the feed for the application: the subscription is cancelled, or the resources only it held are given back
+    // (returned: the caller stops watching them). Its changes are dropped, and a next() waiting elsewhere ends.
+    std::vector<std::string> close_feed(std::uint64_t id) {
+        const auto found = feeds_.find(id);
+        if (found == feeds_.end()) return {};
+        const std::shared_ptr<Feed> feed = found->second;
+        feeds_.erase(found);
+        feed->closing = true;
+        if (feed->reopen_timer) timers_->cancel(*feed->reopen_timer);
+        feed->reopen_timer.reset();
+        std::vector<std::string> unwatch;
+        if (feed->delivery == FeedDelivery::subscription) {
+            if (feed->call) {
+                feed_calls_.erase(*feed->call);
+                if (!closing_) engine_->cancel(*feed->call, "The client ended the subscription");
+                feed->call.reset();
+            }
+        } else {
+            for (const auto& uri : feed->held) {
+                if (release_watch(uri)) unwatch.push_back(uri);
+            }
+            feed->held.clear();
+            if (connection_listeners_ > 0 && --connection_listeners_ == 0 && !closing_) {
+                engine_->listen_on_connection(false);
+            }
+        }
+        if (!feed->end) feed->end = error_of(ClientErrorKind::closed, "the subscription is closed");
+        feed->pending.clear();
+        feed->wake.cancel();
+        if (!closing_) pump();
+        return unwatch;
+    }
+
+    // Starts the requests that watch every watched resource again (contact opened anew); defined below.
+    void rewatch();
+
     // Closes everything, once; a second closer waits for the first.
     bool begin_close() {
         if (closing_) return false;
@@ -556,6 +737,9 @@ public:
             if (retry.timer) timers_->cancel(*retry.timer);
         }
         state_retries_.clear();
+        // Every subscription ends `closed` (its waiters wake); no reopen is due any more.
+        for (auto& [id, feed] : feeds_) end_feed(*feed, closed_error());
+        feed_calls_.clear();
         dispatcher_->close();
         pool_->stop();
         engine_->close();
@@ -828,7 +1012,14 @@ private:
         } else if (auto* ended = std::get_if<RequestEnded>(&event)) {
             dispatcher_->take(event);
             end_state_retry(ended->request);
-            on_ended(std::move(*ended));
+            // A subscription's request is the subscription's, never a waiter's, and is never sent again as a read.
+            if (feed_calls_.count(ended->request) != 0) {
+                on_feed_call_ended(std::move(*ended));
+            } else {
+                on_ended(std::move(*ended));
+            }
+        } else if (auto* fed = std::get_if<ChangeEvent>(&event)) {
+            on_change_event(*fed);
         } else if (auto* started = std::get_if<InputRoundStarted>(&event)) {
             if (started->asking.requests.empty()) {
                 state_only_round(started->request);
@@ -847,7 +1038,161 @@ private:
         } else if (auto* diagnostic = std::get_if<Diagnostic>(&event)) {
             diagnose(ClientDiagnostic(std::move(*diagnostic)));
         }
-        // A change feed's messages have no listener in this client: they are dropped.
+    }
+
+    // ---- Change feeds: what the engine tells of them
+
+    void on_change_event(const ChangeEvent& event) {
+        if (event.subscription) {
+            const auto found = feed_calls_.find(*event.subscription);
+            if (found == feed_calls_.end()) return;
+            const std::shared_ptr<Feed> one = find_feed(found->second);
+            if (!one || one->closing || one->end) return;
+            switch (event.feed.kind) {
+                case FeedEvent::Kind::acknowledged: on_acknowledged(*one, event.feed.honoured); return;
+                case FeedEvent::Kind::change:
+                    // The server must not send what was not asked; what it sends anyway is not the application's.
+                    if (one->asked.wants(event.feed.change) && one->pending.add(event.feed.change)) one->wake.cancel();
+                    return;
+                case FeedEvent::Kind::ended: return;  // the end of the call follows
+            }
+            return;
+        }
+        if (event.feed.kind != FeedEvent::Kind::change) return;
+        // A change of the connection: every subscription there that honours it hears of it.
+        for (auto& [id, one] : feeds_) {
+            if (one->delivery != FeedDelivery::connection || one->closing || one->end) continue;
+            if (one->honoured.wants(event.feed.change) && one->pending.add(event.feed.change)) one->wake.cancel();
+        }
+    }
+
+    void on_acknowledged(Feed& one, const ChangeFilter& honoured) {
+        ChangeFilter kept = common_filter(one.asked, honoured);
+        // A subscription opened again: what changed while it was lost is not known.
+        if (one.acknowledged) one.pending.add_all(kept);
+        one.honoured = std::move(kept);
+        one.acknowledged = true;
+        one.reopens = 0;
+        one.wake.cancel();
+    }
+
+    // The failures of a subscription's request that lose its stream, after which it is opened again.
+    static bool lost_stream(CallFailureKind kind) noexcept {
+        switch (kind) {
+            case CallFailureKind::stream_lost:
+            case CallFailureKind::send_failed:
+            case CallFailureKind::http_status:
+            case CallFailureKind::bad_content_type:
+            case CallFailureKind::message_too_large:
+            case CallFailureKind::timed_out:  // a reopen the server did not acknowledge in time
+                return true;
+            default: return false;
+        }
+    }
+
+    void on_feed_call_ended(RequestEnded ended) {
+        const auto found = feed_calls_.find(ended.request);
+        const std::uint64_t id = found->second;
+        feed_calls_.erase(found);
+        const std::shared_ptr<Feed> one = find_feed(id);
+        if (!one) return;
+        if (one->call == ended.request) one->call.reset();
+        if (one->closing || one->end) return;
+        if (std::holds_alternative<Answered>(ended.outcome)) {
+            end_feed(*one, error_of(ClientErrorKind::subscription_ended, "the server ended the subscription"));
+            return;
+        }
+        if (auto* refusal = std::get_if<ErrorAnswered>(&ended.outcome)) {
+            ClientError error = error_of(ClientErrorKind::server_error, std::move(refusal->error.message));
+            error.code = refusal->error.code;
+            error.data = std::move(refusal->error.data);
+            end_feed(*one, std::move(error));
+            return;
+        }
+        const CallFailure& failure = std::get<CallFailure>(ended.outcome);
+        ClientError error = call_error(failure, ended.profile != nullptr, engine_->contact());
+        if (!one->acknowledged) {
+            // Before listen() returned nothing is reopened: the application hears of the failure.
+            end_feed(*one, std::move(error));
+            return;
+        }
+        if (failure.kind == CallFailureKind::server_exited) {
+            // The process took the subscription with it: opened again with the next one, outside the count.
+            reopen_now(*one);
+            return;
+        }
+        if (lost_stream(failure.kind)) {
+            schedule_reopen(*one);
+            return;
+        }
+        end_feed(*one, std::move(error));
+    }
+
+    void reopen_now(Feed& one) {
+        if (auto error = send_listen(one)) end_feed(one, std::move(*error));
+    }
+
+    // 64 random bits for the jitter of a wait; empty when the operating system's source failed.
+    static std::optional<std::uint64_t> random_word() {
+        const std::optional<std::string> bytes = random_bytes(sizeof(std::uint64_t));
+        if (!bytes || bytes->size() != sizeof(std::uint64_t)) return std::nullopt;
+        std::uint64_t word = 0;
+        for (const char octet : *bytes) word = (word << 8U) | static_cast<unsigned char>(octet);
+        return word;
+    }
+
+    void schedule_reopen(Feed& one) {
+        if (one.reopens >= options_.max_subscription_reopens) {
+            end_feed(one, error_of(ClientErrorKind::subscription_lost,
+                                   "the subscription's stream was lost, and so was every reopen in a row the client "
+                                   "allows (max_subscription_reopens)"));
+            return;
+        }
+        ++one.reopens;
+        const std::size_t attempt = one.reopens;
+        const std::chrono::milliseconds bound = subscription_reopen_bound(
+            attempt, options_.subscription_reopen_first_delay, options_.subscription_reopen_max_delay);
+        // Without random bits the wait is the bound itself: still a backoff, only not spread.
+        const std::optional<std::uint64_t> drawn = random_word();
+        const std::chrono::milliseconds delay = drawn ? subscription_reopen_delay(bound, *drawn) : bound;
+        const std::uint64_t id = one.id;
+        std::function<void()> fire = [weak = weak_from_this(), runtime = std::weak_ptr<Runtime>(runtime_), id,
+                                      attempt] {
+            post_to(runtime, [weak, id, attempt] {
+                const std::shared_ptr<ClientCore> core = weak.lock();
+                if (core) core->reopen_due(id, attempt);
+            });
+        };
+        one.reopen_timer =
+            timers_->start(delay, TimerPurpose(SubscriptionReopenDelay{id, attempt, bound}), std::move(fire));
+    }
+
+    void reopen_due(std::uint64_t id, std::size_t attempt) {
+        if (closing_) return;
+        const std::shared_ptr<Feed> one = find_feed(id);
+        if (!one || one->end || one->closing || !one->reopen_timer || one->reopens != attempt) return;
+        one->reopen_timer.reset();
+        reopen_now(*one);
+        pump();
+    }
+
+    // Contact opened anew (a new server process, a new session): what the connection's feeds watched is watched
+    // again, and what changed meanwhile is not known.
+    void reestablish_feeds() {
+        bool any = false;
+        for (auto& [id, one] : feeds_) {
+            if (one->delivery != FeedDelivery::connection || one->closing || one->end) continue;
+            one->pending.add_all(one->honoured);
+            one->wake.cancel();
+            any = true;
+        }
+        if (any && !watched_.empty()) rewatch();
+    }
+
+    // Contact failed: every feed ends with its failure.
+    void fail_feeds() {
+        const std::optional<ClientError> failure = contact_result();
+        for (auto& [id, one] : feeds_) end_feed(*one, failure ? *failure : closed_error());
     }
 
     // A callback must not throw into the client's thread: what it throws is dropped.
@@ -882,8 +1227,10 @@ private:
                 notice.handshake_repeated = contact.verdict && contact.verdict->kind == ServerKind::handshake;
                 diagnose(ClientDiagnostic(notice));
             }
+            if (opened_) reestablish_feeds();
             opened_ = true;
         }
+        if (phase == ContactPhase::failed) fail_feeds();
         if (phase == ContactPhase::open || phase == ContactPhase::failed || phase == ContactPhase::closed) {
             contact_signal_.cancel();
         }
@@ -1117,6 +1464,11 @@ private:
     std::map<std::pair<DeadlineOwner, DeadlineKind>, ClockTimer> clocks_;
     std::map<RequestRef, StateRetry> state_retries_;
     std::map<std::string, ToolEntry, std::less<>> tools_;
+    std::map<std::uint64_t, std::shared_ptr<Feed>> feeds_;  // open subscriptions, and ended ones not yet closed
+    std::map<RequestRef, std::uint64_t> feed_calls_;       // subscriptions: the pending request of each
+    std::map<std::string, std::size_t> watched_;            // the connection: each watched resource, and its holders
+    std::size_t connection_listeners_ = 0;                  // feeds on the connection
+    std::uint64_t next_feed_ = 1;
     bool pumping_ = false;
     bool pump_again_ = false;
     bool engine_wrote_close_ = false;
@@ -1236,6 +1588,168 @@ asio::awaitable<bool> run_roots_changed(std::shared_ptr<ClientCore> core) {
     const Admitted admitted(core);
     const bool sent = core->roots_changed_here();
     co_return sent;
+}
+
+// ---- Change feeds, on the client's thread
+
+// Stops watching each resource; what the server answers does not matter any more.
+asio::awaitable<Done> unwatch_all(std::shared_ptr<ClientCore> core, std::vector<std::string> uris) {
+    for (const auto& uri : uris) {
+        auto message = core->watch_message(uri, false);
+        if (auto* request = std::get_if<ClientMessage>(&message)) {
+            const CallOutcome outcome = co_await perform_call(core, std::move(*request), RequestOptions{}, nullptr);
+            static_cast<void>(outcome);
+        }
+    }
+    co_return Done{};
+}
+
+// Watches each resource again after contact opened anew; one the server refuses now is honoured no more.
+asio::awaitable<Done> watch_again(std::shared_ptr<ClientCore> core, std::vector<std::string> uris) {
+    for (const auto& uri : uris) {
+        auto message = core->watch_message(uri, true);
+        auto* request = std::get_if<ClientMessage>(&message);
+        if (request == nullptr) continue;
+        const CallOutcome outcome = co_await perform_call(core, std::move(*request), RequestOptions{}, nullptr);
+        if (outcome.error && outcome.error->kind == ClientErrorKind::server_error) core->drop_watch(uri);
+    }
+    co_return Done{};
+}
+
+// On subscriptions: the request goes out, and the feed waits for its acknowledgement (or its end, or the stop).
+asio::awaitable<std::optional<ClientError>> open_subscription(std::shared_ptr<ClientCore> core,
+                                                              std::shared_ptr<ClientCore::Feed> feed,
+                                                              std::stop_token stop) {
+    if (auto error = core->send_listen(*feed)) co_return error;
+    std::optional<std::stop_callback<std::function<void()>>> on_stop;
+    if (stop.stop_possible()) on_stop.emplace(stop, core->feed_stopper(feed->id));
+    while (!feed->acknowledged && !feed->end) {
+        const asio::cancellation_state state = co_await asio::this_coro::cancellation_state;
+        if (state.cancelled() != asio::cancellation_type::none) {
+            co_return error_of(ClientErrorKind::cancelled, "the subscription was cancelled");
+        }
+        std::error_code woken;
+        co_await feed->wake.async_wait(asio::redirect_error(asio::use_awaitable, woken));
+    }
+    if (feed->acknowledged) co_return std::nullopt;
+    co_return feed->end;
+}
+
+// On the connection: each resource the server reports updates of is watched, by the first feed that names it. One the
+// server refuses is not honoured; any other failure fails the listen.
+asio::awaitable<std::optional<ClientError>> open_watches(std::shared_ptr<ClientCore> core,
+                                                         std::shared_ptr<ClientCore::Feed> feed,
+                                                         RequestOptions options) {
+    const std::vector<std::string> uris = feed->honoured.resources;
+    for (const auto& uri : uris) {
+        if (!core->hold_watch(*feed, uri)) continue;  // watched already for another subscription
+        auto message = core->watch_message(uri, true);
+        auto* request = std::get_if<ClientMessage>(&message);
+        if (request == nullptr) {
+            core->drop_watch(uri);
+            continue;
+        }
+        CallOutcome outcome = co_await perform_call(core, std::move(*request), options, nullptr);
+        if (!outcome.error) continue;
+        core->drop_watch(uri);
+        if (outcome.error->kind == ClientErrorKind::server_error) continue;
+        co_return std::move(outcome.error);
+    }
+    feed->acknowledged = true;
+    co_return std::nullopt;
+}
+
+}  // namespace
+
+// Builds a Subscription for the client's code.
+struct SubscriptionAccess {
+    static Subscription make(std::shared_ptr<ClientCore> core, const ClientCore::Feed& feed) {
+        return Subscription(std::move(core), feed.id, feed.asked, feed.honoured, feed.delivery);
+    }
+};
+
+void ClientCore::rewatch() {
+    if (!admit()) return;
+    asio::co_spawn(io(), run_admitted<Done>(shared_from_this(), watch_again(shared_from_this(), watched_resources())),
+                   asio::detached);
+}
+
+namespace {
+
+asio::awaitable<Result<Subscription>> perform_listen(std::shared_ptr<ClientCore> core, ChangeFilter filter,
+                                                     RequestOptions options) {
+    co_await asio::this_coro::throw_if_cancelled(false);
+    if (options.timeout && options.timeout->count() <= 0) {
+        Result<Subscription> refused(error_of(ClientErrorKind::invalid_options, "the timeout of a call must be positive"));
+        co_return refused;
+    }
+    if (options.stop.stop_requested()) {
+        Result<Subscription> refused(error_of(ClientErrorKind::cancelled, "the subscription was cancelled"));
+        co_return refused;
+    }
+    auto made = core->new_feed(std::move(filter), options.timeout);
+    if (auto* refused = std::get_if<ClientError>(&made)) {
+        Result<Subscription> failed(std::move(*refused));
+        co_return failed;
+    }
+    std::shared_ptr<ClientCore::Feed> feed = std::get<std::shared_ptr<ClientCore::Feed>>(std::move(made));
+    std::optional<ClientError> failure;
+    if (feed->delivery == FeedDelivery::subscription) {
+        failure = co_await open_subscription(core, feed, options.stop);
+    } else {
+        failure = co_await open_watches(core, feed, std::move(options));
+    }
+    if (failure) {
+        // A cancelled awaiter must not cancel the requests that give back what the listen took.
+        co_await asio::this_coro::reset_cancellation_state();
+        Done done = co_await unwatch_all(core, core->close_feed(feed->id));
+        static_cast<void>(done);
+        Result<Subscription> failed(std::move(*failure));
+        co_return failed;
+    }
+    Result<Subscription> opened(SubscriptionAccess::make(core, *feed));
+    co_return opened;
+}
+
+// The next change of a feed; what ended it once none is left. A cancelled awaiter takes no change.
+asio::awaitable<Result<Change>> perform_next(std::shared_ptr<ClientCore> core, std::uint64_t id) {
+    co_await asio::this_coro::throw_if_cancelled(false);
+    while (true) {
+        const std::shared_ptr<ClientCore::Feed> feed = core->find_feed(id);
+        if (!feed) {
+            Result<Change> closed(error_of(ClientErrorKind::closed, "the subscription is closed"));
+            co_return closed;
+        }
+        const asio::cancellation_state state = co_await asio::this_coro::cancellation_state;
+        if (state.cancelled() != asio::cancellation_type::none) {
+            Result<Change> cancelled(error_of(ClientErrorKind::cancelled, "the wait for a change was cancelled"));
+            co_return cancelled;
+        }
+        if (auto change = feed->pending.take()) {
+            Result<Change> taken(std::move(*change));
+            co_return taken;
+        }
+        if (feed->end) {
+            Result<Change> ended(*feed->end);
+            co_return ended;
+        }
+        std::error_code woken;
+        co_await feed->wake.async_wait(asio::redirect_error(asio::use_awaitable, woken));
+    }
+}
+
+asio::awaitable<Done> perform_close_feed(std::shared_ptr<ClientCore> core, std::uint64_t id) {
+    co_await asio::this_coro::throw_if_cancelled(false);
+    Done done = co_await unwatch_all(core, core->close_feed(id));
+    co_return done;
+}
+
+asio::awaitable<void> close_feed_on(std::shared_ptr<ClientCore> core, std::uint64_t id) {
+    co_await asio::this_coro::throw_if_cancelled(false);
+    if (!core || !core->admit()) co_return;
+    const Done done = co_await asio::co_spawn(core->executor(), run_admitted<Done>(core, perform_close_feed(core, id)),
+                                              asio::use_awaitable);
+    static_cast<void>(done);
 }
 
 // ---- Parents: coroutines of the awaiter.
@@ -1773,6 +2287,62 @@ asio::awaitable<Result<CompletionResult>> Client::async_complete(CompletionRef r
     return detail::work_on(core_, detail::perform_complete(core_, std::move(ref), std::move(argument),
                                                            std::move(value), std::move(resolved), std::move(options)));
 }
+
+// ---- Changes
+
+Result<Subscription> Client::listen(ChangeFilter filter, RequestOptions options) {
+    if (core_ && core_->here()) return detail::own_thread_error();
+    return detail::block_on(async_listen(std::move(filter), std::move(options)));
+}
+
+asio::awaitable<Result<Subscription>> Client::async_listen(ChangeFilter filter, RequestOptions options) {
+    return detail::work_on(core_, detail::perform_listen(core_, std::move(filter), std::move(options)));
+}
+
+Subscription::Subscription(std::shared_ptr<detail::ClientCore> core, std::uint64_t id, ChangeFilter asked_filter,
+                           ChangeFilter honoured_filter, FeedDelivery how) noexcept
+    : core_(std::move(core)),
+      id_(id),
+      asked_(std::move(asked_filter)),
+      honoured_(std::move(honoured_filter)),
+      delivery_(how) {}
+
+Subscription::Subscription(Subscription&& other) noexcept = default;
+
+Subscription& Subscription::operator=(Subscription&& other) noexcept {
+    if (this == &other) return *this;
+    Subscription closing(std::move(*this));
+    core_ = std::move(other.core_);
+    id_ = other.id_;
+    asked_ = std::move(other.asked_);
+    honoured_ = std::move(other.honoured_);
+    delivery_ = other.delivery_;
+    return *this;
+}
+
+Subscription::~Subscription() {
+    if (!core_ || !core_->admit()) return;
+    // Started on the client's thread; nobody waits for it.
+    asio::co_spawn(core_->executor(),
+                   detail::run_admitted<detail::Done>(core_, detail::perform_close_feed(core_, id_)), asio::detached);
+}
+
+Result<Change> Subscription::next() {
+    if (core_ && core_->here()) return detail::own_thread_error();
+    return detail::block_on(async_next());
+}
+
+asio::awaitable<Result<Change>> Subscription::async_next() {
+    return detail::work_on(core_, detail::perform_next(core_, id_));
+}
+
+Result<void> Subscription::close() {
+    if (core_ && core_->here()) return detail::own_thread_error();
+    detail::block_on(async_close());
+    return {};
+}
+
+asio::awaitable<void> Subscription::async_close() { return detail::close_feed_on(core_, id_); }
 
 bool Client::roots_changed() {
     if (!core_) return false;

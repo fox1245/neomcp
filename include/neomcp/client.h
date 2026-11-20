@@ -44,6 +44,8 @@
 // - A call is cancelled through RequestOptions::stop, or by cancelling the coroutine that awaits it (asio's
 //   cancellation, as a timeout of asio's awaitable operators does). Either way it is cancelled as its transport
 //   prescribes and ends `cancelled`.
+// - Changes of what the server offers are not callbacks: the application takes them from a Subscription (listen()),
+//   with next() or async_next(), at its own pace; they are merged while it does not.
 // - Callbacks (RequestOptions::on_progress, ClientOptions::on_log and on_diagnostic, a transport's callbacks) run on
 //   the client's thread and must return promptly: while one runs, no answer of the server is read. What a callback
 //   throws is dropped.
@@ -73,6 +75,7 @@
 #include "neomcp/client/methods.h"
 #include "neomcp/client/options.h"
 #include "neomcp/client/result.h"
+#include "neomcp/client/subscription.h"
 #include "neomcp/client/timers.h"
 #include "neomcp/client/transport.h"
 #include "neomcp/describe.h"
@@ -254,6 +257,19 @@ public:
                                                              std::string value,
                                                              std::map<std::string, std::string> resolved = {},
                                                              RequestOptions options = {});
+
+    // ---- Changes
+
+    // Subscribes to the changes `filter` asks for, under whichever way the governing revision tells of them
+    // (neomcp/client/subscription.h), and returns once the server acknowledged the subscription (on subscriptions) or
+    // the resources it names are watched (on the connection). `options.timeout` bounds the wait for that
+    // acknowledgement (and each request that watches a resource); once acknowledged, a subscription has no clock.
+    // `options.stop`, or cancelling the awaiter, before then ends the subscription and gives `cancelled`. Fails at once
+    // with too_many_subscriptions when ClientOptions::max_subscriptions are open; with the server's error when it
+    // refuses the subscription; with subscription_ended when it ends it before acknowledging it; and with the error of
+    // the request when one fails otherwise before the acknowledgement (no reopen happens before it).
+    Result<Subscription> listen(ChangeFilter filter, RequestOptions options = {});
+    asio::awaitable<Result<Subscription>> async_listen(ChangeFilter filter, RequestOptions options = {});
 
     // ---- Roots
 

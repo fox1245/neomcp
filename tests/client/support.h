@@ -246,6 +246,13 @@ public:
         std::lock_guard lock(mutex_);
         return threads_;
     }
+    // How many outputs of `kind` the client wrote.
+    std::size_t count_kind(neomcp::OutgoingKind kind) const {
+        std::lock_guard lock(mutex_);
+        std::size_t found = 0;
+        for (const auto one : kinds_) found += one == kind ? 1 : 0;
+        return found;
+    }
     std::size_t restarts() const {
         std::lock_guard lock(mutex_);
         return restarts_;

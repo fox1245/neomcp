@@ -40,7 +40,8 @@ public:
     std::unique_ptr<Transport> transport();
 
     // stdio: the server process ends, as one that exits on its own: its session closes and the client is told
-    // (ProcessExited with `status`). The client starts a new one at its next request. Callable from any thread;
+    // (ProcessExited with `status`). What the session would write as it closes (the graceful end of its
+    // subscriptions) does not reach the client, as a process that is gone writes nothing. The client starts a new one at its next request. Callable from any thread;
     // ignored while no process runs, and on HTTP.
     void end_process(std::optional<int> status = 0);
 

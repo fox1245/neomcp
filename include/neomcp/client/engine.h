@@ -19,6 +19,9 @@
 // - the corrective retry of a request whose revision the server refuses, once, at the newest revision both serve;
 // - clocks as data: every request has a deadline, which pauses while the client itself is answering the server;
 // - cancellation, progress, pings in both directions, and the server's notifications as events;
+// - change feeds: subscriptions as long-lived calls without a clock once acknowledged, their messages correlated by the
+//   call they name, and the connection's change notifications while the client listens there (listen,
+//   listen_on_connection);
 // - the rounds of a call that asks for input, through one seam (InputSupport, ServerAsked, InputRoundStarted), with
 //   the checks that need the revision: a request of a kind the client did not declare is refused, a form whose schema
 //   is outside the restricted form never reaches a handler, and accepted content that fails the form's schema is
@@ -506,6 +509,13 @@ struct ClientDefaults {
     static constexpr std::chrono::milliseconds state_retry_max_delay{250};
     static constexpr std::size_t max_list_pages = 64;
     static constexpr std::size_t max_list_items = 10'000;
+    // Change feeds (neomcp/client/subscription.h): subscriptions open at once, as many as a server's session keeps
+    // (FeedDefaults::max_subscriptions); reopens of a lost subscription in a row; the wait before the first reopen,
+    // doubled for each further one up to the last bound (a wait drawn at random up to that bound).
+    static constexpr std::size_t max_subscriptions = 16;
+    static constexpr std::size_t max_subscription_reopens = 5;
+    static constexpr std::chrono::milliseconds subscription_reopen_first_delay{1'000};
+    static constexpr std::chrono::milliseconds subscription_reopen_max_delay{60'000};
 };
 
 struct EngineOptions {
@@ -540,11 +550,14 @@ struct EngineOptions {
     std::chrono::milliseconds input_handler_timeout = ClientDefaults::input_handler_timeout;
 
     // Calls of the application pending at once (the engine's own requests do not count); one more fails at once with
-    // too_many_pending. Zero is an error. Default 256.
+    // too_many_pending. Subscriptions (listen) count as calls. Zero is an error. Default 256.
     std::size_t max_pending_requests = ClientDefaults::max_pending_requests;
-    // Events queued for next_event() at once: when this many are queued, progress, log, change and diagnostic events
-    // are dropped (and counted); the end of a call, a server's request, a round, a clock change and a change of
-    // contact never are. Zero is an error. Default 1024.
+    // Events queued for next_event() at once: when this many are queued, progress, log and diagnostic events are
+    // dropped (and counted), and so are change events nobody takes; the end of a call, a server's request, a round, a
+    // clock change, a change of contact and every message of a change feed the client takes (one of a subscription it
+    // opened, or a change of the connection while it listens there, listen_on_connection) never are. The queue is
+    // drained after every call into the engine, so what it holds at once is bounded by what one message brings (an
+    // array, where the revision reads arrays, within max_message_bytes). Zero is an error. Default 1024.
     std::size_t max_queued_events = ClientDefaults::max_queued_events;
     // A longer message is not parsed: on stdio it is dropped, on HTTP the call its unit carries fails and the unit
     // ends. Zero is an error. Default 16 MiB.
@@ -561,8 +574,11 @@ struct EngineOptions {
     // Requests of a server that wait for the client's answer at once (ServerAsked); one more is answered at once with
     // an internal error, without reaching a handler. A ping does not count. Zero is an error. Default 16.
     std::size_t max_concurrent_server_requests = ClientDefaults::max_concurrent_server_requests;
-    // stdio: how many times in a row the process may end, no application call answered between, before contact fails;
-    // zero: it is never started again after it ended. The one start that follows a process that ended while the probe
+    // stdio: how many times in a row the server process may end without an answer between before contact fails;
+    // zero: it is never started again after it ended. What counts as an answer is a sign that the server serves: the
+    // answer to a call of the application, a subscription's acknowledgement, a change notification the client takes;
+    // the answers that open contact do not count, so that a server that ends after each handshake is not started
+    // forever. The one start that follows a process that ended while the probe
     // was out (to make the handshake with a fresh process) belongs to finding out which kind of server it is and does
     // not count. Default 3.
     std::size_t max_restarts = ClientDefaults::max_restarts;
@@ -624,6 +640,43 @@ public:
     // Sends a notification of the client (such as one that tells the server the client's roots changed) under the
     // governing profile. An error when contact is not open or the revision has no such client notification.
     std::optional<CallFailure> notify(ClientMessage message);
+
+    // ---- Change feeds (the client halves of `change_feed`)
+
+    // How the governing revision tells the client of changes; empty before contact opened and after it failed.
+    std::optional<FeedDelivery> feed_delivery() const;
+    // What the client may expect of `asked` from the server: the feed half's offer (ClientFeedMechanism::offered) for
+    // the capabilities the server declared when contact opened; `asked` itself before contact opened.
+    ChangeFilter offered(const ChangeFilter& asked) const;
+
+    // Opens a subscription, under a revision whose feed delivers on subscriptions: a long-lived call whose request the
+    // feed half writes for `filter` under the profile the call goes out under (again under another, when the server
+    // refuses the revision once). Its wait clock (`timeout`; empty: request_timeout) runs only until the server's
+    // acknowledgement arrives (a ChangeEvent of kind acknowledged that names the call); from then on no clock runs,
+    // and the call ends only:
+    // - with the result that ends the subscription, read by the feed half: Answered; a result that is not one is
+    //   malformed_answer;
+    // - with an error answer (the server refuses the subscription): ErrorAnswered;
+    // - when the server ends it with a notice: a ChangeEvent of kind ended, then Answered with a null result;
+    // - with the loss of its stream or of the server process (stream_lost, server_exited and the other failures of a
+    //   call's exchange), when contact fails, and when the engine closes;
+    // - when the client cancels it (cancel(): as its transport cancels a request).
+    // A result the server still sends after the notice or the cancellation is dropped without a diagnostic. Fails as
+    // send() does, with contact_failed before contact opened, and with unsupported_method under a revision whose feed
+    // delivers on the connection.
+    std::variant<RequestRef, CallFailure> listen(ChangeFilter filter,
+                                                 std::optional<std::chrono::milliseconds> timeout = std::nullopt);
+    // The request that watches one resource (`watch` true) or stops watching it, under a revision whose feed delivers
+    // on the connection, as the feed half writes it for the governing profile; the client sends it with send(). An
+    // error under a revision that has no such request, and before contact opened.
+    std::variant<ClientMessage, CallFailure> watch_request(std::string uri, bool watch) const;
+    // Whether the client takes the change notifications of the connection (it holds a subscription under a revision
+    // whose feed delivers there). While it does: those notifications are never dropped from the queue; on HTTP, where
+    // the governing profile's entry offers a stream outside requests, the engine asks the transport to open it
+    // (open_connection_stream) once contact is open, and again each time contact opens anew; on stdio a server process
+    // that ended is started again at once, as for a held call, so that the notifications flow again (bounded by
+    // max_restarts).
+    void listen_on_connection(bool listening);
 
     // One message read on a unit: a line on stdio, a JSON body or one event's data on HTTP.
     Reception received(UnitId unit, std::string_view message);

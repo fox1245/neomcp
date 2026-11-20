@@ -39,6 +39,9 @@ std::string_view to_string(ClientErrorKind kind) noexcept {
         case ClientErrorKind::list_pages_exceeded: return "list_pages_exceeded";
         case ClientErrorKind::list_items_exceeded: return "list_items_exceeded";
         case ClientErrorKind::cursor_not_echoable: return "cursor_not_echoable";
+        case ClientErrorKind::subscription_lost: return "subscription_lost";
+        case ClientErrorKind::subscription_ended: return "subscription_ended";
+        case ClientErrorKind::too_many_subscriptions: return "too_many_subscriptions";
         case ClientErrorKind::unserved_revision: return "unserved_revision";
         case ClientErrorKind::handshake_refused: return "handshake_refused";
         case ClientErrorKind::handshake_timed_out: return "handshake_timed_out";

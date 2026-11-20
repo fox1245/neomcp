@@ -143,6 +143,21 @@ struct ClientOptions {
     std::chrono::milliseconds state_retry_first_delay = ClientDefaults::state_retry_first_delay;
     std::chrono::milliseconds state_retry_max_delay = ClientDefaults::state_retry_max_delay;
 
+    // ---- Change feeds (Client::listen, neomcp/client/subscription.h)
+
+    // Subscriptions open at once; one more fails at once with too_many_subscriptions. Zero is an error. Default 16.
+    std::size_t max_subscriptions = ClientDefaults::max_subscriptions;
+    // A subscription whose stream was lost without the server's final result is reopened, at most this many times in
+    // a row (an acknowledgement of the server starts the count again); one more loss ends it with
+    // subscription_lost. Zero: never reopened. A subscription that ended with the server process (stdio) is reopened
+    // at once and does not count: max_restarts bounds the restarts. Default 5.
+    std::size_t max_subscription_reopens = ClientDefaults::max_subscription_reopens;
+    // The wait before reopen n is drawn at random between zero and min(subscription_reopen_max_delay,
+    // subscription_reopen_first_delay * 2^(n-1)) (full jitter). Zero is an error for either, and the first must not
+    // exceed the second. Defaults 1 s, 60 s.
+    std::chrono::milliseconds subscription_reopen_first_delay = ClientDefaults::subscription_reopen_first_delay;
+    std::chrono::milliseconds subscription_reopen_max_delay = ClientDefaults::subscription_reopen_max_delay;
+
     // ---- Lost answers
 
     // The methods whose request is sent again once, with a new id and a clock of its own, when its answer was lost

@@ -73,6 +73,11 @@ enum class ClientErrorKind {
     list_items_exceeded,     // a list_all_ call: the server sent more than max_list_items items
     cursor_not_echoable,     // a cursor the server gave cannot be sent back exactly as it was received
 
+    // ---- A subscription to changes (neomcp/client/subscription.h)
+    subscription_lost,       // its stream was lost, and so were max_subscription_reopens reopens in a row
+    subscription_ended,      // the server ended it (with its final result, or a notice)
+    too_many_subscriptions,  // max_subscriptions subscriptions are open already
+
     // ---- Contact could not be made (ContactFailureKind)
     unserved_revision,       // the handshake's answer names a revision none of the client's is
     handshake_refused,       // the handshake was answered with an error, after its one retry where that applies

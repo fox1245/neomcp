@@ -2,7 +2,7 @@
 //
 // The engine keeps its deadlines as data (DeadlineChange); the client sets a timer for each running one and calls the
 // engine back when it lapses. The client also waits between the retries of a call whose result asks for nothing but
-// its state. Both go through a TimerService: by default one on the client's own thread over a steady clock; a test
+// its state, and before it reopens a lost subscription. All go through a TimerService: by default one on the client's own thread over a steady clock; a test
 // gives its own, sees every timer the client sets with what it is for, and fires them when it chooses, so that no test
 // waits for real time.
 #pragma once
@@ -26,8 +26,18 @@ struct StateRetryDelay {
     friend bool operator==(const StateRetryDelay&, const StateRetryDelay&) = default;
 };
 
-// What a timer is for: one running stretch of an engine clock, or a wait before a retry.
-using TimerPurpose = std::variant<Deadline, StateRetryDelay>;
+// The client waits before it reopens a subscription whose stream was lost (neomcp/client/subscription.h): `attempt`
+// counts the reopens in a row, from 1; `bound` is the longest the wait may be for that attempt (the wait itself is
+// drawn at random between zero and it).
+struct SubscriptionReopenDelay {
+    std::uint64_t subscription = 0;
+    std::size_t attempt = 1;
+    std::chrono::milliseconds bound{0};
+    friend bool operator==(const SubscriptionReopenDelay&, const SubscriptionReopenDelay&) = default;
+};
+
+// What a timer is for: one running stretch of an engine clock, or a wait before a retry or a reopen.
+using TimerPurpose = std::variant<Deadline, StateRetryDelay, SubscriptionReopenDelay>;
 
 // One timer. Never used twice by a service.
 struct TimerId {

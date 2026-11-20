@@ -192,6 +192,10 @@ struct Call {
     std::optional<InputAsking> asking;
     std::map<std::string, json_schema::Validator> forms;  // the round's forms by key, their schemas compiled
     std::size_t pausers = 0;            // server requests whose answers its clocks wait for
+    // A subscription (listen): its request is written by the feed half from `filter` each time it goes out, and its
+    // wait clock runs only until the acknowledgement.
+    bool subscription = false;
+    ChangeFilter filter;
     Clock wait;
     Clock total;
     Clock input;
@@ -255,7 +259,59 @@ public:
         start_contact();
     }
 
-    std::variant<RequestRef, CallFailure> send(OutgoingCall call) {
+    std::variant<RequestRef, CallFailure> send(OutgoingCall call) { return send_call(std::move(call), nullptr); }
+
+    // ---- change feeds
+
+    std::optional<FeedDelivery> feed_delivery() const {
+        if (governing_ == nullptr || contact_.phase == ContactPhase::failed || closed_) return std::nullopt;
+        return governing_->halves.change_feed->delivery();
+    }
+
+    ChangeFilter offered(const ChangeFilter& asked) const {
+        if (governing_ == nullptr) return asked;
+        return governing_->halves.change_feed->offered(asked, contact_.server.capabilities);
+    }
+
+    std::variant<RequestRef, CallFailure> listen(ChangeFilter filter, std::optional<std::chrono::milliseconds> timeout) {
+        if (closed_) return CallFailure{CallFailureKind::closed, "the engine is closed"};
+        const auto delivery = feed_delivery();
+        if (!delivery) return CallFailure{CallFailureKind::contact_failed, "contact with the server is not open"};
+        if (*delivery != FeedDelivery::subscription) {
+            return CallFailure{CallFailureKind::unsupported_method,
+                               "the revision tells of changes on the connection, not on subscriptions"};
+        }
+        OutgoingCall call;
+        call.timeout = timeout;
+        return send_call(std::move(call), &filter);
+    }
+
+    std::variant<ClientMessage, CallFailure> watch_request(std::string uri, bool watch) const {
+        if (governing_ == nullptr || closed_) {
+            return CallFailure{CallFailureKind::contact_failed, "contact with the server is not open"};
+        }
+        FeedRequest asked;
+        asked.action = watch ? FeedRequest::Action::watch : FeedRequest::Action::unwatch;
+        asked.uri = std::move(uri);
+        auto written = governing_->halves.change_feed->write(asked, *governing_->halves.profile);
+        if (auto* problem = std::get_if<std::string>(&written)) {
+            return CallFailure{CallFailureKind::unsupported_method, std::move(*problem)};
+        }
+        return std::get<ClientMessage>(std::move(written));
+    }
+
+    void listen_on_connection(bool listening) {
+        if (closed_ || connection_listening_ == listening) return;
+        connection_listening_ = listening;
+        if (!listening) return;
+        open_connection_stream();
+        // A server process that ended while nobody listened is started again now.
+        if (contact_.phase == ContactPhase::lost) request_restart();
+    }
+
+private:
+    // A call of the application, or a subscription when `filter` is given.
+    std::variant<RequestRef, CallFailure> send_call(OutgoingCall call, const ChangeFilter* filter) {
         if (closed_) return CallFailure{CallFailureKind::closed, "the engine is closed"};
         if (contact_.phase == ContactPhase::failed) {
             return CallFailure{CallFailureKind::contact_failed, "contact with the server could not be made"};
@@ -278,8 +334,13 @@ public:
         }
         Call& made = new_call(Purpose::call, std::move(call.message), call.timeout.value_or(options_.request_timeout));
         made.input_schema = std::move(call.input_schema);
-        made.reset_on_progress = call.reset_timeout_on_progress;
-        made.progress = call.progress;
+        if (filter != nullptr) {
+            made.subscription = true;
+            made.filter = *filter;
+        } else {
+            made.reset_on_progress = call.reset_timeout_on_progress;
+            made.progress = call.progress;
+        }
         const RequestRef ref = made.ref;
         ++application_calls_;
         if (now != nullptr) {
@@ -299,6 +360,7 @@ public:
         return ref;
     }
 
+public:
     std::optional<CallFailure> notify(ClientMessage message) {
         if (closed_) return CallFailure{CallFailureKind::closed, "the engine is closed"};
         if (contact_.phase != ContactPhase::open || governing_ == nullptr) {
@@ -396,6 +458,8 @@ public:
         const auto found = calls_.find(ref);
         if (found == calls_.end() || found->second.purpose != Purpose::call) return;
         Call& call = found->second;
+        // What the server still sends to end a subscription it was told to end is expected, not a defect.
+        if (call.wire && call.subscription) remember_ended(*call.wire);
         if (call.wire) cancel_on_wire(call, reason);
         end_call(ref, CallFailure{CallFailureKind::cancelled, "the call was cancelled"});
     }
@@ -727,6 +791,17 @@ private:
     // headers. Nothing is written or changed when it fails.
     std::optional<CallFailure> build_and_send(Call& call, const Speaker& speaker) {
         const profile::Profile& profile = *speaker.halves.profile;
+        if (call.subscription) {
+            // The feed half writes the request for the profile it goes out under.
+            FeedRequest asked;
+            asked.action = FeedRequest::Action::listen;
+            asked.filter = call.filter;
+            auto written = speaker.halves.change_feed->write(asked, profile);
+            if (auto* problem = std::get_if<std::string>(&written)) {
+                return CallFailure{CallFailureKind::unsupported_method, std::move(*problem)};
+            }
+            call.message = std::get<ClientMessage>(std::move(written));
+        }
         const profile::Message* entry = profile.request(call.message.method);
         if (entry == nullptr || !entry->from_client) {
             return CallFailure{CallFailureKind::unsupported_method,
@@ -926,6 +1001,7 @@ private:
             end_call(ref, CallFailure{CallFailureKind::input_timed_out, "a round of input was not answered in time"});
             return;
         }
+        if (call.wire && call.subscription) remember_ended(*call.wire);
         if (call.wire) cancel_on_wire(call, timed_out_reason);
         end_call(ref, CallFailure{CallFailureKind::timed_out, "the call was not answered in time"});
     }
@@ -1101,6 +1177,7 @@ private:
             return;
         }
         handshake_answered_ = false;
+        connection_stream_asked_ = false;  // a new handshake opens a new connection
         opening_ = &speaker;
         if (contact_.phase != ContactPhase::handshaking) set_phase(ContactPhase::handshaking);
         if (!internal(Purpose::handshake, std::move(*message), options_.request_timeout, speaker, refused)) {
@@ -1126,7 +1203,32 @@ private:
         contact_.profile = speaker.halves.profile;
         contact_.verdict = ContactVerdict{ServerKind::per_request, transport_, speaker.halves.profile->revision()};
         set_phase(ContactPhase::open);
+        open_connection_stream();
         release_held();
+    }
+
+    // Asks the transport for the stream of the connection, once per connection, while the client listens there and
+    // the governing profile's entry for the transport offers one. Its headers are the ones a request outside any
+    // message carries: the revision, where the entry names it in a header (no method, no mirrored member).
+    void open_connection_stream() {
+        if (!connection_listening_ || connection_stream_asked_ || closed_) return;
+        if (transport_ != profile::Transport::streamable_http || contact_.phase != ContactPhase::open ||
+            governing_ == nullptr) {
+            return;
+        }
+        const profile::Profile& profile = *governing_->halves.profile;
+        const auto& http = profile.streamable_http();
+        if (!http || !http->get_stream) return;
+        connection_stream_asked_ = true;
+        std::vector<HttpHeader> headers;
+        for (const auto& header : http->request_headers) {
+            if (header.scope == profile::HeaderScopeKind::every_message &&
+                header.value == profile::HeaderValue::protocol_version) {
+                headers.push_back({header.name, profile.revision()});
+            }
+        }
+        if (http->version_header && handshake_answered_) headers.push_back({http->version_header->name, profile.revision()});
+        emit(Outgoing{std::string(), connection_unit, std::move(headers), OutgoingKind::open_connection_stream});
     }
 
     void fail_contact(ContactFailureKind kind, std::string message, std::vector<std::string> revisions = {}) {
@@ -1234,6 +1336,8 @@ private:
                     }
                 }
                 set_phase(ContactPhase::open);
+                // After the notification that the client is ready: the server speaks on the connection from then on.
+                open_connection_stream();
                 release_held();
                 return;
             }
@@ -1293,6 +1397,8 @@ private:
         }
         const auto found = wires_.find(*number);
         if (found == wires_.end()) {
+            // The result that ends a subscription the server ended with a notice, or the client cancelled.
+            if (ended_set_.erase(*number) > 0) return;
             if (answered_set_.count(*number) > 0) {
                 diagnose(DiagnosticKind::repeated_answer, "a second answer to a request was dropped", unit);
             } else {
@@ -1320,7 +1426,7 @@ private:
                 if (message.failed) diagnose(DiagnosticKind::level_refused, "the server refused the log level");
                 finish(ref);
                 return;
-            case Purpose::call: on_call_answer(ref, message); return;
+            case Purpose::call: on_call_answer(ref, message, *number); return;
         }
     }
 
@@ -1333,10 +1439,31 @@ private:
         }
     }
 
-    void on_call_answer(RequestRef ref, const Message& message) {
+    // The id of a subscription that ended without its result: what the server still sends for it is dropped
+    // silently. As many are kept as calls may be pending.
+    void remember_ended(std::uint64_t id) {
+        ended_.push_back(id);
+        ended_set_.insert(id);
+        while (ended_.size() > options_.max_pending_requests) {
+            ended_set_.erase(ended_.front());
+            ended_.pop_front();
+        }
+    }
+
+    void on_call_answer(RequestRef ref, const Message& message, std::uint64_t wire) {
         Call& call = calls_.at(ref);
         const Speaker& speaker = *call.speaker;
         const profile::Profile& profile = *speaker.halves.profile;
+        if (call.subscription && !message.failed) {
+            // The result that ends a subscription, as the feed half reads it.
+            if (auto problem = speaker.halves.change_feed->read_end(message.outcome, RequestId(wire), profile)) {
+                end_call(ref, CallFailure{CallFailureKind::malformed_answer,
+                                          "the result that ends the subscription cannot be read: " + *problem});
+                return;
+            }
+            end_call(ref, Answered{message.outcome});
+            return;
+        }
         if (message.failed) {
             if (speaker.per_request) {
                 if (auto refusal = speaker.halves.open->read_version_refusal(message.outcome, profile)) {
@@ -1560,22 +1687,56 @@ private:
             FeedEvent& event = std::get<FeedEvent>(*feed);
             std::optional<RequestRef> subscription;
             if (event.subscription) {
-                if (const auto number = wire_number(event.subscription)) {
+                const auto number = wire_number(event.subscription);
+                if (number) {
                     const auto opened = wires_.find(*number);
-                    if (opened != wires_.end()) subscription = opened->second.ref;
+                    if (opened != wires_.end() && calls_.at(opened->second.ref).subscription) {
+                        subscription = opened->second.ref;
+                    }
                 }
                 if (!subscription) {
                     // An ending notice may cancel a request of the server's instead.
                     if (event.kind == FeedEvent::Kind::ended && cancel_ask(message, speaker)) return;
+                    // A message the server sent before it heard that the subscription ended.
+                    if (number && ended_set_.count(*number) > 0) return;
                     diagnose(DiagnosticKind::unknown_id, "a notification names no subscription this client opened",
                              unit);
                     return;
                 }
+                on_subscription_message(*subscription, std::move(event));
+                return;
             }
-            push(ChangeEvent{std::move(event), subscription}, true);
+            // A change of the connection: kept while the client listens there, else droppable as before.
+            if (connection_listening_) exits_in_row_ = 0;
+            push(ChangeEvent{std::move(event), std::nullopt}, !connection_listening_);
             return;
         }
         cancel_ask(message, speaker);
+    }
+
+    // A message of a subscription the client opened. Each is kept in the queue: the acknowledgement stops the call's
+    // clock (from then on it has none), a change goes to the client, and an ending notice ends the call gracefully.
+    void on_subscription_message(RequestRef ref, FeedEvent event) {
+        Call& call = calls_.at(ref);
+        exits_in_row_ = 0;
+        const FeedEvent::Kind kind = event.kind;
+        push(ChangeEvent{std::move(event), ref}, false);
+        switch (kind) {
+            case FeedEvent::Kind::acknowledged:
+                clock_stop(ref, DeadlineKind::wait, call.wait);
+                clock_stop(ref, DeadlineKind::total, call.total);
+                return;
+            case FeedEvent::Kind::change: return;
+            case FeedEvent::Kind::ended: {
+                const std::uint64_t id = *call.wire;
+                wires_.erase(id);
+                call.wire.reset();
+                remember_ended(id);
+                end_exchange(call.sent_unit);
+                end_call(ref, Answered{nullptr});
+                return;
+            }
+        }
     }
 
     // A cancellation of a request of the server's: its handler stops and nothing is answered. Returns whether the
@@ -1728,10 +1889,11 @@ private:
                          "the server process ended more often in a row than the client starts it again");
             return;
         }
-        // Contact that was being opened is still wanted, with or without a call that waits for it.
+        // Contact that was being opened is still wanted, with or without a call that waits for it; a held call needs the
+        // server, and so does a client that listens to the connection's notifications.
         if (phase == ContactPhase::probing || phase == ContactPhase::handshaking) reopening_ = true;
         if (phase != ContactPhase::lost) set_phase(ContactPhase::lost);
-        if (reopening_ || !held_.empty()) request_restart();
+        if (reopening_ || !held_.empty() || connection_listening_) request_restart();
     }
 
     EngineOptions options_;
@@ -1753,6 +1915,8 @@ private:
     bool probe_restart_used_ = false;  // the one start after an end while the probe was out that does not count
     bool reopening_ = false;           // the process ended while contact was being opened: a new one is wanted
     std::size_t exits_in_row_ = 0;
+    bool connection_listening_ = false;    // the client takes the connection's change notifications
+    bool connection_stream_asked_ = false; // open_connection_stream was written for this connection
 
     std::uint64_t next_id_ = 1;
     std::uint64_t next_ref_ = 1;
@@ -1767,6 +1931,8 @@ private:
     std::map<UnitId, Exchange> exchanges_;
     std::deque<std::uint64_t> answered_;
     std::set<std::uint64_t> answered_set_;
+    std::deque<std::uint64_t> ended_;     // subscriptions that ended without their result (remember_ended)
+    std::set<std::uint64_t> ended_set_;
     std::size_t application_calls_ = 0;
     std::size_t peer_compiles_ = 0;     // schemas of the server compiled or refused (compile_peer_schema)
     bool budget_reported_ = false;
@@ -1868,6 +2034,20 @@ std::variant<RequestRef, CallFailure> ClientEngine::send(OutgoingCall call) {
 std::optional<CallFailure> ClientEngine::notify(ClientMessage message) {
     core_->guard();
     return core_->notify(std::move(message));
+}
+std::optional<FeedDelivery> ClientEngine::feed_delivery() const { return core_->feed_delivery(); }
+ChangeFilter ClientEngine::offered(const ChangeFilter& asked) const { return core_->offered(asked); }
+std::variant<RequestRef, CallFailure> ClientEngine::listen(ChangeFilter filter,
+                                                           std::optional<std::chrono::milliseconds> timeout) {
+    core_->guard();
+    return core_->listen(std::move(filter), timeout);
+}
+std::variant<ClientMessage, CallFailure> ClientEngine::watch_request(std::string uri, bool watch) const {
+    return core_->watch_request(std::move(uri), watch);
+}
+void ClientEngine::listen_on_connection(bool listening) {
+    core_->guard();
+    core_->listen_on_connection(listening);
 }
 Reception ClientEngine::received(UnitId unit, std::string_view message) {
     core_->guard();
