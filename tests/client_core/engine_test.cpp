@@ -259,6 +259,47 @@ TEST(ClientEngineProbe, OnlyRevisionsNamedPerRequestStillProbeFirst) {
     EXPECT_EQ(rig.engine->contact().phase, ContactPhase::failed);
 }
 
+TEST(ClientEngineProbe, OverHttpTheStatusOfAnAnswerWithoutAMessageDecides) {
+    const auto probe_ended = [](int status) {
+        auto rig = std::make_unique<Rig>(every_revision(), Transport::streamable_http);
+        rig->engine->open();
+        const auto unit = rig->last_unit("server/discover");
+        rig->engine->stream_event(unit, neomcp::ResponseHead{status, std::nullopt, {}});
+        rig->engine->stream_event(unit, neomcp::StreamEnded{});
+        return rig;
+    };
+    for (const int status : {400, 404, 405}) {
+        const auto rig = probe_ended(status);
+        EXPECT_EQ(rig->engine->contact().phase, ContactPhase::handshaking) << status;
+        EXPECT_EQ(count_requests(*rig, "initialize"), 1u) << status;
+    }
+    for (const int status : {401, 403}) {
+        const auto rig = probe_ended(status);
+        EXPECT_EQ(rig->engine->contact().failure->kind, neomcp::ContactFailureKind::authorization_required) << status;
+        EXPECT_EQ(count_requests(*rig, "initialize"), 0u) << status;
+    }
+    for (const int status : {500, 410}) {
+        const auto rig = probe_ended(status);
+        EXPECT_EQ(rig->engine->contact().failure->kind, neomcp::ContactFailureKind::http_status) << status;
+        EXPECT_EQ(count_requests(*rig, "initialize"), 0u) << status;
+    }
+}
+
+TEST(ClientEngineProbe, AHandshakeVerdictMetByAnErrorOfAPerRequestServerIsProbedOnce) {
+    Rig rig(with_prior(every_revision(), Transport::stdio, handshake_revision, neomcp::ServerKind::handshake));
+    rig.engine->open();
+    ASSERT_EQ(rig.requests().size(), 1u);
+    EXPECT_EQ(rig.requests()[0]["method"], "initialize");
+    rig.refuse("initialize", -32021, "Missing required client capability");
+    EXPECT_EQ(rig.engine->contact().phase, ContactPhase::probing);
+    EXPECT_EQ(count_requests(rig, "server/discover"), 1u);
+    rig.answer("server/discover", json::object());  // no discovery result: the handshake once more
+    ASSERT_EQ(count_requests(rig, "initialize"), 2u);
+    rig.refuse("initialize", -32021, "Missing required client capability");
+    EXPECT_EQ(rig.engine->contact().failure->kind, neomcp::ContactFailureKind::handshake_refused);
+    EXPECT_EQ(count_requests(rig, "server/discover"), 1u);
+}
+
 // ---- the corrective retry of a call
 
 TEST(ClientEngineRetry, ARefusedRevisionIsSentOnceMoreWithANewIdEvenAtTheSameRevision) {
@@ -887,6 +928,58 @@ TEST(ClientEngineBounds, AFullQueueDropsOnlyWhatMayBeDroppedAndKeepsTheOrder) {
     rig.engine->received(neomcp::connection_unit, unknown);
     EXPECT_EQ(rig.engine->dropped_events(), 3u);
     EXPECT_EQ(rig.diagnostics(DiagnosticKind::unknown_id).size(), 3u);
+}
+
+TEST(ClientEngineBounds, AFullQueueKeepsTheRequestsOfTheServerAndItsEnds) {
+    auto options = only({handshake_revision});
+    options.input.roots = true;
+    options.max_queued_events = 2;
+    Rig rig(options);
+    open_handshake(rig, handshake_revision);  // more than two events wait: the queue is full
+    const auto unknown = neomcp::serialize(neomcp::make_result(neomcp::RequestId(999), json::object()));
+    rig.engine->received(neomcp::connection_unit, unknown);
+    rig.engine->received(neomcp::connection_unit, R"({"jsonrpc":"2.0","id":"r","method":"roots/list"})");
+    rig.engine->received(neomcp::connection_unit, R"({"jsonrpc":"2.0","method":"notifications/message",
+        "params":{"level":"info","data":"x"}})");
+    rig.engine->received(neomcp::connection_unit,
+                         R"({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"r"}})");
+    EXPECT_EQ(rig.engine->dropped_events(), 2u);
+    std::vector<std::size_t> asked;
+    std::vector<std::size_t> ended;
+    const auto& events = rig.drain();
+    for (std::size_t i = 0; i < events.size(); ++i) {
+        if (std::holds_alternative<neomcp::ServerAsked>(events[i])) asked.push_back(i);
+        if (std::holds_alternative<neomcp::ServerAskEnded>(events[i])) ended.push_back(i);
+        EXPECT_FALSE(std::holds_alternative<neomcp::Diagnostic>(events[i])) << i;
+        EXPECT_FALSE(std::holds_alternative<neomcp::LogEvent>(events[i])) << i;
+    }
+    ASSERT_EQ(asked.size(), 1u);
+    ASSERT_EQ(ended.size(), 1u);
+    EXPECT_LT(asked[0], ended[0]);
+}
+
+TEST(ClientEngineBounds, AFullQueueKeepsTheRoundsOfACall) {
+    auto options = with_prior(only({newest}), Transport::stdio, newest);
+    options.input.form = true;
+    options.max_queued_events = 1;
+    Rig rig(options);
+    rig.engine->open();  // one contact change: the queue is full
+    neomcp::OutgoingCall call;
+    call.message.method = "tools/call";
+    call.message.params = json{{"name", "delete"}, {"arguments", json::object()}};
+    call.progress = true;
+    const auto ref = rig.send(call);
+    rig.engine->received(neomcp::connection_unit,
+                         neomcp::serialize(neomcp::make_notification(
+                             "notifications/progress", json{{"progressToken", ref.value}, {"progress", 1}})));
+    rig.answer("tools/call", json::parse(R"({"resultType":"input_required","requestState":"s",
+        "inputRequests":{"confirm":{"method":"elicitation/create","params":{"mode":"form","message":"Sure?",
+        "requestedSchema":{"type":"object","properties":{"ok":{"type":"boolean"}}}}}}})"));
+    EXPECT_EQ(rig.engine->dropped_events(), 1u);
+    const auto rounds = rig.all<neomcp::InputRoundStarted>();
+    ASSERT_EQ(rounds.size(), 1u);
+    EXPECT_EQ(rounds[0].request, ref);
+    EXPECT_TRUE(rig.all<neomcp::ProgressEvent>().empty());
 }
 
 std::string padded(std::string text, std::size_t size) {

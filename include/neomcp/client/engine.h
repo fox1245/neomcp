@@ -478,8 +478,9 @@ struct EngineOptions {
     // The requests of a server the client has handlers for.
     InputSupport input;
 
-    // A verdict an earlier engine reached for the same server: contact starts at it without a probe. When the server
-    // answers as the other kind does, the engine probes once.
+    // A verdict an earlier engine reached for the same server: contact starts at it without a probe. Under a verdict
+    // that the server handshakes, a handshake answered with an error only a server that names revisions per request
+    // sends makes the engine probe once.
     std::optional<ContactVerdict> prior;
 
     // Where the client halves come from; null: builtin_client_mechanisms(). Must outlive the engine's creation.
