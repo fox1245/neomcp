@@ -59,7 +59,7 @@ jobs:
       - name: Show the compilers and flags the build uses
         run: grep -E '^CMAKE_(C|CXX)_(COMPILER|FLAGS):' build/CMakeCache.txt
       - name: Build
-        run: cmake --build build --parallel
+        run: cmake --build build --parallel 4
       - name: Test
         run: ctest --test-dir build --output-on-failure --timeout 300
 
@@ -106,7 +106,9 @@ jobs:
         shell: bash
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON ${NEOMCP_CMAKE_EXTRA:-}
       - name: Build
-        run: cmake --build build --config Release --parallel
+        # A fixed number of jobs: the option alone lets make start every compile at once, more than the memory
+        # of a runner holds (the smallest, macOS arm64, has three cores).
+        run: cmake --build build --config Release --parallel 3
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure --timeout 300
 
@@ -132,7 +134,7 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON
           -DNEOMCP_INTEROP_TESTS=ON "-DNEOMCP_INTEROP_PYTHON=$RUNNER_TEMP/interop-venv/bin/python"
       - name: Build
-        run: cmake --build build --parallel
+        run: cmake --build build --parallel 4
       - name: Test
         run: ctest --test-dir build --output-on-failure --timeout 300
 
@@ -152,7 +154,7 @@ jobs:
       - name: Configure (Release; the server only, without the client's HTTP transport)
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON -DNEOMCP_HTTP_CLIENT=OFF
       - name: Build the fixture server
-        run: cmake --build build --parallel --target neomcp_conformance_fixture
+        run: cmake --build build --parallel 4 --target neomcp_conformance_fixture
       - name: Start the fixture server on a free port of 127.0.0.1
         id: fixture
         run: |
@@ -218,7 +220,7 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON
       - name: Build the client fixture
         run: |
-          cmake --build build --parallel --target neomcp_conformance_client
+          cmake --build build --parallel 4 --target neomcp_conformance_client
           echo "FIXTURE=$GITHUB_WORKSPACE/build/tests/client_http/neomcp_conformance_client" >> "$GITHUB_ENV"
       # Gate (a): each revision's requirement set, with the scenarios that cannot pass yet as expected failures.
       - name: Conformance, revision 2025-11-25
@@ -276,7 +278,7 @@ jobs:
       - name: Configure (Release; without the client's HTTP transport, which the checker does not use)
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON -DNEOMCP_HTTP_CLIENT=OFF
       - name: Build the checker
-        run: cmake --build build --parallel --target neomcp_pattern_oracle
+        run: cmake --build build --parallel 4 --target neomcp_pattern_oracle
       - name: Show the reference engine and its Unicode version
         run: |
           node --version
@@ -314,7 +316,7 @@ jobs:
       - name: Show the compilers and flags the build uses
         run: grep -E '^CMAKE_(C|CXX)_(COMPILER|FLAGS):' consumer-build/CMakeCache.txt
       - name: Build
-        run: cmake --build consumer-build --parallel
+        run: cmake --build consumer-build --parallel 4
       - name: Run the stdio server on an initialize and a tool call
         run: python3 -I tests/consumer/check_stdio.py consumer-build/calc
       - name: Run the HTTP server on a tool call and stop it with SIGTERM
@@ -337,7 +339,7 @@ jobs:
         shell: bash
         run: cmake -S tests/consumer -B consumer-build "-DNEOMCP_SOURCE_DIR=${GITHUB_WORKSPACE//\\//}" -DNEOMCP_HTTP_CLIENT=OFF
       - name: Build (Release)
-        run: cmake --build consumer-build --config Release --parallel
+        run: cmake --build consumer-build --config Release --parallel 4
       - name: Run the stdio server on an initialize and a tool call
         run: python -I tests/consumer/check_stdio.py consumer-build/Release/calc.exe
       # Not run here: check_http.py ends the server with SIGTERM, which Python cannot send to a process on Windows
