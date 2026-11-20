@@ -430,13 +430,13 @@ ReadRequest read_elicitation_request(const json& params, const profile::Profile&
     if (form_type == nullptr) form_type = object_type(profile, mechanism.params_type(profile, elicit_method));
     const profile::Type* url_type = profile.type(url_params_type);
     bool url = false;
-    // A request without a mode is a form in every revision; a mode is read where the revision's form params have it.
-    if (const json* mode = member(params, mode_member)) {
+    // A request without a mode is a form in every revision. A mode is read where the revision's form params have the
+    // member; elsewhere the member is not the revision's and is not read, like any other such member (servers write
+    // `mode: "form"` under revisions that have no modes).
+    const json* mode = form_type != nullptr && form_type->has_property(mode_member) ? member(params, mode_member) : nullptr;
+    if (mode != nullptr) {
         const auto* text = mode->get_ptr<const std::string*>();
         if (text == nullptr) return std::string("the mode of an elicitation request must be a string");
-        if (form_type == nullptr || !form_type->has_property(mode_member)) {
-            return std::string("the revision defines no mode for an elicitation request");
-        }
         if (*text == url_mode) {
             if (url_type == nullptr) return std::string("the revision has no elicitation in URL mode");
             url = true;
@@ -639,13 +639,21 @@ WrittenAnswer write_elicitation_answer(const ElicitationAnswer& answer) {
     return result;
 }
 
-WrittenAnswer write_sampling_answer(const SamplingAnswer& answer) {
+WrittenAnswer write_sampling_answer(const SamplingAnswer& answer, const profile::Profile& profile) {
     if (!is_block_or_blocks(answer.content)) {
         return std::string("the content of a sampling result is a content block or an array of them");
     }
+    // A revision whose sampling messages take one content block (it has no union of sampling blocks) takes one in the
+    // result as well: an array of one block is written as that block.
+    json content = answer.content;
+    if (const auto* blocks = answer.content.get_ptr<const json::array_t*>();
+        blocks != nullptr && profile.union_type(sampling_blocks_union) == nullptr) {
+        if (blocks->size() != 1) return std::string("the revision takes one content block in a sampling result");
+        content = blocks->front();
+    }
     json result = json::object();
     result[std::string(role_member)] = std::string(wire::role_name(answer.role));
-    result[std::string(content_member)] = answer.content;
+    result[std::string(content_member)] = std::move(content);
     result[std::string(model_member)] = answer.model;
     if (answer.stop_reason) result[std::string(stop_reason_member)] = *answer.stop_reason;
     return result;
@@ -768,7 +776,7 @@ std::variant<json, std::string> write_answer(const InputResponse& response, cons
             if constexpr (std::is_same_v<T, ElicitationAnswer>) {
                 return write_elicitation_answer(value);
             } else if constexpr (std::is_same_v<T, SamplingAnswer>) {
-                return write_sampling_answer(value);
+                return write_sampling_answer(value, profile);
             } else {
                 return write_roots_answer(value, profile);
             }

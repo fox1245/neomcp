@@ -256,7 +256,7 @@ TEST(ReadRequest, ARequestWithoutAModeIsAForm) {
     }
 }
 
-TEST(ReadRequest, AModeTheRevisionDoesNotDefineIsAnError) {
+TEST(ReadRequest, AModeIsReadOnlyWhereTheRevisionHasModes) {
     for (const auto& profile : all_profiles()) {
         const auto mechanism = make_mechanism(profile->mechanism(profile::Slot::server_input));
         if (!mechanism->carries(*profile, elicit)) continue;
@@ -271,10 +271,21 @@ TEST(ReadRequest, AModeTheRevisionDoesNotDefineIsAnError) {
         with_number_mode["mode"] = 5;
         const bool modes = defines_modes(*profile);
         const bool url = profile->type("ElicitRequestURLParams") != nullptr;
-        EXPECT_EQ(std::holds_alternative<InputRequest>(read_request(elicit, with_form_mode, *profile, *mechanism)), modes);
-        EXPECT_EQ(std::holds_alternative<InputRequest>(read_request(elicit, with_url_mode, *profile, *mechanism)), modes && url);
-        EXPECT_TRUE(std::holds_alternative<std::string>(read_request(elicit, with_other_mode, *profile, *mechanism)));
-        EXPECT_TRUE(std::holds_alternative<std::string>(read_request(elicit, with_number_mode, *profile, *mechanism)));
+        // A form with `mode: "form"` is a form under every revision: where the revision has no modes the member is not
+        // the revision's and is not read.
+        auto form_read = read_request(elicit, with_form_mode, *profile, *mechanism);
+        ASSERT_TRUE(std::holds_alternative<InputRequest>(form_read)) << std::get<std::string>(form_read);
+        EXPECT_TRUE(std::holds_alternative<ElicitationForm>(std::get<InputRequest>(form_read)));
+        // A URL request is one where the revision has URL mode; elsewhere it is read as a form, which lacks its schema.
+        auto url_read = read_request(elicit, with_url_mode, *profile, *mechanism);
+        EXPECT_EQ(std::holds_alternative<InputRequest>(url_read), modes && url);
+        if (modes && url) {
+            EXPECT_TRUE(std::holds_alternative<ElicitationUrl>(std::get<InputRequest>(url_read)));
+        }
+        // A mode the revision does not define, or one that is not a string, is an error where modes exist and is not
+        // read where they do not.
+        EXPECT_EQ(std::holds_alternative<std::string>(read_request(elicit, with_other_mode, *profile, *mechanism)), modes);
+        EXPECT_EQ(std::holds_alternative<std::string>(read_request(elicit, with_number_mode, *profile, *mechanism)), modes);
     }
 }
 
@@ -435,12 +446,14 @@ InputResponse make_answer(Generator& g, const profile::Profile& profile, std::st
     answer.role = g.random().chance() ? Role::user : Role::assistant;
     const std::array<ContentKind, 3> kinds{ContentKind::text, ContentKind::image, ContentKind::audio};
     json blocks = json::array();
-    for (std::size_t i = 0, n = 1 + g.random().below(2); i < n; ++i) {
+    // Several blocks only where the revision takes them (write_answer writes one otherwise).
+    const bool block_arrays = profile.union_type("SamplingMessageContentBlock") != nullptr;
+    for (std::size_t i = 0, n = 1 + (block_arrays ? g.random().below(2) : 0); i < n; ++i) {
         ContentKind kind = kinds[g.random().below(kinds.size())];
         if (!has_content_kind(kind, profile)) kind = ContentKind::text;
         blocks.push_back(to_wire(g.block(kind), profile));
     }
-    answer.content = blocks.size() == 1 && g.random().chance() ? blocks[0] : blocks;
+    answer.content = blocks.size() == 1 && (!block_arrays || g.random().chance()) ? blocks[0] : blocks;
     answer.model = g.text();
     if (g.some()) answer.stop_reason = g.text();
     return answer;
@@ -520,8 +533,11 @@ TEST(WriteAnswer, AResultAsAClientWritesItIsWrittenAsItWas) {
             {elicit, json{{"action", "cancel"}}},
             {roots, json{{"roots", json::array({json{{"uri", "file:///a"}}, json{{"uri", "file:///b"}, {"name", "b"}}})}}},
         };
+        const bool block_arrays = profile->union_type("SamplingMessageContentBlock") != nullptr;
         for (const Case& item : cases) {
             if (!mechanism->carries(*profile, item.method)) continue;
+            // An array of blocks is a sampling result only where the revision takes several blocks.
+            if (item.method == sampling && item.result.at("content").is_array() && !block_arrays) continue;
             auto read = read_answer(item.method, item.result);
             ASSERT_TRUE(std::holds_alternative<InputResponse>(read)) << std::get<std::string>(read);
             auto written = write_answer(std::get<InputResponse>(read), *profile, *mechanism);
@@ -529,6 +545,29 @@ TEST(WriteAnswer, AResultAsAClientWritesItIsWrittenAsItWas) {
             EXPECT_EQ(std::get<json>(written), item.result);
         }
     }
+}
+
+TEST(WriteAnswer, ASamplingResultHasOneBlockWhereTheRevisionTakesOne) {
+    const json text_block{{"type", "text"}, {"text", "a"}};
+    const json image_block{{"type", "image"}, {"data", "AAAA"}, {"mimeType", "image/png"}};
+    std::size_t checked = 0;
+    for (const auto& profile : all_profiles()) {
+        const auto mechanism = make_mechanism(profile->mechanism(profile::Slot::server_input));
+        if (!mechanism->carries(*profile, sampling)) continue;
+        SCOPED_TRACE(profile->revision());
+        const bool block_arrays = profile->union_type("SamplingMessageContentBlock") != nullptr;
+        SamplingAnswer one;
+        one.model = "m";
+        one.content = json::array({text_block});
+        auto written = write_answer(InputResponse(one), *profile, *mechanism);
+        ASSERT_TRUE(std::holds_alternative<json>(written)) << std::get<std::string>(written);
+        EXPECT_EQ(std::get<json>(written).at("content"), block_arrays ? json::array({text_block}) : text_block);
+        SamplingAnswer two = one;
+        two.content = json::array({text_block, image_block});
+        EXPECT_EQ(std::holds_alternative<json>(write_answer(InputResponse(two), *profile, *mechanism)), block_arrays);
+        ++checked;
+    }
+    EXPECT_GT(checked, 0U);
 }
 
 TEST(WriteAnswer, TheActionIsTheOneAnswered) {

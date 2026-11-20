@@ -91,6 +91,9 @@ Acceptance: the official conformance suite's client scenarios that need no autho
   a retry when caching hints are written.
 - stdio: cancelling a request by an id that is in use under both eras at once.
 - `lastModified` of a resource is written under 2024-11-05, whose types have no annotations.
+- Sampling messages of 2025-11-25 and 2026-07-28 may hold tool use and tool result blocks (`ToolUseContent`,
+  `ToolResultContent`); the content model has no such blocks, so a server cannot write them and the reader of a
+  sampling request refuses a request that holds them.
 - Change notifications: many distinct updated URIs in a burst can delay a list change.
 - A request of 2026-07-28 that carries a session header is routed to that session; the pages say to ignore the
   header.
