@@ -155,7 +155,10 @@ private:
 
     // End the whole validation with an Issue. The first reason stands.
     bool stop(const Node& node, std::string_view keyword, std::string message) {
-        if (!stopped_) stopped_ = make_issue(node, keyword, std::move(message));
+        if (!stopped_) {
+            stopped_ = make_issue(node, keyword, std::move(message));
+            stopped_->unchecked = true;
+        }
         return false;
     }
 
@@ -566,7 +569,7 @@ std::optional<Issue> evaluate(const Compiled& compiled, const json& value) {
     try {
         return Run(compiled).validate(value);
     } catch (const std::exception& error) {
-        return Issue{{}, {}, std::string("the value could not be checked: ") + error.what()};
+        return Issue{{}, {}, std::string("the value could not be checked: ") + error.what(), true};
     }
 }
 

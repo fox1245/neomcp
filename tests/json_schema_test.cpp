@@ -42,7 +42,7 @@ Issue refusal(const json& schema, Limits limits = {}) {
 // The first failure of a value, or nothing when it is valid.
 std::optional<Issue> check(const json& schema, const json& value, Limits limits = {}) {
     const auto validator = compiled(schema, limits);
-    if (!validator) return Issue{"", "", "the schema did not compile"};
+    if (!validator) return Issue{"", "", "the schema did not compile", false};
     return validator->validate(value);
 }
 
@@ -879,6 +879,28 @@ TEST(JsonSchemaLimits, MaxEvaluationsBoundsTheWorkOfOneValidation) {
     EXPECT_TRUE(contains(issue->message, "max_evaluations"));
     limits.max_evaluations = smallest;
     EXPECT_FALSE(check(schema, json("x"), limits));
+}
+
+// A check that stops at a limit says so, so that a caller can tell a value it did not check from one that fails.
+TEST(JsonSchemaLimits, AStopAtALimitIsMarkedUnchecked) {
+    const json schema = parse(R"({"type":"array","items":{"type":"integer"},"maxItems":3})");
+    Limits limits;
+    limits.max_evaluations = 3;
+    EXPECT_FALSE(check(schema, parse("[1,2]"), limits));
+    const auto stopped = check(schema, parse("[1,2,3]"), limits);
+    ASSERT_TRUE(stopped);
+    EXPECT_TRUE(stopped->unchecked);
+    const auto failed = check(schema, parse(R"([1,"x"])"), limits);
+    ASSERT_TRUE(failed);
+    EXPECT_FALSE(failed->unchecked);
+    const auto too_many = check(schema, parse("[1,2,3,4]"), limits);
+    ASSERT_TRUE(too_many);
+    EXPECT_FALSE(too_many->unchecked);
+    Limits short_input;
+    short_input.max_pattern_input = 2;
+    const auto long_string = check(parse(R"({"pattern":"a"})"), json("aaa"), short_input);
+    ASSERT_TRUE(long_string);
+    EXPECT_TRUE(long_string->unchecked);
 }
 
 TEST(JsonSchemaLimits, AnExponentialSchemaEndsAtTheDefaultBound) {

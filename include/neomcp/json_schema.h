@@ -96,6 +96,10 @@ struct Issue {
     // found through a `$ref` points at the keyword in the referenced schema.
     std::string schema_pointer;
     std::string message;
+    // validate() only: the check stopped before it found whether the value is valid, at a limit of the validation
+    // (max_depth, max_value_depth, max_pattern_input, max_evaluations), at a string a pattern cannot be matched
+    // against, or at an error. Such an Issue says nothing of the value: the value was not checked.
+    bool unchecked = false;
 };
 
 namespace detail {

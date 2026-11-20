@@ -14,7 +14,7 @@ std::variant<Validator, Issue> Validator::compile(const json& schema, Limits lim
         if (auto* issue = std::get_if<Issue>(&result)) return std::move(*issue);
         return Validator(std::move(std::get<std::shared_ptr<const detail::Compiled>>(result)));
     } catch (const std::exception& error) {
-        return Issue{{}, {}, std::string("the schema could not be compiled: ") + error.what()};
+        return Issue{{}, {}, std::string("the schema could not be compiled: ") + error.what(), false};
     }
 }
 
@@ -22,7 +22,7 @@ std::optional<Issue> Validator::validate(const json& value) const {
     try {
         return detail::evaluate(*compiled_, value);
     } catch (const std::exception& error) {
-        return Issue{{}, {}, std::string("the value could not be checked: ") + error.what()};
+        return Issue{{}, {}, std::string("the value could not be checked: ") + error.what(), true};
     }
 }
 

@@ -873,7 +873,8 @@ public:
             check.budget_spent = refused->budget_spent;
             check.issue = refused->issue;
         } else if (auto issue = std::get<json_schema::Validator>(*entry.output).validate(*result.structured_content)) {
-            check.kind = OutputCheckKind::invalid;
+            // A check that stopped at one of the peer bounds found nothing about the content.
+            check.kind = issue->unchecked ? OutputCheckKind::unverified : OutputCheckKind::invalid;
             check.issue = std::move(issue);
         } else {
             check.kind = OutputCheckKind::valid;

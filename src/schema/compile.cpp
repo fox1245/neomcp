@@ -56,7 +56,7 @@ struct Failure {
 };
 
 [[noreturn]] void fail(std::string schema_pointer, std::string message) {
-    throw Failure{Issue{{}, std::move(schema_pointer), std::move(message)}};
+    throw Failure{Issue{{}, std::move(schema_pointer), std::move(message), false}};
 }
 
 std::string child_pointer(const std::string& parent, std::string_view token) {
@@ -585,7 +585,7 @@ std::variant<std::shared_ptr<const Compiled>, Issue> compile_schema(const json& 
     } catch (const Failure& failure) {
         return failure.issue;
     } catch (const std::exception& error) {
-        return Issue{{}, {}, std::string("the schema could not be compiled: ") + error.what()};
+        return Issue{{}, {}, std::string("the schema could not be compiled: ") + error.what(), false};
     }
 }
 

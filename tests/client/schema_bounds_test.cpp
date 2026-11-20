@@ -242,6 +242,36 @@ TEST(ClientBounds, APatternWhoseProgramFitsTheMemoryBoundIsUsedAndOneRepetitionM
     RecordProperty("repetitions_at_the_memory_bound", static_cast<int>(edge));
 }
 
+// One validation evaluates the root, the property and each item: an array of bound - 2 items is checked to its end;
+// one more item stops the check, which leaves the content unverified rather than invalid.
+TEST(ClientBounds, ContentThatTakesTheBoundOfEvaluationsIsCheckedAndOneMoreLeavesItUnverified) {
+    constexpr std::size_t bound = 1000;
+    const json schema = json::parse(
+        R"({"type":"object","properties":{"a":{"type":"array","items":{"type":"integer"}}}})");
+    auto script = std::make_shared<ToolServer>();
+    script->tools.push_back(tool("at", schema));
+    script->tools.push_back(tool("past", schema));
+    script->results["at"] = json{{"a", json(std::vector<int>(bound - 2, 0))}};
+    script->results["past"] = json{{"a", json(std::vector<int>(bound - 1, 0))}};
+    auto options = only({revision});
+    options.peer_max_evaluations = bound;
+    neomcp::Client client = open_with(std::move(options), tool_server(script));
+    ASSERT_TRUE(client.list_all_tools());
+    EXPECT_EQ(check_of(client, "at").kind, OutputCheckKind::valid);
+    const auto stopped = check_of(client, "past");
+    EXPECT_EQ(stopped.kind, OutputCheckKind::unverified);
+    EXPECT_FALSE(stopped.budget_spent);
+    ASSERT_TRUE(stopped.issue.has_value());
+    EXPECT_TRUE(stopped.issue->unchecked);
+    // A typed call of the same content is unverified too, not invalid.
+    const auto typed = client.call<json>("past", json::object());
+    ASSERT_FALSE(typed);
+    EXPECT_EQ(typed.error().kind, ClientErrorKind::unverified);
+    // Content that fails within the bound is still invalid.
+    script->results["past"] = json{{"a", json::array({"x"})}};
+    EXPECT_EQ(check_of(client, "past").kind, OutputCheckKind::invalid);
+}
+
 TEST(ClientBounds, TheBudgetOfCompilesIsSpentAtItsBoundAndToldOnce) {
     constexpr std::size_t bound = ClientDefaults::max_peer_schema_compiles;
     auto script = std::make_shared<ToolServer>();

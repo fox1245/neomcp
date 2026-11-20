@@ -60,15 +60,18 @@ enum class OutputCheckKind {
     not_listed,      // the tool is not among the tools the server listed, so its output schema is not known
     no_schema,       // the tool's definition declares no output schema
     valid,           // the structured content fits the output schema
-    invalid,         // it does not (`issue` says where); a bound the validator met while checking reads the same
+    invalid,         // it does not (`issue` says where)
     unverified       // the output schema could not be compiled: refused within the peer bounds (`issue`), or the
-                     // budget of compiles was spent (`budget_spent`); the content is taken as not checked
+                     // budget of compiles was spent (`budget_spent`); or the check of the content stopped at one of the
+                     // peer bounds before it found whether the content fits (`issue`, with `unchecked` set). The
+                     // content is taken as not checked
 };
 
 struct OutputCheck {
     OutputCheckKind kind = OutputCheckKind::not_applicable;
     // invalid: where the content fails (pointers into the content and into the schema); unverified: why the schema was
-    // refused. The message may quote the schema, which the server wrote.
+    // refused, or where the check of the content stopped (`unchecked`). The message may quote the schema, which the
+    // server wrote.
     std::optional<json_schema::Issue> issue;
     // unverified: the budget of compiles (ClientOptions::max_peer_schema_compiles) was spent before this schema.
     bool budget_spent = false;
@@ -148,11 +151,17 @@ Result<TypedCall<R>> decode_typed(Result<ToolCall> called) {
             return typed_error(ClientErrorKind::output_invalid,
                                "the tool's structured content does not fit the tool's output schema");
         case OutputCheckKind::unverified:
+            if (typed.check.budget_spent) {
+                return typed_error(ClientErrorKind::unverified,
+                                   "the tool's output schema was not compiled: the budget of schema compiles is spent");
+            }
+            if (typed.check.issue && typed.check.issue->unchecked) {
+                return typed_error(ClientErrorKind::unverified,
+                                   "the tool's structured content was not checked to its end: the check stopped at a "
+                                   "limit for a server's schemas");
+            }
             return typed_error(ClientErrorKind::unverified,
-                               typed.check.budget_spent
-                                   ? "the tool's output schema was not compiled: the budget of schema compiles is spent"
-                                   : "the tool's output schema cannot be compiled within the limits for a server's "
-                                     "schemas");
+                               "the tool's output schema cannot be compiled within the limits for a server's schemas");
         case OutputCheckKind::not_listed:
             return typed_error(ClientErrorKind::unverified,
                                "the tool is not in the server's list of tools, so its output schema is not known");
