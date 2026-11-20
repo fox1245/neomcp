@@ -31,6 +31,9 @@ Last updated: 2026-11-20.
 - **The reading half of the wire code** (`neomcp/wire_read.h`): readers for everything a server writes, the inverses
   for input requests, and the encoder for mirrored parameter headers. Its tests have not yet been checked by
   breaking the code on purpose.
+- **The client halves of the mechanisms** (`neomcp/client/mechanism.h`, target `neomcp::client`): one client half per
+  name the profiles declare, each tested against its server half and against what a session writes, and the
+  registry that selects them per profile and transport.
 
 ## In progress
 
@@ -44,21 +47,19 @@ forms: a blocking one under the plain name and a coroutine one with the prefix `
 
 In order; items on one line can be done side by side.
 
-1. The client halves of the profile's mechanisms (opening by handshake or by per-request metadata, input requests as
-   server requests or as a result with a retry, change notifications, cancellation) and their registry.
-2. The client engine: request ids, pending requests, both ways of opening, detection of the kind of server over
+1. The client engine: request ids, pending requests, both ways of opening, detection of the kind of server over
    stdio, timeouts as events, cancellation, progress, notifications. Tested in process against the server's session
    engine on all five revisions.
-3. Input handlers: one handler per kind of request (form, sampling, roots) that serves both mechanisms; capabilities
+2. Input handlers: one handler per kind of request (form, sampling, roots) that serves both mechanisms; capabilities
    declared only for handlers that exist.
-4. `neomcp::Client`: the typed interface (tools with C++ types, lists with pagination, resources, prompts,
+3. `neomcp::Client`: the typed interface (tools with C++ types, lists with pagination, resources, prompts,
    completion), results checked against output schemas, limits for schemas a server sends, an in-memory transport.
-5. Change notifications for the client | the stdio transport (a child process, POSIX and Windows) | the HTTP transport
+4. Change notifications for the client | the stdio transport (a child process, POSIX and Windows) | the HTTP transport
    on libcurl with JSON answers, detection of the kind of server over HTTP, mirrored headers, and a client fixture
    for the official conformance suite in CI.
-6. Event streams for the HTTP transport: answers as streams, server requests on streams, sessions, the connection
+5. Event streams for the HTTP transport: answers as streams, server requests on streams, sessions, the connection
    stream, resumption.
-7. The HTTP+SSE transport of 2024-11-05 (client only) | every bound on what a server controls tested at its edge |
+6. The HTTP+SSE transport of 2024-11-05 (client only) | every bound on what a server controls tested at its edge |
    the official Python SDK's servers as peers, and the matrix of this client against this server over every
    transport and revision.
 
