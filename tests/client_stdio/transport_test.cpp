@@ -555,11 +555,23 @@ TEST(ClientStdioTransport, AServerThatIgnoresSigtermIsKilled) {
 // Whether a process is gone: no such process, or (Linux) one that has ended and waits to be collected by its parent.
 bool process_gone(pid_t pid) {
     if (::kill(pid, 0) != 0) return errno == ESRCH;
-    const std::string stat = read_file("/proc/" + std::to_string(pid) + "/stat");
+#ifndef __linux__
+    return false;
+#else
+    // Read with the system's calls: a process that ends while its file is read makes the read fail (ESRCH), which
+    // the streams of the standard library report by throwing.
+    const int file = ::open(("/proc/" + std::to_string(pid) + "/stat").c_str(), O_RDONLY);
+    if (file < 0) return errno == ENOENT || errno == ESRCH;
+    char buffer[512];
+    const ssize_t count = ::read(file, buffer, sizeof buffer);
+    ::close(file);
+    if (count < 0) return errno == ESRCH;
+    const std::string stat(buffer, static_cast<std::size_t>(count));
     const std::size_t name_end = stat.rfind(')');
     if (name_end == std::string::npos || name_end + 2 >= stat.size()) return false;
     const char state = stat[name_end + 2];
     return state == 'Z' || state == 'X';
+#endif
 }
 
 // Ends a process the test started indirectly when the test ends, also when an assertion ended it early.
