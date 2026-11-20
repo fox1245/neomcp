@@ -8,6 +8,7 @@ if(NOT NEOMCP_HTTP_CLIENT)
 endif()
 
 add_executable(neomcp_client_http_test
+    bounds_test.cpp
     client_http_test.cpp
     http_sse_test.cpp
     sse_parser_test.cpp

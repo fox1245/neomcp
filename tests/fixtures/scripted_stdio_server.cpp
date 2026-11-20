@@ -15,6 +15,8 @@
 // Actions, each an object with one member:
 //   {"answer": result}             the line is a request: answer it with this result
 //   {"refuse": {"code", "message"}} answer it with this error
+//   {"sized_answer": {"result": r, "bytes": n, "end": e}}   answer it with r, padded with spaces after the message to
+//                                  n bytes, and end the line with e (such as "\n" or "\r\n")
 //   {"line": text}                 write text and a line feed to standard output
 //   {"raw": text}                  write text as it is to standard output
 //   {"lines": {"text": t, "count": n}}   write t and a line feed n times
@@ -214,6 +216,16 @@ void run(const json& actions, const json* message) {
             reply["id"] = (*message)["id"];
             reply[kind == "answer" ? "result" : "error"] = value;
             write_out(reply.dump() + "\n");
+        } else if (kind == "sized_answer") {
+            if (message == nullptr || !message->contains("id")) continue;
+            json reply = json::object();
+            reply["jsonrpc"] = "2.0";
+            reply["id"] = (*message)["id"];
+            reply["result"] = value["result"];
+            std::string text = reply.dump();
+            const auto bytes = value["bytes"].get<std::size_t>();
+            if (text.size() < bytes) text.append(bytes - text.size(), ' ');
+            write_out(text + value["end"].get<std::string>());
         } else if (kind == "line") {
             write_out(value.get<std::string>() + "\n");
         } else if (kind == "raw") {

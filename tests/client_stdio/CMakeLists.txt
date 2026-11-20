@@ -16,6 +16,7 @@ neomcp_configure_target(neomcp_client_stdio_profile_server)
 
 # The tests reach the transport's internal pieces (the comparison of variable names, the Windows command line).
 add_executable(neomcp_client_stdio_test
+    bounds_test.cpp
     client_test.cpp
     transport_test.cpp)
 target_link_libraries(neomcp_client_stdio_test PRIVATE neomcp::client_stdio neomcp::client asio::asio

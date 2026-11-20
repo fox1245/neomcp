@@ -1,9 +1,11 @@
 # The Client and its driver: against the library's own Server in the same process (the in-memory transport and the
 # in-process server), and against scripted peers where a test needs a server that loses answers or asks in rounds.
 add_executable(neomcp_client_test
+    bounds_test.cpp
     client_test.cpp
     driver_test.cpp
     feed_test.cpp
+    schema_bounds_test.cpp
     typed_test.cpp)
 target_link_libraries(neomcp_client_test PRIVATE neomcp::client neomcp::client_in_process neomcp::server
     GTest::gtest_main Threads::Threads)
