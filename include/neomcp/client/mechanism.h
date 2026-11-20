@@ -173,7 +173,9 @@ public:
     virtual bool keeps_connection() const = 0;
 };
 
-// Slot `batch`: whether a server may send an array of messages. The client never sends one.
+// Slot `batch`: whether a server may send an array of messages. The client never sends one: it answers each request
+// of an array with a response of its own, since a body that is a single response is allowed beside an array of
+// responses, and answering one by one lets the answer of a quick handler go before that of a slow one.
 class ClientBatchMechanism {
 public:
     virtual ~ClientBatchMechanism() = default;

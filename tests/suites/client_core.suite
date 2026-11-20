@@ -1,1 +1,1 @@
-The readers of the wire writers, the inverse input functions and the header value encoder, the core's client half.
+The readers of the wire writers, the inverse input functions, the header value encoder and the client halves of the mechanisms, the client half of the protocol core.
