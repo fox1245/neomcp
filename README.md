@@ -45,7 +45,9 @@ What exists now:
 
 Still planned:
 
-- The client.
+- The client. A client that starts a server as a child process (over stdio) runs the command with the
+  application's rights, and a variable of the application's environment reaches the server only when the
+  application passes it.
 - Authorization.
 
 [ROADMAP.md](ROADMAP.md) lists the work that is in progress and the work that has not been started.

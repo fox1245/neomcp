@@ -1,0 +1,1 @@
+The child-process transport of the client: starting a server over stdio, its environment and arguments, lines and the bounds on what is not a message, standard error, the steps that end a process, restarts, and the Client against the library's own stdio server.
