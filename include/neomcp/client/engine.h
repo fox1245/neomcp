@@ -482,7 +482,8 @@ enum class DiagnosticKind {
     malformed_contact,   // an answer that opens contact could not be read, and the engine went on as for another kind
     server_defect,       // the server answered in a way only a wrong server does (such as refusing a header this
                          // client writes as the revision says)
-    events_dropped,      // events were dropped because max_queued_events were queued
+    events_dropped,      // events were dropped because max_queued_events were queued (the Client tells this once its
+                         // queue is taken; the engine itself only counts them, dropped_events())
     level_refused,       // the server refused the log level the client asked for
     form_not_restricted,  // a server's request for a form outside the restricted form was answered invalid params
     answer_invalid,      // an answer to a server's request held accepted content that fails the form's schema: it

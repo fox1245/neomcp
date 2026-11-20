@@ -28,6 +28,7 @@ using neomcp::profile::Transport;
 
 constexpr std::string_view newest = "2026-07-28";
 constexpr std::string_view handshake_revision = "2025-11-25";
+constexpr std::string_view batching_revision = "2025-03-26";
 
 neomcp::EngineOptions with_prior(neomcp::EngineOptions options, Transport transport, std::string_view revision) {
     options.prior = neomcp::ContactVerdict{neomcp::ServerKind::per_request, transport, std::string(revision)};
@@ -314,6 +315,70 @@ TEST(ClientBounds, TheCompileBudgetIsSpentAtItsBoundAndNotGivenBackByARestart) {
 }
 
 // ---- Events queued for the application
+
+// The client takes the engine's events after every message, so its queue fills only with what one message brings: a
+// batch, under a revision that reads them. Within the bound every log message reaches the application; past it the
+// rest are dropped, the application is told once, and the answer of the batch is never dropped.
+TEST(ClientBounds, LogMessagesPastTheQueueAreDroppedAndToldAndTheAnswerIsKept) {
+    constexpr std::size_t bound = ClientDefaults::max_queued_events;
+    auto peer = std::make_shared<ct::ScriptedPeer>([](ct::ScriptedPeer& side, const ct::Seen& request) {
+        if (request.method() == "initialize") {
+            side.answer(request, ct::initialize_result(batching_revision));
+            return;
+        }
+        if (request.method() != "tools/call") return;
+        const std::size_t logs = request.message["params"]["arguments"]["logs"].get<std::size_t>();
+        json batch = json::array();
+        for (std::size_t i = 0; i < logs; ++i) {
+            batch.push_back(json{{"jsonrpc", "2.0"},
+                                 {"method", "notifications/message"},
+                                 {"params", json{{"level", "info"}, {"data", i}}}});
+        }
+        batch.push_back(neomcp::make_result(neomcp::RequestId(request.message["id"].get<std::uint64_t>()),
+                                            json{{"content", json::array()}}));
+        side.send(request.unit, batch.dump());
+    });
+    std::mutex mutex;
+    std::size_t logs = 0;
+    std::size_t told = 0;
+    auto options = ct::only({batching_revision});
+    options.on_log = [&](const neomcp::LogEvent&) {
+        std::lock_guard lock(mutex);
+        ++logs;
+    };
+    options.on_diagnostic = [&](const neomcp::ClientDiagnostic& diagnostic) {
+        const auto* engine = std::get_if<neomcp::Diagnostic>(&diagnostic);
+        if (engine == nullptr || engine->kind != neomcp::DiagnosticKind::events_dropped) return;
+        std::lock_guard lock(mutex);
+        ++told;
+    };
+    auto opened = neomcp::Client::open(std::move(options), neomcp::make_memory_transport(Transport::stdio, peer));
+    ASSERT_TRUE(opened) << opened.error().message;
+    neomcp::Client client = std::move(opened).value();
+
+    const auto at = client.call_tool("log", json{{"logs", bound}});
+    ASSERT_TRUE(at) << at.error().message;
+    {
+        std::lock_guard lock(mutex);
+        EXPECT_EQ(logs, bound);
+        EXPECT_EQ(told, 0u);
+        logs = 0;
+    }
+    const auto past = client.call_tool("log", json{{"logs", bound + 1}});
+    ASSERT_TRUE(past) << past.error().message;
+    {
+        std::lock_guard lock(mutex);
+        EXPECT_EQ(logs, bound);
+        EXPECT_EQ(told, 1u);
+        logs = 0;
+    }
+    // With room again, nothing is dropped and nothing more is told.
+    const auto again = client.call_tool("log", json{{"logs", 1}});
+    ASSERT_TRUE(again) << again.error().message;
+    std::lock_guard lock(mutex);
+    EXPECT_EQ(logs, 1u);
+    EXPECT_EQ(told, 1u);
+}
 
 // ---- The defaults
 

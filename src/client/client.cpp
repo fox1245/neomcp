@@ -998,6 +998,7 @@ private:
                 }
             }
             while (auto event = engine_->next_event()) handle(std::move(*event));
+            tell_dropped();
             while (auto report = dispatcher_->next_report()) diagnose(ClientDiagnostic(std::move(*report)));
         } while (pump_again_ || !outbox_.empty());
         pumping_ = false;
@@ -1213,6 +1214,19 @@ private:
 
     void diagnose(const ClientDiagnostic& diagnostic) {
         if (options_.on_diagnostic) guarded([&] { options_.on_diagnostic(diagnostic); });
+    }
+
+    // The engine drops what may be dropped while its queue is full, and only counts it (a diagnostic of its own would
+    // be dropped too): once the queue is taken, the application is told how many went since it was told last.
+    void tell_dropped() {
+        const std::uint64_t dropped = engine_->dropped_events();
+        if (dropped == told_dropped_) return;
+        const std::uint64_t since = dropped - told_dropped_;
+        told_dropped_ = dropped;
+        diagnose(ClientDiagnostic(Diagnostic{DiagnosticKind::events_dropped,
+                                             std::to_string(since) +
+                                                 " events were dropped because max_queued_events were queued",
+                                             std::nullopt, std::nullopt}));
     }
 
     void on_progress(const ProgressEvent& event) {
@@ -1478,6 +1492,7 @@ private:
     std::uint64_t next_feed_ = 1;
     bool pumping_ = false;
     bool pump_again_ = false;
+    std::uint64_t told_dropped_ = 0;  // the engine's dropped_events() when the application was last told
     bool engine_wrote_close_ = false;
     bool transport_started_ = false;
     bool transport_closing_ = false;
