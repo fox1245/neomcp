@@ -1261,4 +1261,124 @@ TEST(ClientEngineMalformed, MutatedMessagesNeverThrow) {
     }
 }
 
+// ---- HTTP: a session the server no longer knows, and the stream of the connection
+
+TEST(ClientEngineSession, AForgottenSessionMakesANewHandshakeAndTheCallGoesOnceMore) {
+    neomcp::EngineOptions options = only({handshake_revision});
+    options.input.form = true;
+    Rig rig(std::move(options), Transport::streamable_http);
+    open_handshake(rig, handshake_revision);
+    ASSERT_EQ(rig.outputs(OutgoingKind::open_connection_stream).size(), 1u);
+    const auto ref = rig.send("tools/list");
+    const auto first_id = rig.last_id("tools/list");
+    rig.engine->stream_event(rig.last_unit("tools/list"), neomcp::SessionExpired{true});
+    EXPECT_EQ(rig.engine->contact().phase, ContactPhase::handshaking);
+    EXPECT_EQ(count_requests(rig, "initialize"), 2u);
+    EXPECT_EQ(count_requests(rig, "tools/list"), 1u);  // the call waits for the new session
+    EXPECT_EQ(rig.diagnostics(DiagnosticKind::session_renewed).size(), 1u);
+    EXPECT_FALSE(rig.ended(ref));
+    rig.answer("initialize", initialize_result(handshake_revision));
+    EXPECT_EQ(rig.engine->contact().phase, ContactPhase::open);
+    EXPECT_EQ(count_requests(rig, "tools/list"), 2u);
+    EXPECT_NE(rig.last_id("tools/list"), first_id);
+    // The new session is a new connection: its stream is asked for again.
+    EXPECT_EQ(rig.outputs(OutgoingKind::open_connection_stream).size(), 2u);
+    // Not known under the new session either: the call fails, and is not sent a third time.
+    rig.engine->stream_event(rig.last_unit("tools/list"), neomcp::SessionExpired{true});
+    EXPECT_EQ(failure_of(rig.ended(ref)), CallFailureKind::http_status);
+    EXPECT_EQ(count_requests(rig, "tools/list"), 2u);
+}
+
+TEST(ClientEngineSession, AnOlderSessionThatEndedSendsTheCallAgainUnderTheCurrentOne) {
+    Rig rig(only({handshake_revision}), Transport::streamable_http);
+    open_handshake(rig, handshake_revision);
+    const auto ref = rig.send("tools/list");
+    rig.engine->stream_event(rig.last_unit("tools/list"), neomcp::SessionExpired{false});
+    EXPECT_EQ(rig.engine->contact().phase, ContactPhase::open);
+    EXPECT_EQ(count_requests(rig, "initialize"), 1u);
+    EXPECT_EQ(count_requests(rig, "tools/list"), 2u);
+    EXPECT_TRUE(rig.diagnostics(DiagnosticKind::session_renewed).empty());
+    rig.answer("tools/list", json{{"tools", json::array()}});
+    ASSERT_TRUE(rig.ended(ref));
+    EXPECT_TRUE(std::holds_alternative<neomcp::Answered>(rig.ended(ref)->outcome));
+}
+
+TEST(ClientEngineSession, RenewalsInARowAreBoundedByMaxRestarts) {
+    neomcp::EngineOptions options = only({handshake_revision});
+    options.max_restarts = 1;
+    Rig rig(std::move(options), Transport::streamable_http);
+    open_handshake(rig, handshake_revision);
+    // An answer between two renewals starts their count again.
+    rig.send("tools/list");
+    rig.engine->stream_event(rig.last_unit("tools/list"), neomcp::SessionExpired{true});
+    rig.answer("initialize", initialize_result(handshake_revision));
+    rig.answer("tools/list", json{{"tools", json::array()}});
+    const auto ref = rig.send("tools/list");
+    rig.engine->stream_event(rig.last_unit("tools/list"), neomcp::SessionExpired{true});
+    rig.answer("initialize", initialize_result(handshake_revision));
+    EXPECT_EQ(count_requests(rig, "initialize"), 3u);
+    // Without one, the next end of the session is one more than max_restarts: contact fails.
+    rig.engine->stream_event(rig.last_unit("tools/list"), neomcp::SessionExpired{true});
+    EXPECT_EQ(count_requests(rig, "initialize"), 3u);
+    EXPECT_EQ(rig.engine->contact().phase, ContactPhase::failed);
+    ASSERT_TRUE(rig.engine->contact().failure);
+    EXPECT_EQ(rig.engine->contact().failure->kind, neomcp::ContactFailureKind::too_many_restarts);
+    ASSERT_TRUE(rig.ended(ref));
+}
+
+TEST(ClientEngineConnection, TheStreamIsAskedForWhenSomethingArrivesOutsideRequests) {
+    struct Case {
+        const char* name;
+        bool form;
+        bool log_level;
+        neomcp::ConnectionStreamMode mode;
+        std::size_t asked;
+    };
+    const Case cases[] = {
+        {"nothing", false, false, neomcp::ConnectionStreamMode::when_needed, 0},
+        {"a handler", true, false, neomcp::ConnectionStreamMode::when_needed, 1},
+        {"a log level", false, true, neomcp::ConnectionStreamMode::when_needed, 1},
+        {"never", true, true, neomcp::ConnectionStreamMode::never, 0},
+        {"always", false, false, neomcp::ConnectionStreamMode::always, 1},
+    };
+    for (const Case& one : cases) {
+        neomcp::EngineOptions options = only({handshake_revision});
+        options.input.form = one.form;
+        if (one.log_level) options.log_level = neomcp::LogLevel::info;
+        options.connection_stream = one.mode;
+        Rig rig(std::move(options), Transport::streamable_http);
+        open_handshake(rig, handshake_revision);
+        const auto asked = rig.outputs(OutgoingKind::open_connection_stream);
+        ASSERT_EQ(asked.size(), one.asked) << one.name;
+        if (asked.empty()) continue;
+        EXPECT_EQ(asked[0].unit, neomcp::connection_unit) << one.name;
+        ASSERT_TRUE(asked[0].profile) << one.name;
+        EXPECT_EQ(asked[0].profile->revision(), handshake_revision) << one.name;
+        EXPECT_EQ(header(asked[0], "MCP-Protocol-Version"), std::string(handshake_revision)) << one.name;
+    }
+}
+
+// The input requests of a revision that asks in results arrive on the call's own exchange: no stream is needed.
+TEST(ClientEngineConnection, AHandlerOfInputThatComesInResultsNeedsNoStream) {
+    neomcp::EngineOptions options = with_prior(only({newest}), Transport::streamable_http, newest);
+    options.input.form = true;
+    Rig rig(std::move(options), Transport::streamable_http);
+    rig.engine->open();
+    ASSERT_EQ(rig.engine->contact().phase, ContactPhase::open);
+    EXPECT_TRUE(rig.outputs(OutgoingKind::open_connection_stream).empty());
+}
+
+TEST(ClientEngineOutputs, EveryMessageNamesTheProfileItGoesOutUnder) {
+    Rig rig(only({handshake_revision}), Transport::streamable_http);
+    open_handshake(rig, handshake_revision);
+    rig.send("tools/list");
+    for (const auto& outgoing : rig.out) {
+        const bool message = outgoing.kind == OutgoingKind::request || outgoing.kind == OutgoingKind::notification ||
+                             outgoing.kind == OutgoingKind::response;
+        if (!message) continue;
+        ASSERT_TRUE(outgoing.profile);
+        EXPECT_EQ(outgoing.profile->revision(), handshake_revision);
+    }
+}
+
 }  // namespace

@@ -441,10 +441,14 @@ public:
 
     asio::steady_timer& contact_signal() noexcept { return contact_signal_; }
 
-    // What opening came to.
+    // What opening came to. Once contact opened, opening succeeded, even when the server lost the client's state
+    // since and contact is being opened anew (a new process, a new session), which the opener may see first.
     std::optional<ClientError> contact_result() const {
         const ContactState& contact = engine_->contact();
         if (contact.phase == ContactPhase::open) return std::nullopt;
+        if (opened_ && contact.phase != ContactPhase::failed && contact.phase != ContactPhase::closed) {
+            return std::nullopt;
+        }
         if (contact.phase == ContactPhase::failed && contact.failure) return contact_error(*contact.failure);
         if (contact.phase == ContactPhase::closed) return closed_error();
         return error_of(ClientErrorKind::cancelled, "opening the client was cancelled");
@@ -924,6 +928,7 @@ private:
         engine.input = options_.handlers.support();
         engine.prior = options_.prior;
         engine.mechanisms = options_.mechanisms;
+        engine.connection_stream = transport_->connection_stream();
         engine.request_timeout = options_.request_timeout;
         engine.max_total_timeout = options_.max_total_timeout;
         engine.discover_probe_timeout = options_.discover_probe_timeout;

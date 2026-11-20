@@ -83,7 +83,8 @@ enum class ClientErrorKind {
     handshake_refused,       // the handshake was answered with an error, after its one retry where that applies
     handshake_timed_out,     // the handshake was not answered in time; the transport was ended
     transport,               // the transport could not start, or failed while contact was being made
-    too_many_restarts,       // stdio: the server process ended max_restarts times in a row without an answer
+    too_many_restarts,       // the server process ended (stdio), or the server forgot the session (HTTP),
+                             // max_restarts times in a row without an answer
 
     // ---- Refused by the client itself
     on_client_thread,        // a blocking method was called on the client's own thread, where it would wait for

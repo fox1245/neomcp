@@ -22,6 +22,8 @@
 // - change feeds: subscriptions as long-lived calls without a clock once acknowledged, their messages correlated by the
 //   call they name, and the connection's change notifications while the client listens there (listen,
 //   listen_on_connection);
+// - on HTTP, the session a server no longer knows (SessionExpired): a new handshake, and every call that met the end
+//   sent once more under the new session;
 // - the rounds of a call that asks for input, through one seam (InputSupport, ServerAsked, InputRoundStarted), with
 //   the checks that need the revision: a request of a kind the client did not declare is refused, a form whose schema
 //   is outside the restricted form never reaches a handler, and accepted content that fails the form's schema is
@@ -122,6 +124,11 @@ struct Outgoing {
     UnitId unit = connection_unit;
     std::vector<HttpHeader> headers;
     OutgoingKind kind = OutgoingKind::request;
+    // The profile the message goes out under (for open_connection_stream: the governing one), so that a transport
+    // reads what the revision decides of its exchanges from the profile's entry: whether a stream may be resumed, how
+    // a session ends, which status means what. Null for the kinds that carry no message but that one, and from a
+    // writer that knows none (a transport then treats the exchange as one of no revision in particular).
+    profile::ProfilePtr profile;
 };
 
 // Receives each output. See the threading rules above: it must not call into the engine.
@@ -163,8 +170,16 @@ struct ProcessExited {
     std::optional<int> status;  // the exit status, when the process exited rather than being ended by a signal
 };
 
-using StreamEvent =
-    std::variant<ResponseHead, StreamEventId, StreamRetryAdvice, StreamEnded, StreamLost, SendFailed, ProcessExited>;
+// HTTP: the server answered the unit's request, which carried the session id of a handshake, as one of a session it
+// does not know (the status the profile names for that). The server did not take the request: nothing more comes for
+// the unit, and the transport sends no session id from now on until a handshake opens a new session. `current`: the
+// session the request carried is the one in use (false when a newer handshake replaced it already).
+struct SessionExpired {
+    bool current = true;
+};
+
+using StreamEvent = std::variant<ResponseHead, StreamEventId, StreamRetryAdvice, StreamEnded, StreamLost, SendFailed,
+                                 ProcessExited, SessionExpired>;
 
 // What received() made of one message, so that a transport can count what it must bound (stdio counts the lines that
 // are not MCP messages).
@@ -254,7 +269,8 @@ enum class ContactFailureKind {
     authorization_required,  // HTTP: the server asks for authorization the client cannot give
     http_status,          // HTTP: a status after which no step of opening goes on (a server error, an unknown 4xx)
     transport,            // the transport failed while contact was being made
-    too_many_restarts     // stdio: the process ended max_restarts times in a row without an answer between
+    too_many_restarts     // the server lost the client's state (stdio: the process ended; HTTP: the session ended)
+                          // more than max_restarts times in a row without an answer between
 };
 
 struct ContactFailure {
@@ -467,8 +483,10 @@ enum class DiagnosticKind {
     form_not_restricted,  // a server's request for a form outside the restricted form was answered invalid params
     answer_invalid,      // an answer to a server's request held accepted content that fails the form's schema: it
                          // was not sent, and the request was answered with an internal error
-    schema_budget_spent  // the budget of schema compiles of the server (max_peer_schema_compiles) is spent: every
-                         // later schema of the server is refused without being compiled; reported once
+    schema_budget_spent,  // the budget of schema compiles of the server (max_peer_schema_compiles) is spent: every
+                          // later schema of the server is refused without being compiled; reported once
+    session_renewed       // HTTP: the server no longer knew the session (SessionExpired), and a new handshake opens
+                          // another; whatever the server held for the old one is gone
 };
 
 struct Diagnostic {
@@ -522,10 +540,23 @@ struct ClientDefaults {
     static constexpr std::chrono::milliseconds subscription_reopen_max_delay{60'000};
 };
 
+// When the client opens the stream on which a server speaks outside any request (the connection unit, where the
+// governing profile's entry for the transport offers one).
+enum class ConnectionStreamMode {
+    when_needed,  // when the client has something that arrives outside a request: a log level it asks for, a handler
+                  // of a request the server sends as a request of its own, a change listener of the connection
+    always,
+    never
+};
+
 struct EngineOptions {
     // The revisions the client speaks; empty: every built-in profile. Two profiles of the same revision are an error.
     // Only the profiles that define the engine's transport take part.
     std::vector<profile::ProfilePtr> profiles;
+
+    // When the engine asks the transport for the stream of the connection (open_connection_stream). Once contact is
+    // open it asks at most once per connection; a new handshake (a new session) makes a new connection.
+    ConnectionStreamMode connection_stream = ConnectionStreamMode::when_needed;
 
     // What the client says about itself, written for each revision where it has a place.
     Implementation client_info;
@@ -578,13 +609,14 @@ struct EngineOptions {
     // Requests of a server that wait for the client's answer at once (ServerAsked); one more is answered at once with
     // an internal error, without reaching a handler. A ping does not count. Zero is an error. Default 16.
     std::size_t max_concurrent_server_requests = ClientDefaults::max_concurrent_server_requests;
-    // stdio: how many times in a row the server process may end without an answer between before contact fails;
-    // zero: it is never started again after it ended. What counts as an answer is a sign that the server serves: the
-    // answer to a call of the application, a subscription's acknowledgement, a change notification the client takes;
-    // the answers that open contact do not count, so that a server that ends after each handshake is not started
-    // forever. The one start that follows a process that ended while the probe
-    // was out (to make the handshake with a fresh process) belongs to finding out which kind of server it is and does
-    // not count. Default 3.
+    // How many times in a row the server may lose what it held for the client, without an answer between, before
+    // contact fails: on stdio the server process ends (zero: it is never started again after it ended); on HTTP the
+    // server no longer knows the session (SessionExpired), and a new handshake opens another (zero: none is opened).
+    // What counts as an answer is a sign that the server serves: the answer to a call of the application, a
+    // subscription's acknowledgement, a change notification the client takes; the answers that open contact do not
+    // count, so that a server that ends after each handshake, or forgets each session it opens, is not opened again
+    // forever. The one start that follows a process that ended while the probe was out (to make the handshake with a
+    // fresh process) belongs to finding out which kind of server it is and does not count. Default 3.
     std::size_t max_restarts = ClientDefaults::max_restarts;
 
     // The bounds every schema a server sent is compiled and validated under (compile_peer_schema; json_schema::Limits:
@@ -676,10 +708,10 @@ public:
     std::variant<ClientMessage, CallFailure> watch_request(std::string uri, bool watch) const;
     // Whether the client takes the change notifications of the connection (it holds a subscription under a revision
     // whose feed delivers there). While it does: those notifications are never dropped from the queue; on HTTP, where
-    // the governing profile's entry offers a stream outside requests, the engine asks the transport to open it
-    // (open_connection_stream) once contact is open, and again each time contact opens anew; on stdio a server process
-    // that ended is started again at once, as for a held call, so that the notifications flow again (bounded by
-    // max_restarts).
+    // the governing profile's entry offers a stream outside requests, the client needs that stream
+    // (EngineOptions::connection_stream), so the engine asks the transport to open it (open_connection_stream) once
+    // contact is open, and again each time contact opens anew; on stdio a server process that ended is started again at
+    // once, as for a held call, so that the notifications flow again (bounded by max_restarts).
     void listen_on_connection(bool listening);
 
     // One message read on a unit: a line on stdio, a JSON body or one event's data on HTTP.

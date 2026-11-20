@@ -80,6 +80,10 @@ public:
     // The transport the profiles' entries are read for.
     virtual profile::Transport kind() const noexcept = 0;
 
+    // When the client asks this transport for the stream of the connection (EngineOptions::connection_stream). A
+    // transport that offers such a stream lets the application choose; the default is when the client needs one.
+    virtual ConnectionStreamMode connection_stream() const noexcept { return ConnectionStreamMode::when_needed; }
+
     // Called once, before anything else. The events object outlives the transport. Returns why the transport could not
     // start (a program that cannot be started, a URL it cannot reach), or nothing when it started; the client then
     // fails to open with ClientErrorKind::transport and the message.
@@ -167,13 +171,7 @@ struct HttpProxy {
     std::string url;  // ProxyMode::named only
 };
 
-// When the client opens the stream on which a server speaks outside any request (the connection unit).
-enum class ConnectionStreamMode {
-    when_needed,  // when the client has something that arrives outside a request: a log level, an input handler, a
-                  // change listener
-    always,
-    never
-};
+// ConnectionStreamMode (when the client opens the stream of the connection) is declared in neomcp/client/engine.h.
 
 // The defaults of HttpEndpoint, as constants.
 struct HttpClientDefaults {

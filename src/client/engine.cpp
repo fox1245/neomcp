@@ -191,6 +191,7 @@ struct Call {
     UnitId sent_unit = connection_unit; // where it went out
     bool held = false;                  // waits in the engine until contact is open
     bool refused = false;               // its revision was refused once
+    bool session_resent = false;        // sent once more after the server no longer knew the session
     bool in_round = false;              // waits for the answers of a round
     std::size_t round = 0;              // rounds of input so far (server requests tied to it, where they come so)
     std::optional<InputAsking> asking;
@@ -311,6 +312,7 @@ public:
         if (closed_ || connection_listening_ == listening) return;
         connection_listening_ = listening;
         if (!listening) return;
+        // Once asked for, the stream stays for the connection; a listener that goes leaves it open.
         open_connection_stream();
         // A server process that ended while nobody listened is started again now.
         if (contact_.phase == ContactPhase::lost) request_restart();
@@ -581,7 +583,7 @@ public:
         closed_ = true;
         end_everything(CallFailureKind::closed, "the engine was closed");
         set_phase(ContactPhase::closed);
-        emit(Outgoing{std::string(), connection_unit, {}, OutgoingKind::close});
+        emit(Outgoing{std::string(), connection_unit, {}, OutgoingKind::close, nullptr});
     }
 
     std::optional<EngineEvent> next_event() {
@@ -717,7 +719,7 @@ private:
     // Ends an exchange the engine is done with; nothing for one that ended already.
     void end_exchange(UnitId unit) {
         if (unit == connection_unit || exchanges_.erase(unit) == 0) return;
-        emit(Outgoing{std::string(), unit, {}, OutgoingKind::end_unit});
+        emit(Outgoing{std::string(), unit, {}, OutgoingKind::end_unit, nullptr});
     }
 
     // ---- clocks
@@ -842,7 +844,7 @@ private:
         call.speaker = &speaker;
         call.held = false;
         emit(Outgoing{serialize(message), unit, std::move(std::get<std::vector<HttpHeader>>(headers)),
-                      OutgoingKind::request});
+                      OutgoingKind::request, speaker.halves.profile});
         return std::nullopt;
     }
 
@@ -867,7 +869,7 @@ private:
         if (auto* failure = std::get_if<CallFailure>(&headers)) return *failure;
         const UnitId unit = new_unit();
         emit(Outgoing{serialize(message), unit, std::move(std::get<std::vector<HttpHeader>>(headers)),
-                      OutgoingKind::notification});
+                      OutgoingKind::notification, speaker.halves.profile});
         return std::nullopt;
     }
 
@@ -879,7 +881,7 @@ private:
         }
         const UnitId unit = new_unit();
         emit(Outgoing{serialize(message), unit, std::move(std::get<std::vector<HttpHeader>>(headers)),
-                      OutgoingKind::response});
+                      OutgoingKind::response, speaker.halves.profile});
     }
 
     // The header fields the profile's entry for the transport puts on a message.
@@ -996,7 +998,7 @@ private:
                 step(ref, call.message.method, "no answer in time");
                 finish(ref);
                 fail_contact(ContactFailureKind::handshake_timed_out, "the handshake was not answered in time");
-                emit(Outgoing{std::string(), connection_unit, {}, OutgoingKind::close});
+                emit(Outgoing{std::string(), connection_unit, {}, OutgoingKind::close, nullptr});
                 return;
             case Purpose::level:
                 if (call.wire) cancel_on_wire(call, timed_out_reason);
@@ -1104,7 +1106,7 @@ private:
     void request_restart() {
         if (restarting_ || transport_ != profile::Transport::stdio) return;
         restarting_ = true;
-        emit(Outgoing{std::string(), connection_unit, {}, OutgoingKind::restart});
+        emit(Outgoing{std::string(), connection_unit, {}, OutgoingKind::restart, nullptr});
     }
 
     // ---- contact
@@ -1217,28 +1219,48 @@ private:
         release_held();
     }
 
-    // Asks the transport for the stream of the connection, once per connection, while the client listens there and
-    // the governing profile's entry for the transport offers one. Its headers are the ones a request outside any
-    // message carries: the revision, where the entry names it in a header (no method, no mirrored member).
+    // Whether the client needs the stream of the connection under the governing profile (EngineOptions::
+    // connection_stream): something of its own arrives outside any request there. A change listener of the connection;
+    // a log level it asked for (messages that belong to no request come there); a handler of a request the server
+    // sends as a request of its own (one that belongs to no call of the client comes there).
+    bool connection_needed() const {
+        switch (options_.connection_stream) {
+            case ConnectionStreamMode::never: return false;
+            case ConnectionStreamMode::always: return true;
+            case ConnectionStreamMode::when_needed: break;
+        }
+        if (connection_listening_ || options_.log_level) return true;
+        if (governing_ == nullptr || governing_->halves.server_input->delivery() != InputDelivery::requests) {
+            return false;
+        }
+        return !supported_kinds(options_.input).empty();
+    }
+
+    // Asks the transport for the stream of the connection, once per connection, while the client needs it and the
+    // governing profile's entry for the transport offers one. Its headers are the ones a request outside any message
+    // carries: the revision, where the entry names it in a header (no method, no mirrored member).
     void open_connection_stream() {
-        if (!connection_listening_ || connection_stream_asked_ || closed_) return;
+        if (connection_stream_asked_ || closed_) return;
         if (transport_ != profile::Transport::streamable_http || contact_.phase != ContactPhase::open ||
-            governing_ == nullptr) {
+            governing_ == nullptr || !connection_needed()) {
             return;
         }
-        const profile::Profile& profile = *governing_->halves.profile;
-        const auto& http = profile.streamable_http();
+        const profile::ProfilePtr& governing = governing_->halves.profile;
+        const auto& http = governing->streamable_http();
         if (!http || !http->get_stream) return;
         connection_stream_asked_ = true;
         std::vector<HttpHeader> headers;
         for (const auto& header : http->request_headers) {
             if (header.scope == profile::HeaderScopeKind::every_message &&
                 header.value == profile::HeaderValue::protocol_version) {
-                headers.push_back({header.name, profile.revision()});
+                headers.push_back({header.name, governing->revision()});
             }
         }
-        if (http->version_header && handshake_answered_) headers.push_back({http->version_header->name, profile.revision()});
-        emit(Outgoing{std::string(), connection_unit, std::move(headers), OutgoingKind::open_connection_stream});
+        if (http->version_header && handshake_answered_) {
+            headers.push_back({http->version_header->name, governing->revision()});
+        }
+        emit(Outgoing{std::string(), connection_unit, std::move(headers), OutgoingKind::open_connection_stream,
+                      governing});
     }
 
     void fail_contact(ContactFailureKind kind, std::string message, std::vector<std::string> revisions = {},
@@ -1405,7 +1427,7 @@ private:
                 fail_contact(ContactFailureKind::malformed_answer,
                              "the handshake's result cannot be read: " + std::get<std::string>(read));
             }
-            emit(Outgoing{std::string(), connection_unit, {}, OutgoingKind::close});
+            emit(Outgoing{std::string(), connection_unit, {}, OutgoingKind::close, nullptr});
             return;
         }
         auto refusal = speaker.halves.open->read_version_refusal(message.outcome, *speaker.halves.profile);
@@ -1418,7 +1440,7 @@ private:
             }
             fail_contact(ContactFailureKind::handshake_refused, "the server refused the handshake's revision",
                          versions.supported);
-            emit(Outgoing{std::string(), connection_unit, {}, OutgoingKind::close});
+            emit(Outgoing{std::string(), connection_unit, {}, OutgoingKind::close, nullptr});
             return;
         }
         if (recognized_modern(message, status) && !reprobed_ && newest(true) != nullptr) {
@@ -1431,12 +1453,12 @@ private:
         if (status && refusing_status(*status)) {
             step(ref, method, "an error with a status after which the next step is another transport");
             fail_handshake_by_status();
-            emit(Outgoing{std::string(), connection_unit, {}, OutgoingKind::close});
+            emit(Outgoing{std::string(), connection_unit, {}, OutgoingKind::close, nullptr});
             return;
         }
         step(ref, method, "an error");
         fail_contact(ContactFailureKind::handshake_refused, "the server refused the handshake");
-        emit(Outgoing{std::string(), connection_unit, {}, OutgoingKind::close});
+        emit(Outgoing{std::string(), connection_unit, {}, OutgoingKind::close, nullptr});
     }
 
     // A server that refuses headers this client wrote as the revision says has a defect worth reporting.
@@ -1475,7 +1497,7 @@ private:
         Call& call = calls_.at(ref);
         // Only an answer to a call of the application shows that the server serves: the answers to the engine's own
         // requests (the probe, the handshake, the log level) come before any call can fail again.
-        if (call.purpose == Purpose::call) exits_in_row_ = 0;
+        if (call.purpose == Purpose::call) exits_in_row_ = renewals_in_row_ = 0;
         call.wire.reset();
         // The status of the exchange that carried the answer, read before the exchange ends: opening contact decides
         // from both.
@@ -1772,7 +1794,7 @@ private:
                 return;
             }
             // A change of the connection: kept while the client listens there, else droppable as before.
-            if (connection_listening_) exits_in_row_ = 0;
+            if (connection_listening_) exits_in_row_ = renewals_in_row_ = 0;
             push(ChangeEvent{std::move(event), std::nullopt}, !connection_listening_);
             return;
         }
@@ -1783,7 +1805,7 @@ private:
     // clock (from then on it has none), a change goes to the client, and an ending notice ends the call gracefully.
     void on_subscription_message(RequestRef ref, FeedEvent event) {
         Call& call = calls_.at(ref);
-        exits_in_row_ = 0;
+        exits_in_row_ = renewals_in_row_ = 0;
         const FeedEvent::Kind kind = event.kind;
         push(ChangeEvent{std::move(event), ref}, false);
         switch (kind) {
@@ -1917,6 +1939,54 @@ private:
             lose(ref, CallFailure{CallFailureKind::send_failed, "the transport could not deliver it"}, std::nullopt);
         }
     }
+    // The server no longer knew the session the unit's request carried. It did not take the request: a call goes out
+    // once more with a new id, under a new session, and fails when that one is not known either. The engine's own
+    // requests are not sent again (the handshake that opens the new session asks for the log level again). When the
+    // session in use ended, a new handshake opens another, once for every exchange that met the end, at most
+    // max_restarts times in a row without an answer between (then contact fails); the calls wait in the engine
+    // meanwhile, and what the server asked under the old session is ended.
+    void on_stream(UnitId unit, const SessionExpired& expired) {
+        if (unit != connection_unit) exchanges_.erase(unit);
+        std::vector<RequestRef> refs;
+        for (const auto& [id, entry] : wires_) {
+            if (unit != connection_unit && entry.unit == unit) refs.push_back(entry.ref);
+        }
+        for (const RequestRef ref : refs) {
+            const auto found = calls_.find(ref);
+            if (found == calls_.end()) continue;
+            Call& call = found->second;
+            if (call.purpose != Purpose::call || call.session_resent) {
+                lose(ref,
+                     CallFailure{CallFailureKind::http_status,
+                                 "the server did not know the session of the request, nor that of its second sending"},
+                     std::nullopt);
+                continue;
+            }
+            call.session_resent = true;
+            wires_.erase(*call.wire);
+            call.wire.reset();
+            call.held = true;
+            held_.push_back(ref);
+        }
+        const bool renew = expired.current && contact_.phase == ContactPhase::open && governing_ != nullptr &&
+                           governing_->handshake && contact_.verdict && contact_.verdict->kind == ServerKind::handshake;
+        if (renew) {
+            // A server that forgets every session it opens is not given new ones forever.
+            if (renewals_in_row_ >= options_.max_restarts) {
+                fail_contact(ContactFailureKind::too_many_restarts,
+                             "the server forgot the session more often in a row than the client opens a new one");
+                return;
+            }
+            ++renewals_in_row_;
+            diagnose(DiagnosticKind::session_renewed,
+                     "the server no longer knew the session; a new handshake opens another", unit);
+            end_asks();
+            start_handshake(*governing_, false);
+            return;
+        }
+        if (contact_.phase == ContactPhase::open) release_held();
+    }
+
     void on_stream(UnitId unit, const ProcessExited&) {
         if (transport_ != profile::Transport::stdio || unit != connection_unit) return;
         const ContactPhase phase = contact_.phase;
@@ -1980,6 +2050,7 @@ private:
     bool probe_restart_used_ = false;  // the one start after an end while the probe was out that does not count
     bool reopening_ = false;           // the process ended while contact was being opened: a new one is wanted
     std::size_t exits_in_row_ = 0;
+    std::size_t renewals_in_row_ = 0;  // HTTP: sessions renewed in a row without an answer between
     bool connection_listening_ = false;    // the client takes the connection's change notifications
     bool connection_stream_asked_ = false; // open_connection_stream was written for this connection
 

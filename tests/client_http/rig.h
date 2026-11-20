@@ -25,6 +25,7 @@
 #include "client_http/streamable.h"
 #include "neomcp/client/engine.h"
 #include "neomcp/client/transport.h"
+#include "neomcp/profile.h"
 
 namespace http_rig {
 
@@ -194,13 +195,22 @@ public:
         io_.run([this, &outgoing] { transport_->send(std::move(outgoing)); });
     }
 
-    // A POST of `line` on `unit`, with the engine's header fields `headers`.
+    // A POST of `line` on `unit`, with the engine's header fields `headers`, under `profile` (none: no revision in
+    // particular).
     void post(neomcp::UnitId unit, std::string line, std::vector<neomcp::HttpHeader> headers = {},
-              neomcp::OutgoingKind kind = neomcp::OutgoingKind::request) {
-        send(neomcp::Outgoing{std::move(line), unit, std::move(headers), kind});
+              neomcp::OutgoingKind kind = neomcp::OutgoingKind::request, neomcp::profile::ProfilePtr profile = nullptr) {
+        send(neomcp::Outgoing{std::move(line), unit, std::move(headers), kind, std::move(profile)});
     }
 
-    void end(neomcp::UnitId unit) { send(neomcp::Outgoing{std::string(), unit, {}, neomcp::OutgoingKind::end_unit}); }
+    void end(neomcp::UnitId unit) {
+        send(neomcp::Outgoing{std::string(), unit, {}, neomcp::OutgoingKind::end_unit, nullptr});
+    }
+
+    // The engine asks for the stream of the connection, with its fields, under `profile`.
+    void open_stream(std::vector<neomcp::HttpHeader> headers, neomcp::profile::ProfilePtr profile) {
+        send(neomcp::Outgoing{std::string(), neomcp::connection_unit, std::move(headers),
+                              neomcp::OutgoingKind::open_connection_stream, std::move(profile)});
+    }
 
     void close() {
         if (!transport_ || closed_) return;

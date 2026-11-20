@@ -431,7 +431,8 @@ TEST(ClientHttp, ClosingWhileExchangesRunDeliversNothingAfterwards) {
 TEST(ClientHttp, TheConnectionStreamIsNotOpenedByThisTransport) {
     auto server = answering();
     Driven driven(endpoint(server.url()));
-    driven.send(neomcp::Outgoing{std::string(), neomcp::connection_unit, {}, neomcp::OutgoingKind::open_connection_stream});
+    driven.send(neomcp::Outgoing{std::string(), neomcp::connection_unit, {}, neomcp::OutgoingKind::open_connection_stream,
+                                 nullptr});
     const auto seen = driven.recorder().until_end(neomcp::connection_unit);
     EXPECT_EQ(events_of<StreamLost>(seen).size(), 1u);
     EXPECT_EQ(server.count(), 0u);
