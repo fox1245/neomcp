@@ -37,6 +37,9 @@ Last updated: 2026-11-20.
 - **The client engine** (`neomcp/client/engine.h`): request ids and the pending table, both ways of opening and the
   stdio probe, the corrective retry of a refused revision, clocks as data, cancellation, progress, pings and the
   server's notifications as events; tested alone and paired in process with the server's session on every revision.
+- **Input handlers on the client** (`neomcp/client/input_handlers.h`): one handler per kind (form, URL, sampling,
+  roots), plain or coroutine, for both ways a server asks; capabilities declared only for the handlers that exist,
+  refusals by what was declared, forms checked against the restricted form before a handler sees them.
 
 ## In progress
 
@@ -50,16 +53,14 @@ forms: a blocking one under the plain name and a coroutine one with the prefix `
 
 In order; items on one line can be done side by side.
 
-1. Input handlers: one handler per kind of request (form, sampling, roots) that serves both mechanisms; capabilities
-   declared only for handlers that exist.
-2. `neomcp::Client`: the typed interface (tools with C++ types, lists with pagination, resources, prompts,
+1. `neomcp::Client`: the typed interface (tools with C++ types, lists with pagination, resources, prompts,
    completion), results checked against output schemas, limits for schemas a server sends, an in-memory transport.
-3. Change notifications for the client | the stdio transport (a child process, POSIX and Windows) | the HTTP transport
+2. Change notifications for the client | the stdio transport (a child process, POSIX and Windows) | the HTTP transport
    on libcurl with JSON answers, detection of the kind of server over HTTP, mirrored headers, and a client fixture
    for the official conformance suite in CI.
-4. Event streams for the HTTP transport: answers as streams, server requests on streams, sessions, the connection
+3. Event streams for the HTTP transport: answers as streams, server requests on streams, sessions, the connection
    stream, resumption.
-5. The HTTP+SSE transport of 2024-11-05 (client only) | every bound on what a server controls tested at its edge |
+4. The HTTP+SSE transport of 2024-11-05 (client only) | every bound on what a server controls tested at its edge |
    the official Python SDK's servers as peers, and the matrix of this client against this server over every
    transport and revision.
 
