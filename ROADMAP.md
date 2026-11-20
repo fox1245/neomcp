@@ -43,6 +43,10 @@ Last updated: 2026-11-20.
   typed tool calls with C++ types and output schema checks, lists with pagination, resources, prompts, completion;
   one thread per client, a bounded pool for plain input handlers, an in-memory transport and an in-process server;
   a lost read or list sent again once, a tool call never; a budget and limits for the schemas a server sends.
+- **The stdio transport of the client** (`neomcp::client_stdio`): a server started as a child process on POSIX and
+  Windows without a shell, a short named environment plus what the application adds, stderr inherited, captured or
+  discarded, the shutdown ladder (stdin closed, then the group ended), and a server that exits started again at most
+  `max_restarts` times in a row.
 
 ## In progress
 
@@ -56,7 +60,7 @@ forms: a blocking one under the plain name and a coroutine one with the prefix `
 
 In order; items on one line can be done side by side.
 
-1. Change notifications for the client | the stdio transport (a child process, POSIX and Windows) | the HTTP transport
+1. Change notifications for the client | the HTTP transport
    on libcurl with JSON answers, detection of the kind of server over HTTP, mirrored headers, and a client fixture
    for the official conformance suite in CI.
 2. Event streams for the HTTP transport: answers as streams, server requests on streams, sessions, the connection
