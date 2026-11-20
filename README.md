@@ -14,8 +14,8 @@
 ---
 
 neomcp is a C++ library for writing [Model Context Protocol](https://modelcontextprotocol.io) (MCP) servers and
-clients. Work in progress: servers over stdio and Streamable HTTP work today, the rest is listed under Status, and
-the interface may still change.
+clients. Work in progress: servers and clients over stdio and HTTP work today, authorization does not yet, and the
+interface may still change.
 
 ## Status
 
@@ -42,13 +42,31 @@ What exists now:
   resource can be reported as updated, and clients hear of it in the way their revision defines.
 - The server is run in CI against the official conformance suite for the revisions 2025-11-25 and 2026-07-28, and
   against the official Python SDK's client over stdio and HTTP.
+- A client (`neomcp::Client`, in `neomcp/client.h`) for the same five revisions. It starts a server as a child
+  process and speaks over its pipes (every revision), or speaks to an HTTP endpoint over Streamable HTTP (2025-03-26
+  to 2026-07-28) and over the older transport of events over HTTP (2024-11-05). Opening finds out which kind of
+  server answers and at which revision: one that names its revision on every request, one that opens with a
+  handshake, or one of the older HTTP transport. Every operation has a blocking form and a coroutine form.
+- What the client does on every transport, each where the governing revision defines it: tool calls, and typed ones
+  whose structured result is checked against the tool's output schema and decoded into a C++ type (from 2025-06-18;
+  on older revisions a typed call fails at once and sends nothing); lists followed over all their pages; resources
+  and resource templates; prompts; completion; progress; cancellation; the server's requests for input (a form from
+  2025-06-18, a completion from the client's model, the client's roots) answered by handlers the application
+  registers, in whichever way the revision carries them; and changes of what the server offers, taken from a
+  subscription. By default a tool call whose answer was lost is never sent again, and a read or a list is sent again
+  once. A stdio server that exits is started again at the next request, up to a bound.
+- A client that starts a server as a child process runs the command with the application's rights, and a variable
+  of the application's environment reaches the server only when the application passes it. The HTTP client honours
+  the proxy settings of the environment unless told otherwise, follows redirects only within the endpoint's origin,
+  and always verifies certificates.
+- The client is run in CI against the official conformance suite: every client scenario that needs no
+  authorization passes at 2025-11-25 and 2026-07-28. It is also run against the library's own servers over every
+  transport and revision, against servers that serve only one of the two eras, and against the official Python
+  SDK's servers over stdio, Streamable HTTP and the older transport of events over HTTP.
 
 Still planned:
 
-- The client. A client that starts a server as a child process (over stdio) runs the command with the
-  application's rights, and a variable of the application's environment reaches the server only when the
-  application passes it.
-- Authorization.
+- Authorization, for the server and the client.
 
 [ROADMAP.md](ROADMAP.md) lists the work that is in progress and the work that has not been started.
 
@@ -68,9 +86,13 @@ ctest --test-dir build --output-on-failure
 Options: `NEOMCP_BUILD_TESTS` (default ON when neomcp is the top-level project) and `NEOMCP_WARNINGS_AS_ERRORS`
 (default OFF). Every `profiles/*.json` is built into the library.
 
+`NEOMCP_HTTP_CLIENT` (default ON) builds the client's HTTP transports, which need libcurl 8.5.0 or newer from the
+system (with its headers); configure stops with a message when it is missing. A program that only serves, or a
+client that only starts servers as child processes, can be built with the option OFF and needs no libcurl.
+
 `NEOMCP_INTEROP_TESTS` (default OFF) adds tests that drive a stdio server and an HTTP server with the official
-Python SDK's client. Install `tests/interop/requirements.txt` into a Python environment and pass its interpreter as
-`NEOMCP_INTEROP_PYTHON`.
+Python SDK's client, and the official Python SDK's servers with this library's client. Install
+`tests/interop/requirements.txt` into a Python environment and pass its interpreter as `NEOMCP_INTEROP_PYTHON`.
 
 ## A first server
 
