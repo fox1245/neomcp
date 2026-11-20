@@ -4,6 +4,7 @@
 // peer's gates and on what the transport delivers; a test measures time only where a least wait is what it shows.
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -881,8 +882,16 @@ TEST(ClientHttp, AServerRequestOnTheConnectionStreamIsAnsweredByPost) {
     for (const auto& request : requests) {
         order.push_back(request.method == "GET" ? "GET" : (is_answer(request) ? "answer" : request.rpc_method()));
     }
-    EXPECT_EQ(order,
-              (std::vector<std::string>{"initialize", "notifications/initialized", "GET", "tools/call", "answer"}));
+    // The notification that the client is ready and the GET of the connection's stream go out in that order, but on
+    // two exchanges of their own: which of the two the server reads first is not the client's to decide. The call
+    // waits for the head of the stream, and the answer for the call's request.
+    ASSERT_EQ(order.size(), 5u);
+    EXPECT_EQ(order[0], "initialize");
+    const std::vector<std::string> ready_and_stream{"GET", "notifications/initialized"};
+    EXPECT_TRUE(std::is_permutation(order.begin() + 1, order.begin() + 3, ready_and_stream.begin()))
+        << order[1] << ", " << order[2];
+    EXPECT_EQ(order[3], "tools/call");
+    EXPECT_EQ(order[4], "answer");
     for (const auto& request : requests) {
         if (!is_answer(request)) continue;
         EXPECT_EQ(request.message()["id"], 7);
