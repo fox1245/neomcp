@@ -1,1 +1,1 @@
-The HTTP pieces a client shares with a server: the reader of WWW-Authenticate challenges and the Bearer challenge.
+The HTTP pieces a client shares with a server: the reader of WWW-Authenticate challenges and the Bearer challenge, and the form encoding with the Basic credentials of an OAuth client.
