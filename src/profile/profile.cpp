@@ -671,9 +671,17 @@ private:
                 std::string(declared_name(body.at("cancel"), declared_cancel(Transport::stdio)))};
         }
         if (const auto http_sse = object.find("http_sse")) {
-            const Object body(*http_sse, {{"cancel", true}});
-            profile_.http_sse_ = HttpSseTransport{
-                std::string(declared_name(body.at("cancel"), declared_cancel(Transport::http_sse)))};
+            const Object body(*http_sse, {{"cancel", true}, {"endpoint_event", true}, {"message_event", true}});
+            HttpSseTransport transport;
+            transport.cancel = std::string(declared_name(body.at("cancel"), declared_cancel(Transport::http_sse)));
+            transport.endpoint_event = nonempty_string_of(body.at("endpoint_event"));
+            const Node message = body.at("message_event");
+            transport.message_event = nonempty_string_of(message);
+            if (transport.message_event == transport.endpoint_event) {
+                fail(message.pointer(), "an event type other than endpoint_event",
+                     "'" + transport.message_event + "' is the type of the endpoint event too");
+            }
+            profile_.http_sse_ = std::move(transport);
         }
         if (const auto streamable = object.find("streamable_http")) {
             profile_.streamable_http_ = streamable_http(*streamable);

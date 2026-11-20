@@ -67,8 +67,15 @@ struct StdioTransport {
     std::string cancel;  // the declared name of the cancellation mechanism
 };
 
+// The older transport of events over HTTP: the client holds an event stream open (a GET), whose first event names
+// where its messages go (each one a POST there), and the server's messages arrive as events of the stream.
 struct HttpSseTransport {
     std::string cancel;
+    // The type of the event that names where the client's messages go: the stream's first event, its data a URI
+    // reference.
+    std::string endpoint_event;
+    // The type of the events whose data is one message of the server.
+    std::string message_event;
 };
 
 // The version a request without a version header is taken to speak.

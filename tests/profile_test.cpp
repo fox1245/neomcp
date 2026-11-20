@@ -191,6 +191,9 @@ TEST(Values, RevisionWithServerSentEvents) {
     ASSERT_NE(profile, nullptr);
     ASSERT_TRUE(profile->http_sse());
     EXPECT_EQ(profile->http_sse()->cancel, "cancelled_notification");
+    // The event types of basic/transports.mdx of that revision.
+    EXPECT_EQ(profile->http_sse()->endpoint_event, "endpoint");
+    EXPECT_EQ(profile->http_sse()->message_event, "message");
     EXPECT_FALSE(profile->streamable_http());
     ASSERT_TRUE(profile->stdio());
 }
@@ -512,6 +515,28 @@ TEST(Rejects, UndeclaredCancelName) {
     json document = builtin_document(modern_revision);
     document["transports"]["stdio"]["cancel"] = "close_response_stream";
     EXPECT_EQ(rejected(document).pointer, "/transports/stdio/cancel");
+}
+
+TEST(Rejects, EventStreamWithoutItsEventNames) {
+    for (const char* name : {"endpoint_event", "message_event"}) {
+        json document = builtin_document(sse_revision);
+        document["transports"]["http_sse"].erase(name);
+        EXPECT_EQ(rejected(document).pointer, std::string("/transports/http_sse/") + name);
+    }
+}
+
+TEST(Rejects, EventStreamWithAnEmptyEventName) {
+    for (const char* name : {"endpoint_event", "message_event"}) {
+        json document = builtin_document(sse_revision);
+        document["transports"]["http_sse"][name] = "";
+        EXPECT_EQ(rejected(document).pointer, std::string("/transports/http_sse/") + name);
+    }
+}
+
+TEST(Rejects, EventStreamWhoseTwoEventsShareAName) {
+    json document = builtin_document(sse_revision);
+    document["transports"]["http_sse"]["message_event"] = "endpoint";
+    EXPECT_EQ(rejected(document).pointer, "/transports/http_sse/message_event");
 }
 
 TEST(Rejects, ExtraMemberInMechanisms) {
