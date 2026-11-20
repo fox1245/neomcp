@@ -4,8 +4,11 @@
 
 #include <cstddef>
 #include <memory>
+#include <variant>
 #include <vector>
 
+#include "client_http/transfers.h"
+#include "client_http/url_guard.h"
 #include "neomcp/client/engine.h"
 #include "neomcp/client/mechanism.h"
 #include "neomcp/client/result.h"
@@ -28,5 +31,16 @@ struct HttpTransportSettings {
 // An HTTP transport for `endpoint`. Fails with invalid_options for a URL or options that cannot work, and with
 // transport for an HTTP library that cannot serve it.
 Result<std::unique_ptr<Transport>> make_http_transport(HttpEndpoint endpoint, HttpTransportSettings settings);
+
+// What every HTTP transport of this target makes of an endpoint before it starts: the guard of the URLs a server
+// supplies, the bounds of the transfer thread, and libcurl's global state.
+struct HttpParts {
+    UrlGuard guard;
+    TransferLimits limits;
+    std::shared_ptr<CurlGlobal> global;
+};
+
+// The parts for `endpoint`, or why it cannot serve: as make_http_transport fails.
+std::variant<HttpParts, ClientError> prepare_http(const HttpEndpoint& endpoint, const HttpTransportSettings& settings);
 
 }  // namespace neomcp::detail::http_client

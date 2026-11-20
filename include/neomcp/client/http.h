@@ -14,6 +14,16 @@
 // authorities or HttpEndpoint::ca_file; there is no option that turns verification off. Proxies are those of the
 // environment unless HttpEndpoint::proxy says otherwise.
 //
+// The older transport of events over HTTP (the revision 2024-11-05). Client::open with an HttpEndpoint speaks it where
+// an enabled revision defines it and the endpoint refuses the handshake of Streamable HTTP with 400, 404 or 405 (or
+// where the verdict given as ClientOptions::prior names it, or no enabled revision defines Streamable HTTP). The
+// client then holds a GET of the endpoint's URL open as an event stream; its first event, within
+// HttpEndpoint::endpoint_timeout, names where the client's messages go: a URI reference, resolved against the
+// endpoint's URL, that must keep the endpoint's origin and carry no user information. Every message is a POST there,
+// and the server's messages arrive as events of the stream; the names of both events are the profile's. A stream that
+// ends ends the connection: the next request opens a new one and repeats the handshake. make_transport() makes only
+// the Streamable HTTP transport and never hands over.
+//
 // Threads. Each transport runs one thread of its own on which all of its exchanges proceed; whatever it reads reaches
 // the client on the client's thread.
 #pragma once

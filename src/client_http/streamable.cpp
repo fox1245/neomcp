@@ -54,6 +54,8 @@
 #include <asio/steady_timer.hpp>
 #include <asio/use_awaitable.hpp>
 
+#include "client_http/delivery.h"
+#include "client_http/http_sse.h"
 #include "client_http/transfers.h"
 #include "client_http/url_guard.h"
 #include "neomcp/client.h"
@@ -141,65 +143,6 @@ SessionRules session_rules(const HttpTransportSettings& settings) {
     }
     return rules;
 }
-
-// What the transfer thread read, carried to the client's thread: one queue, drained there by one drain at a time.
-class Delivery : public std::enable_shared_from_this<Delivery> {
-public:
-    using Handler = std::function<void(UnitId unit, TransferItem item)>;
-
-    // On the client's thread.
-    void attach(asio::any_io_executor executor, Handler handler) {
-        std::lock_guard lock(mutex_);
-        executor_ = std::move(executor);
-        handler_ = std::move(handler);
-        attached_ = true;
-    }
-
-    // On the client's thread: nothing more is delivered.
-    void detach() {
-        std::lock_guard lock(mutex_);
-        attached_ = false;
-        handler_ = nullptr;
-        items_.clear();
-    }
-
-    // Any thread.
-    void push(UnitId unit, TransferItem item) {
-        std::lock_guard lock(mutex_);
-        if (!attached_) return;
-        items_.emplace_back(unit, std::move(item));
-        if (drain_posted_) return;
-        drain_posted_ = true;
-        asio::post(executor_, [self = shared_from_this()] { self->drain(); });
-    }
-
-private:
-    // On the client's thread, where alone the handler runs and is cleared, so a delivery never races detach().
-    void drain() {
-        while (true) {
-            std::pair<UnitId, TransferItem> next{connection_unit, StreamEnded{}};
-            Handler handler;  // a copy: the handler may detach the delivery while it runs
-            {
-                std::lock_guard lock(mutex_);
-                if (!attached_ || items_.empty()) {
-                    drain_posted_ = false;
-                    return;
-                }
-                next = std::move(items_.front());
-                items_.pop_front();
-                handler = handler_;
-            }
-            handler(next.first, std::move(next.second));
-        }
-    }
-
-    std::mutex mutex_;
-    asio::any_io_executor executor_;
-    Handler handler_;
-    bool attached_ = false;
-    bool drain_posted_ = false;
-    std::deque<std::pair<UnitId, TransferItem>> items_;
-};
 
 class StreamableTransport final : public Transport {
 public:
@@ -728,7 +671,8 @@ private:
         std::visit(
             [&](auto& event) {
                 using Event = std::decay_t<decltype(event)>;
-                if constexpr (!std::is_same_v<Event, TransferHead> && !std::is_same_v<Event, TransferMessage>) {
+                if constexpr (!std::is_same_v<Event, TransferHead> && !std::is_same_v<Event, TransferMessage> &&
+                              !std::is_same_v<Event, TransferEvent>) {
                     events.stream_event(unit, std::move(event));
                 }
             },
@@ -780,7 +724,7 @@ private:
 
 }  // namespace
 
-Result<std::unique_ptr<Transport>> make_http_transport(HttpEndpoint endpoint, HttpTransportSettings settings) {
+std::variant<HttpParts, ClientError> prepare_http(const HttpEndpoint& endpoint, const HttpTransportSettings& settings) {
     auto guard = UrlGuard::for_endpoint(endpoint.url);
     if (auto* problem = std::get_if<std::string>(&guard)) {
         return settings_error(ClientErrorKind::invalid_options, *problem);
@@ -806,6 +750,9 @@ Result<std::unique_ptr<Transport>> make_http_transport(HttpEndpoint endpoint, Ht
     if (endpoint.delete_timeout.count() <= 0) {
         return settings_error(ClientErrorKind::invalid_options, "delete_timeout is not positive");
     }
+    if (endpoint.endpoint_timeout.count() <= 0) {
+        return settings_error(ClientErrorKind::invalid_options, "endpoint_timeout is not positive");
+    }
     if (endpoint.max_response_header_bytes == 0) {
         return settings_error(ClientErrorKind::invalid_options, "max_response_header_bytes is zero");
     }
@@ -830,10 +777,17 @@ Result<std::unique_ptr<Transport>> make_http_transport(HttpEndpoint endpoint, Ht
     limits.max_redirects = endpoint.max_redirects;
     limits.proxy = endpoint.proxy;
     limits.ca_file = endpoint.ca_file;
+    return HttpParts{std::get<UrlGuard>(std::move(guard)), std::move(limits), std::move(global)};
+}
+
+Result<std::unique_ptr<Transport>> make_http_transport(HttpEndpoint endpoint, HttpTransportSettings settings) {
+    auto prepared = prepare_http(endpoint, settings);
+    if (auto* error = std::get_if<ClientError>(&prepared)) return std::move(*error);
+    HttpParts parts = std::get<HttpParts>(std::move(prepared));
     SessionRules rules = session_rules(settings);
-    std::unique_ptr<Transport> transport = std::make_unique<StreamableTransport>(
-        std::move(endpoint), std::get<UrlGuard>(std::move(guard)), std::move(rules), std::move(limits),
-        std::move(global));
+    std::unique_ptr<Transport> transport =
+        std::make_unique<StreamableTransport>(std::move(endpoint), std::move(parts.guard), std::move(rules),
+                                              std::move(parts.limits), std::move(parts.global));
     return transport;
 }
 
@@ -842,6 +796,7 @@ Result<std::unique_ptr<Transport>> make_http_transport(HttpEndpoint endpoint, Ht
 namespace {
 
 using detail::http_client::HttpTransportSettings;
+using detail::http_client::make_http_sse_transport;
 using detail::http_client::make_http_transport;
 
 HttpTransportSettings settings_of(const ClientOptions& options) {
@@ -852,6 +807,84 @@ HttpTransportSettings settings_of(const ClientOptions& options) {
     return settings;
 }
 
+// Opening an HTTP endpoint. Streamable HTTP is tried first; when its handshake is refused by a status after which the
+// endpoint may serve the older transport of events over HTTP (ClientError::next_transport), that transport is tried on
+// the same endpoint, with a client of its own: the transports differ in where every answer comes, so the engine that
+// spoke the first cannot speak the second. A verdict of the older transport (ClientOptions::prior) goes there
+// directly; when it fails there, the endpoint is asked once more from the start, without the verdict. An endpoint
+// whose enabled revisions define only the older transport goes there directly too.
+struct HttpPlan {
+    bool streamable = false;  // an enabled profile defines Streamable HTTP
+    bool events = false;      // an enabled profile defines the transport of events over HTTP
+    bool events_first = false;
+    bool prior_events = false;  // the verdict names the transport of events over HTTP
+};
+
+HttpPlan plan_of(const ClientOptions& options) {
+    std::vector<profile::ProfilePtr> profiles = options.profiles;
+    if (profiles.empty()) {
+        for (const auto revision : profile::builtin_revisions()) profiles.push_back(profile::builtin(revision));
+    }
+    HttpPlan plan;
+    for (const profile::ProfilePtr& one : profiles) {
+        if (!one) continue;
+        plan.streamable = plan.streamable || one->streamable_http().has_value();
+        plan.events = plan.events || one->http_sse().has_value();
+    }
+    plan.prior_events = plan.events && options.prior && options.prior->transport == profile::Transport::http_sse;
+    plan.events_first = plan.prior_events || (plan.events && !plan.streamable);
+    return plan;
+}
+
+// Whether a verdict that failed is worth a second look from the start: not when the options cannot work, nor when the
+// server wants authorization the client cannot give (it would want it on every step).
+bool probe_again(const ClientError& error) {
+    return error.kind != ClientErrorKind::invalid_options && error.kind != ClientErrorKind::authorization_required;
+}
+
+// The failure of both transports: the second's kind, and what each met.
+ClientError both_failed(const ClientError& first, ClientError second) {
+    second.message = first.message + "; then, over the transport of events over HTTP: " + second.message;
+    second.next_transport.reset();
+    return second;
+}
+
+Result<Client> open_streamable(ClientOptions options, HttpEndpoint endpoint) {
+    auto transport = make_http_transport(std::move(endpoint), settings_of(options));
+    if (!transport) return std::move(transport).error();
+    return Client::open(std::move(options), std::move(transport).value());
+}
+
+Result<Client> open_events(ClientOptions options, HttpEndpoint endpoint) {
+    auto transport = make_http_sse_transport(std::move(endpoint), settings_of(options));
+    if (!transport) return std::move(transport).error();
+    return Client::open(std::move(options), std::move(transport).value());
+}
+
+asio::awaitable<Result<Client>> async_open_streamable(ClientOptions options, HttpEndpoint endpoint) {
+    auto transport = make_http_transport(std::move(endpoint), settings_of(options));
+    if (!transport) {
+        Result<Client> failed(std::move(transport).error());
+        co_return failed;
+    }
+    Result<Client> opened = co_await Client::async_open(std::move(options), std::move(transport).value());
+    co_return opened;
+}
+
+asio::awaitable<Result<Client>> async_open_events(ClientOptions options, HttpEndpoint endpoint) {
+    auto transport = make_http_sse_transport(std::move(endpoint), settings_of(options));
+    if (!transport) {
+        Result<Client> failed(std::move(transport).error());
+        co_return failed;
+    }
+    Result<Client> opened = co_await Client::async_open(std::move(options), std::move(transport).value());
+    co_return opened;
+}
+
+bool hands_over(const Result<Client>& client) {
+    return !client && client.error().next_transport == profile::Transport::http_sse;
+}
+
 }  // namespace
 
 Result<std::unique_ptr<Transport>> make_transport(HttpEndpoint endpoint) {
@@ -859,15 +892,37 @@ Result<std::unique_ptr<Transport>> make_transport(HttpEndpoint endpoint) {
 }
 
 Result<Client> Client::open(ClientOptions options, HttpEndpoint endpoint) {
-    auto transport = make_http_transport(std::move(endpoint), settings_of(options));
-    if (!transport) return std::move(transport).error();
-    return open(std::move(options), std::move(transport).value());
+    const HttpPlan plan = plan_of(options);
+    if (plan.events_first) {
+        Result<Client> client = open_events(options, endpoint);
+        if (client || !plan.prior_events || !plan.streamable || !probe_again(client.error())) return client;
+        options.prior.reset();
+    }
+    if (!plan.events) return open_streamable(std::move(options), std::move(endpoint));
+    Result<Client> client = open_streamable(options, endpoint);
+    if (!hands_over(client)) return client;
+    Result<Client> events = open_events(std::move(options), std::move(endpoint));
+    if (events) return events;
+    return both_failed(client.error(), events.error());
 }
 
 asio::awaitable<Result<Client>> Client::async_open(ClientOptions options, HttpEndpoint endpoint) {
-    auto transport = make_http_transport(std::move(endpoint), settings_of(options));
-    if (!transport) return failed_open(std::move(transport).error());
-    return async_open(std::move(options), std::move(transport).value());
+    const HttpPlan plan = plan_of(options);
+    if (plan.events_first) {
+        Result<Client> client = co_await async_open_events(options, endpoint);
+        if (client || !plan.prior_events || !plan.streamable || !probe_again(client.error())) co_return client;
+        options.prior.reset();
+    }
+    if (!plan.events) {
+        Result<Client> client = co_await async_open_streamable(std::move(options), std::move(endpoint));
+        co_return client;
+    }
+    Result<Client> client = co_await async_open_streamable(options, endpoint);
+    if (!hands_over(client)) co_return client;
+    Result<Client> events = co_await async_open_events(std::move(options), std::move(endpoint));
+    if (events) co_return events;
+    Result<Client> failed(both_failed(client.error(), events.error()));
+    co_return failed;
 }
 
 }  // namespace neomcp

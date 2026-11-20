@@ -103,6 +103,12 @@ struct TransferRequest {
     // The exchange starts no earlier than this (the wait before a stream is resumed). A request that waits is ended
     // by remove() and replaced by a later submit() of its unit as a running exchange is.
     std::chrono::steady_clock::time_point not_before{};
+    // The event stream of the answer is read with the type of each event: every event that carries data comes as a
+    // TransferEvent, whatever its type, and the caller decides what the type means. Otherwise only the events of the
+    // default type carry messages (TransferMessage), and the others are dropped.
+    bool typed_events = false;
+    // The body of the answer is read and dropped whatever its type: only the head and the end of the exchange come.
+    bool discard_body = false;
 };
 
 // The head of a response, with the plan for its body.
@@ -118,8 +124,15 @@ struct TransferMessage {
     std::string text;
 };
 
-using TransferItem =
-    std::variant<TransferHead, TransferMessage, StreamEventId, StreamRetryAdvice, StreamEnded, StreamLost, SendFailed>;
+// One event of a stream read with typed events (TransferRequest::typed_events): its type and its data, which is not
+// empty. Longer than the bound when the bound was exceeded, as a TransferMessage is.
+struct TransferEvent {
+    std::string type;
+    std::string data;
+};
+
+using TransferItem = std::variant<TransferHead, TransferMessage, TransferEvent, StreamEventId, StreamRetryAdvice,
+                                  StreamEnded, StreamLost, SendFailed>;
 
 // Called on the transfer thread for every item of a unit's exchange.
 using TransferSink = std::function<void(UnitId unit, TransferItem item)>;

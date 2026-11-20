@@ -440,13 +440,26 @@ TEST(ClientHttp, ProbeAConnectFailureIsAnErrorWithoutFallback) {
 
 // Step 2: the handshake.
 
+// A refusing status goes on to step 3 where a revision defines the transport of events over HTTP (this peer answers
+// its GET without an event stream); without such a revision it is an error.
 TEST(ClientHttp, HandshakeARefusingStatusIsAnError) {
     for (const int status : {400, 404, 405}) {
         ProbePeer peer(status_only(status), status_only(status));
         auto client = open_against(peer);
         ASSERT_FALSE(client);
-        EXPECT_EQ(client.error().kind, ClientErrorKind::http_status) << client.error().message;
+        EXPECT_EQ(client.error().kind, ClientErrorKind::transport) << client.error().message;
         EXPECT_EQ(peer.posts_of("initialize"), 1u);
+        std::size_t gets = 0;
+        for (const auto& request : peer.server().requests()) gets += request.method == "GET" ? 1 : 0;
+        EXPECT_EQ(gets, 1u);
+
+        ProbePeer streamable_only(status_only(status), status_only(status));
+        neomcp::ClientOptions options = client_test::only({modern, legacy});
+        auto refused = open_against(streamable_only, std::move(options));
+        ASSERT_FALSE(refused);
+        EXPECT_EQ(refused.error().kind, ClientErrorKind::http_status) << refused.error().message;
+        EXPECT_FALSE(refused.error().next_transport);
+        EXPECT_EQ(streamable_only.posts_of("initialize"), 1u);
     }
 }
 

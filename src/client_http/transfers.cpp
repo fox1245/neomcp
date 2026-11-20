@@ -459,6 +459,7 @@ struct TransferLoop::Impl {
             length = -1;
         }
         BodyPlan plan = plan_body(status, types, static_cast<long long>(length));
+        if (transfer.request.discard_body) plan.kind = BodyKind::discard;
         transfer.kind = plan.kind;
         if (plan.kind == BodyKind::event_stream) {
             transfer.events.emplace(limits.max_message_bytes);
@@ -511,7 +512,10 @@ struct TransferLoop::Impl {
         }
         const auto status = transfer.events->feed(std::string_view(data, bytes), [&](http::SseItem item) {
             if (auto* event = std::get_if<http::SseEvent>(&item)) {
-                if (event->type == http::sse_default_event_type && !event->data.empty()) {
+                if (event->data.empty()) return;
+                if (transfer.request.typed_events) {
+                    loop.post(unit, TransferEvent{std::move(event->type), std::move(event->data)});
+                } else if (event->type == http::sse_default_event_type) {
                     loop.post(unit, TransferMessage{std::move(event->data)});
                 }
             } else if (auto* id = std::get_if<http::SseLastEventId>(&item)) {
@@ -522,7 +526,11 @@ struct TransferLoop::Impl {
         });
         if (status == http::SseParser::Status::too_large) {
             transfer.abort = Abort::message_bound;
-            loop.post(unit, TransferMessage{transfer.events->take_oversized()});
+            if (transfer.request.typed_events) {
+                loop.post(unit, TransferEvent{std::string(), transfer.events->take_oversized()});
+            } else {
+                loop.post(unit, TransferMessage{transfer.events->take_oversized()});
+            }
             return CURL_WRITEFUNC_ERROR;
         }
         return bytes;

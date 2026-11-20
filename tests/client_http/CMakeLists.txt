@@ -9,11 +9,13 @@ endif()
 
 add_executable(neomcp_client_http_test
     client_http_test.cpp
+    http_sse_test.cpp
     sse_parser_test.cpp
     streams_test.cpp
     transfer_loop_test.cpp
     transport_test.cpp
     url_guard_test.cpp
+    ../support/http_sse_server.cpp
     ../support/scripted_http_server.cpp)
 target_link_libraries(neomcp_client_http_test PRIVATE neomcp::client_http neomcp::client neomcp::http_base neomcp::http
     neomcp::server asio::asio GTest::gtest_main Threads::Threads)
