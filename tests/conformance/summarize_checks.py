@@ -8,8 +8,11 @@ Usage:
       that does not exist is reported and skipped.
 
   summarize_checks.py --check-listing EXPECTATIONS REVISION=LISTING...
-      Compare the client scenarios each LISTING (the output of the runner's `list --requirements REVISION`) names with
-      the `required` lists of EXPECTATIONS (client-scenarios.json), and fail on any difference.
+      Compare the client scenarios each LISTING (the output of the runner's `list --requirements REVISION`) names, in
+      its client section and among the scenarios of the client leg it runs but never scores, with the `required` and
+      `not_scored` lists of EXPECTATIONS (client-scenarios.json). A scenario the runner lists that the expectations do
+      not name, or one they name that the runner does not list, fails; one listed in the other of the two sections
+      is reported.
 
   summarize_checks.py --list-runs EXPECTATIONS
       Print the single runs of the client gate, one per line: profile mode, revision, scenario.
@@ -19,7 +22,8 @@ Usage:
       `exit-code` and the one result folder the runner wrote there. A run passes when the runner exited 0, its
       checks.json exists and is not empty, no check is a FAILURE or a WARNING, every check id the expectations name is
       there with a SUCCESS, every row they name is a SUCCESS (not SKIPPED), and the fixture's last line on standard
-      output says it completed. A run listed as expected to fail must fail, and every other run must pass.
+      output says it completed. A run listed as expected to fail must fail, and every other run must pass. Every
+      check of every run is printed with its id, name and status, so that a failure can be read in the job's log.
 """
 
 import json
@@ -31,7 +35,10 @@ FAILING = {"FAILURE", "WARNING"}
 MODES = ("run", "all")
 FIXTURE = "neomcp-conformance-client"
 CLIENT_SECTION = "Client scenarios (test against a client):"
+NOT_SCORED_SECTION = "Run and reported, but never scored:"
 ITEM_PREFIX = "- "
+LEG_SEPARATOR = " ["
+CLIENT_LEG = "client"
 
 
 def summarize(root):
@@ -79,6 +86,27 @@ def listed_client_scenarios(text):
     return names
 
 
+def listed_not_scored_client_scenarios(text):
+    """The scenarios of the client leg in the section of those run but never scored: each item reads
+    "- <scenario> [<leg>]", under lines that name a reason. Empty when the listing has no such section."""
+    names = []
+    inside = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not inside:
+            inside = stripped == NOT_SCORED_SECTION
+            continue
+        if not stripped:
+            break
+        if not stripped.startswith(ITEM_PREFIX):
+            continue  # the line that names the reason of the items below it
+        item = stripped[len(ITEM_PREFIX):].strip()
+        name, separator, leg = item.rpartition(LEG_SEPARATOR)
+        if separator and leg.rstrip("]") == CLIENT_LEG:
+            names.append(name.strip())
+    return names
+
+
 def check_listing(expectations_path, pairs):
     expectations = load(expectations_path)
     required = expectations.get("required", {})
@@ -93,20 +121,27 @@ def check_listing(expectations_path, pairs):
             print(text)
             status = 1
             continue
-        want = set(required.get(revision, []))
-        have = set(names)
-        if want == have:
-            print(f"{revision}: the runner lists the {len(have)} client scenarios the expectations name")
-            continue
-        status = 1
+        unscored = listed_not_scored_client_scenarios(text)
+        want_scored = set(required.get(revision, []))
+        want_unscored = set(expectations.get("not_scored", {}).get(revision, []))
+        have_scored = set(names)
+        have_unscored = set(unscored)
+        print(f"{revision}: the runner lists {len(have_scored)} scored and {len(have_unscored)} unscored client scenarios")
+        want = want_scored | want_unscored
+        have = have_scored | have_unscored
         for name in sorted(have - want):
             print(f"{revision}: the runner lists {name}, which the expectations do not name")
+            status = 1
         for name in sorted(want - have):
             print(f"{revision}: the expectations name {name}, which the runner does not list")
+            status = 1
+        for name in sorted((have_scored & want_unscored) | (have_unscored & want_scored)):
+            print(f"{revision}: {name} is listed in the other section than the expectations name it in")
     for revision, scenarios in expectations.get("run", {}).items():
+        named = set(required.get(revision, [])) | set(expectations.get("not_scored", {}).get(revision, []))
         for name in scenarios:
-            if name not in required.get(revision, []):
-                print(f"{revision}: {name} is run but not required")
+            if name not in named:
+                print(f"{revision}: {name} is run but the runner's lists do not name it")
                 status = 1
     return status
 
@@ -155,6 +190,17 @@ def fixture_status(result_folder):
     return status if isinstance(status, dict) and status.get("fixture") == FIXTURE else None
 
 
+def print_checks(folder):
+    """Every check of the run's result folder, one line each."""
+    checks, _, why = result_checks(folder)
+    if checks is None:
+        print(f"      (no checks: {why})")
+        return
+    for check in checks:
+        if isinstance(check, dict):
+            print(f"      check {check.get('id')} {check.get('name', '')} {check.get('status')}")
+
+
 def judge(expectations, folder, scenario):
     """The problems of one single run; empty when it passed."""
     problems = []
@@ -201,7 +247,8 @@ def client_gate(expectations_path, root):
         for revision, scenarios in sorted(expectations.get("run", {}).items()):
             for scenario in scenarios:
                 key = f"{scenario}@{revision}"
-                problems = judge(expectations, os.path.join(root, mode, revision, scenario), scenario)
+                folder = os.path.join(root, mode, revision, scenario)
+                problems = judge(expectations, folder, scenario)
                 listed = key in expected.get(mode, [])
                 if not problems and not listed:
                     print(f"pass  {mode} {key}")
@@ -215,6 +262,7 @@ def client_gate(expectations_path, root):
                     for problem in problems:
                         print(f"      {problem}")
                     status = 1
+                print_checks(folder)
     return status
 
 

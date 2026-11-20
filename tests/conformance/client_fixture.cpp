@@ -202,6 +202,19 @@ struct Flow {
         tools(client);
         close(client);
     }
+
+    // The input schema of the scenario's focal tool, as the client keeps it, sent back through its echo tool: the
+    // scenario compares it with the schema it served.
+    void schema_preservation() {
+        auto client = open();
+        std::optional<json> kept;
+        for (const neomcp::ToolDefinition& tool : tools(client)) {
+            if (tool.name == "json_schema_2020_12_tool") kept = tool.input_schema;
+        }
+        if (!kept) throw Failure{"the listing holds no tool json_schema_2020_12_tool"};
+        call(client, "json_schema_echo", json{{"schema", std::move(*kept)}});
+        close(client);
+    }
 };
 
 using Scenario = void (Flow::*)();
@@ -218,6 +231,7 @@ const std::map<std::string, Scenario, std::less<>>& scenarios() {
         {"http-custom-headers", &Flow::custom_headers},
         {"http-invalid-tool-headers", &Flow::invalid_tool_headers},
         {"json-schema-ref-no-deref", &Flow::schema_ref},
+        {"json-schema-2020-12-preservation", &Flow::schema_preservation},
     };
     return table;
 }

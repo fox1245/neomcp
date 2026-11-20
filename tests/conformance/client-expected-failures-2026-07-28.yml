@@ -27,3 +27,10 @@ client:
   - auth/iss-unexpected
   - auth/iss-normalized
   - auth/metadata-issuer-mismatch
+  # Run but never scored: extensions of authorization.
+  - auth/client-credentials-jwt
+  - auth/client-credentials-basic
+  - auth/enterprise-managed-authorization
+  - auth/dpop
+  - auth/dpop-nonce
+  - auth/wif-jwt-bearer

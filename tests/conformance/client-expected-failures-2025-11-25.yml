@@ -16,5 +16,15 @@ client:
   - auth/token-endpoint-auth-post
   - auth/token-endpoint-auth-none
   - auth/pre-registration
+  # Run but never scored: extensions of authorization.
+  - auth/client-credentials-jwt
+  - auth/client-credentials-basic
+  - auth/enterprise-managed-authorization
+  - auth/dpop
+  - auth/dpop-nonce
+  - auth/wif-jwt-bearer
   # A stream that ends before its answer is not resumed yet.
   - sse-retry
+  # The server's request for the form does not reach the client's handler yet, and the call waits until its clock
+  # runs out: requests of a server on event streams come with the next step of the HTTP transport.
+  - elicitation-sep1034-client-defaults
