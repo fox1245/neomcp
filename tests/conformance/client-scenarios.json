@@ -190,13 +190,7 @@
     ]
   },
   "expected_to_fail": {
-    "run": [
-      "elicitation-sep1034-client-defaults@2025-11-25",
-      "sse-retry@2025-11-25"
-    ],
-    "all": [
-      "elicitation-sep1034-client-defaults@2025-11-25",
-      "sse-retry@2025-11-25"
-    ]
+    "run": [],
+    "all": []
   }
 }
