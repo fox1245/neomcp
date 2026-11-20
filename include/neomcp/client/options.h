@@ -105,6 +105,7 @@ struct ClientOptions {
     std::chrono::milliseconds input_handler_timeout = ClientDefaults::input_handler_timeout;
     std::size_t max_pending_requests = ClientDefaults::max_pending_requests;
     std::size_t max_queued_events = ClientDefaults::max_queued_events;
+    // A transport that bounds messages itself at less (Transport::max_message_bytes) lowers this to its bound.
     std::size_t max_message_bytes = ClientDefaults::max_message_bytes;
     std::size_t max_nesting_depth = ClientDefaults::max_nesting_depth;
     std::size_t max_input_rounds = ClientDefaults::max_input_rounds;

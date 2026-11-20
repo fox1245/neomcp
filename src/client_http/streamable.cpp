@@ -148,7 +148,8 @@ class StreamableTransport final : public Transport {
 public:
     StreamableTransport(HttpEndpoint endpoint, UrlGuard guard, SessionRules rules, TransferLimits limits,
                         std::shared_ptr<CurlGlobal> global)
-        : endpoint_(std::move(endpoint)),
+        : max_message_bytes_(limits.max_message_bytes),
+          endpoint_(std::move(endpoint)),
           rules_(std::move(rules)),
           global_(std::move(global)),
           delivery_(std::make_shared<Delivery>()),
@@ -165,6 +166,8 @@ public:
     profile::Transport kind() const noexcept override { return profile::Transport::streamable_http; }
 
     ConnectionStreamMode connection_stream() const noexcept override { return endpoint_.connection_stream; }
+
+    std::optional<std::size_t> max_message_bytes() const noexcept override { return max_message_bytes_; }
 
     std::optional<std::string> start(TransportEvents& events) override {
         if (started_) throw std::logic_error("an HTTP transport was started twice");
@@ -703,6 +706,7 @@ private:
         events.stream_event(unit, StreamLost{"the server answered the stream's resumption without a stream"});
     }
 
+    std::size_t max_message_bytes_;  // of a JSON body and of one event's data
     HttpEndpoint endpoint_;
     SessionRules rules_;
     std::shared_ptr<CurlGlobal> global_;  // released after the loop (declared before it)

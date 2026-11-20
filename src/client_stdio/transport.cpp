@@ -203,6 +203,8 @@ public:
         sigpipe_.reset();
     }
 
+    std::size_t max_message_bytes() const noexcept { return options_.max_message_bytes; }
+
     // Close was never called (the transport was destroyed without it): the process is ended, and collected when the
     // last operation on it lets it go.
     void abandon() noexcept {
@@ -529,6 +531,8 @@ public:
     }
 
     profile::Transport kind() const noexcept override { return profile::Transport::stdio; }
+
+    std::optional<std::size_t> max_message_bytes() const noexcept override { return core_->max_message_bytes(); }
 
     std::optional<std::string> start(TransportEvents& events) override {
         if (started_) return std::string("the transport was started twice");

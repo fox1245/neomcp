@@ -937,7 +937,10 @@ private:
         engine.input_handler_timeout = options_.input_handler_timeout;
         engine.max_pending_requests = options_.max_pending_requests;
         engine.max_queued_events = options_.max_queued_events;
-        engine.max_message_bytes = options_.max_message_bytes;
+        // A transport that cuts longer messages at a smaller bound of its own sets the bound: what it cut is too long.
+        const std::optional<std::size_t> transport_bound = transport_->max_message_bytes();
+        engine.max_message_bytes = transport_bound ? std::min(options_.max_message_bytes, *transport_bound)
+                                                   : options_.max_message_bytes;
         engine.max_nesting_depth = options_.max_nesting_depth;
         engine.max_input_rounds = options_.max_input_rounds;
         engine.max_input_requests_per_round = options_.max_input_requests_per_round;

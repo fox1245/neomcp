@@ -151,6 +151,29 @@ TEST(ClientBounds, AnAnswerNestedToTheBoundIsReadAndOneLevelDeeperFailsTheCall) 
     EXPECT_TRUE(client->request("tools/list"));
 }
 
+// A transport made apart from the client keeps the bound it was made with: an answer it cuts there fails its call as
+// too long, whatever bound the client's own options name.
+TEST(ClientBounds, AnAnswerOverTheTransportsBoundFailsTheCallAsTooLong) {
+    constexpr std::size_t bound = 1024;
+    ListPeer peer(padded_answer);
+    peer.size = 2 * bound;
+    neomcp::detail::http_client::HttpTransportSettings settings;
+    settings.max_message_bytes = bound;
+    auto transport = neomcp::detail::http_client::make_http_transport(endpoint(peer.server.url()), settings);
+    ASSERT_TRUE(transport) << transport.error().message;
+    auto client = neomcp::Client::open(client_test::only({modern}), std::move(transport).value());
+    ASSERT_TRUE(client) << client.error().message;
+    for (const Shape shape : {Shape::json_body, Shape::event}) {
+        SCOPED_TRACE(shape == Shape::event ? "event" : "json");
+        peer.shape = shape;
+        neomcp::RequestOptions call;
+        call.timeout = 5s;  // without the bound the call would wait for its clock
+        const auto past = client->request("tools/list", nullptr, call);
+        ASSERT_FALSE(past);
+        EXPECT_EQ(past.error().kind, ClientErrorKind::message_too_large);
+    }
+}
+
 // ---- The head of a response
 
 // libcurl hands over the status line, each field with its line end and the blank line: the head of a reply is exactly

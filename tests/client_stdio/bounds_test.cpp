@@ -89,6 +89,26 @@ TEST(ClientBounds, ALineAtTheMessageBoundIsReadAndOneByteLongerIsSkippedAndCount
     EXPECT_EQ(kinds.count(DiagnosticKind::not_json), 0u);
 }
 
+// A transport made apart from the client (make_transport) keeps the bound it was made with: a line it cuts there is a
+// line too long for the client too, whatever bound the client's own options name.
+TEST(ClientBounds, ALineOverTheTransportsBoundIsTooLongForTheClient) {
+    constexpr std::size_t bound = 1024;
+    Folder folder;
+    const json script = script_of({{"past", json::array({sized(2 * bound, "\n"), action("answer", empty_result())})}});
+    Kinds kinds;
+    auto options = only({revision});
+    kinds.listen(options);
+    Steps steps;
+    auto transport = transport_of(scripted(folder, script), steps, bound);
+    ASSERT_TRUE(transport);
+    auto client = neomcp::Client::open(std::move(options), std::move(transport));
+    ASSERT_TRUE(client) << client.error().message;
+    auto result = client->call_tool("past");
+    ASSERT_TRUE(result) << result.error().message;
+    EXPECT_EQ(kinds.count(DiagnosticKind::too_large), 1u);
+    EXPECT_EQ(kinds.count(DiagnosticKind::not_json), 0u);
+}
+
 // ---- Output that is not a message
 
 TEST(ClientBounds, LinesThatAreNotMessagesUpToTheBoundAreSkippedAndOneMoreEndsTheServer) {

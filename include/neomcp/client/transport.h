@@ -85,6 +85,12 @@ public:
     // transport that offers such a stream lets the application choose; the default is when the client needs one.
     virtual ConnectionStreamMode connection_stream() const noexcept { return ConnectionStreamMode::when_needed; }
 
+    // The longest message the transport hands over whole, when it bounds messages itself: a longer one is handed over
+    // cut one byte past this bound and no further. The client then takes this bound as its own where it is the
+    // smaller, so that such a message is seen as too long whatever ClientOptions::max_message_bytes says. Empty: the
+    // transport hands every message over whole.
+    virtual std::optional<std::size_t> max_message_bytes() const noexcept { return std::nullopt; }
+
     // Called once, before anything else. The events object outlives the transport. Returns why the transport could not
     // start (a program that cannot be started, a URL it cannot reach), or nothing when it started; the client then
     // fails to open with ClientErrorKind::transport and the message.
