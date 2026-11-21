@@ -1489,6 +1489,61 @@ TEST_P(PerRevision, DuplicateIdOfARequestInFlight) {
     EXPECT_TRUE(conversation.ask("tools/call", {{"name", "echo"}}).contains("result"));
 }
 
+// One stdio stream can carry both eras: a handshake opens the connection of a legacy revision, and a request that
+// names its revision in params._meta is served under that revision whatever the connection holds. Both eras share
+// the one stream, so they share its id space: the specifications make the id the only thing that ties a response, and
+// a cancellation, to a request. A request id is in use from the request to its answer (2026-07-28: a request must not
+// carry the id of another request that has no response yet; the legacy revisions ask for more, no id twice in a
+// session). So a second request with an id in use is refused whatever era it speaks, and a cancellation by that id
+// reaches the one request that is in progress.
+class AcrossEras : public PerLegacyRevision {};
+
+INSTANTIATE_TEST_SUITE_P(Revisions, AcrossEras, ::testing::ValuesIn(legacy_revisions), name_of);
+
+// The request of the first profile is parked, the request of the second one with the same id is refused, and the
+// cancellation reaches the first. `first` is served in a connection a handshake opened or by naming its revision.
+void expect_cancellation_reaches_the_request_in_progress(const profile::Profile& connection, const profile::Profile& first,
+                                                         const profile::Profile& second) {
+    Conversation conversation(connection.revision());
+    const neomcp::RequestId id("shared");
+    conversation.peer.notify(Peer::make_request(first, id, "tools/call", {{"name", "gated"}}));
+    auto parked = conversation.host.wait_parked(patience);
+    ASSERT_TRUE(parked);
+
+    const auto refused = conversation.peer.request(Peer::make_request(second, id, "tools/call", {{"name", "echo"}}), patience);
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(error_code_of(*refused), -32600) << refused->dump();
+    EXPECT_FALSE(parked->control.stop_token().stop_requested()) << "the refusal does not touch the request in progress";
+
+    const std::size_t before = conversation.peer.transcript().size();
+    conversation.peer.notify(cancelled("shared"));
+    EXPECT_TRUE(parked->control.stop_token().stop_requested());
+    std::thread late([call = *parked] { call.done(text_result("late")); });
+    late.join();
+    conversation.flush();
+    const auto transcript = conversation.peer.transcript();
+    ASSERT_EQ(transcript.size(), before + 1) << "nothing is written for the cancelled request";
+
+    // The id is free again, under either era.
+    for (const profile::Profile* era : {&first, &second}) {
+        const auto again = conversation.peer.request(Peer::make_request(*era, id, "tools/call", {{"name", "echo"}}), patience);
+        ASSERT_TRUE(again);
+        EXPECT_EQ(error_code_of(*again), 0) << again->dump();
+    }
+}
+
+TEST_P(AcrossEras, AnIdInUseByTheConnectionIsRefusedToARequestThatNamesAnotherRevision) {
+    const auto legacy = builtin(GetParam());
+    const auto modern = builtin(modern_revision);
+    expect_cancellation_reaches_the_request_in_progress(*legacy, *legacy, *modern);
+}
+
+TEST_P(AcrossEras, AnIdInUseByARequestThatNamesItsRevisionIsRefusedToTheConnection) {
+    const auto legacy = builtin(GetParam());
+    const auto modern = builtin(modern_revision);
+    expect_cancellation_reaches_the_request_in_progress(*legacy, *modern, *legacy);
+}
+
 TEST_P(PerRevision, ProgressOnlyWhenAskedAndIncreasing) {
     Conversation conversation(GetParam());
     const json answer = conversation.ask("tools/call", {{"name", "progress"}, {"_meta", {{"progressToken", 7}}}});
