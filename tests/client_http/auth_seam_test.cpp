@@ -274,6 +274,36 @@ TEST(ClientHttpAuth, ARequestRefusedMoreOftenThanItsBoundEnds) {
     EXPECT_EQ(server.count(), 3u);  // held twice, refused a third time
 }
 
+// A request refused as often as its bound is held each time and served afterwards; one refusal more ends it, and the
+// server was asked once more than the bound.
+TEST(ClientHttpAuth, ARequestIsHeldAsOftenAsItsBoundAndNoMore) {
+    for (const std::size_t bound : {std::size_t{1}, std::size_t{2}, std::size_t{3}}) {
+        for (const std::size_t refusals : {bound - 1, bound, bound + 1}) {
+            SCOPED_TRACE("bound " + std::to_string(bound) + ", refused " + std::to_string(refusals) + " times");
+            auto served = std::make_shared<std::atomic<std::size_t>>(0);
+            ScriptedHttpServer server([served, refusals](const Request& request) {
+                if (served->fetch_add(1) < refusals) return refusal();
+                return answer(request);
+            });
+            auto described = authorized(server.url(), std::make_shared<RenewingAuthorizer>());
+            described.max_authorizations_per_request = bound;
+            Driven driven(described);
+            driven.post(1, ping(1));
+            const auto seen = driven.recorder().until_end(1);
+            if (refusals <= bound) {
+                EXPECT_EQ(messages_of(seen).size(), 1u);
+                EXPECT_EQ(server.count(), refusals + 1);
+            } else {
+                const auto ended = events_of<AuthorizationDenied>(seen);
+                ASSERT_EQ(ended.size(), 1u);
+                ASSERT_TRUE(ended.front().failure.authorization);
+                EXPECT_EQ(ended.front().failure.authorization->problem, AuthorizationProblem::attempts_exceeded);
+                EXPECT_EQ(server.count(), bound + 1);
+            }
+        }
+    }
+}
+
 TEST(ClientHttpAuth, AnAuthorizerServesOneTransportAtATime) {
     auto server = accepting(first);
     auto authorizer = std::make_shared<ScriptedAuthorizer>(first, 0);

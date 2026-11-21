@@ -3,6 +3,7 @@
 # registration, PKCE and scopes, the callback, the token requests, and the flow as a whole. No socket is opened. The
 # tests reach the flow's internal headers.
 add_executable(neomcp_client_auth_test
+    bounds_test.cpp
     callback_test.cpp
     flow_test.cpp
     pkce_scopes_test.cpp
