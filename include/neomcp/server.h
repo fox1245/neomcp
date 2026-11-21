@@ -187,6 +187,20 @@
 // created, as for an ordinary call; what the handler asks for itself while it runs as a task is asked through the
 // task. A task's handler sends no progress and no log message under such a revision.
 //
+// Under a revision whose core protocol has tasks (2025-11-25), the requester asks: the server declares tasks in its
+// capabilities and the tools that may run as tasks say so in their listing (`execution.taskSupport`), and a call
+// becomes a task exactly when its params carry `task` (which may ask for a lifetime, kept within the store's bounds).
+// A call that asks for a task of a tool that does not declare it, and a call of a `required` tool that does not ask,
+// are refused as methods that do not exist. A tool result marked as an error fails the task. `tasks/result` waits
+// until the task has ended, holding no thread, and then answers what the call would have been answered with;
+// meanwhile the requests for input of the task (declared inputs included, which the handler asks for as it runs) go
+// to the client as requests on the stream of that `tasks/result`, marked with the task, and a later `tasks/result`
+// sends what is still unanswered. At most TaskOptions::max_waiting_results of them wait at once. A cancellation is
+// answered with the cancelled task, and one of a task that has ended is refused. The handler's progress and the
+// changes of the task's status reach the connection that created the task while it is open. `tasks/list` lists the
+// tasks of the request's principal and is offered only to a connection whose requests carry an authorization: without
+// one the id of a task is the only thing that guards it, so ids cannot be guessed, and nothing lists them.
+//
 // Threads. Plain-function handlers run on a pool of worker threads the server owns, bounded by
 // ServerOptions::max_concurrent_calls and max_pending_calls. Coroutine handlers run on one thread the server owns,
 // which drives an asio::io_context, and are bounded by max_coroutine_calls; a coroutine handler must not block, or

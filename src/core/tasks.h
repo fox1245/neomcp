@@ -10,10 +10,10 @@
 
 namespace neomcp::detail {
 
-// `none`: no call is answered with a task. Also the implementation of `augmented_request` while the library serves no
-// tasks under the revisions that name it: a server that declares no tasks answers a call that asks for one as an
-// ordinary call, which those revisions permit.
+// `none`: no call is answered with a task.
 std::unique_ptr<TaskMechanism> make_no_tasks();
+// `augmented_request`: the requester asks for a task in the call, of a tool whose listing says it may run as one.
+std::unique_ptr<TaskMechanism> make_augmented_request_tasks();
 // `server_directed`: the server decides, per call, for a requester that declares the extension in the request.
 std::unique_ptr<TaskMechanism> make_server_directed_tasks();
 

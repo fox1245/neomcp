@@ -6,6 +6,7 @@
 // the cancellation mechanism of a transport, and tasks).
 #pragma once
 
+#include <chrono>
 #include <functional>
 #include <map>
 #include <memory>
@@ -23,6 +24,7 @@
 #include "neomcp/model.h"
 #include "neomcp/profile.h"
 #include "neomcp/server/task_store.h"
+#include "neomcp/task_host.h"
 
 namespace neomcp {
 
@@ -224,11 +226,28 @@ struct TaskRequest {
     enum class Action {
         get,     // the task's state, with what it ended with or waits for
         update,  // answers to the task's requests for input
-        cancel   // stop the task
+        cancel,  // stop the task
+        result,  // what the task ended with: answered once it has ended, the task's requests for input meanwhile
+        list     // the requester's tasks, a page at a time
     };
     Action action = Action::get;
-    std::string task_id;
+    std::string task_id;              // empty for list
     json responses = json::object();  // update: the answers by key, an object
+    std::optional<std::string> cursor;  // list: where the page starts; empty: at the first task
+};
+
+// What a call says about being answered with a task.
+struct TaskAsk {
+    bool takes = false;                            // the requester takes a task for an answer
+    std::optional<std::chrono::milliseconds> ttl;  // the lifetime it asks for; empty: the store's default
+};
+
+// How a call of a tool is served, from what the tool declares and whether the requester takes a task.
+enum class TaskServing {
+    ordinary,           // as an ordinary call
+    task,               // as a task
+    method_not_found,   // refused as a method that does not exist
+    missing_capability  // refused for a client capability the requester lacks (TaskMechanism::required_capabilities)
 };
 
 // Slot `tasks`: whether a call may be answered with a task the requester then asks about, and how tasks look on the
@@ -243,14 +262,28 @@ public:
     // nothing about tasks, and no request is the mechanism's.
     virtual bool answers_with_tasks() const = 0;
 
-    // Whether the requester of a request takes a task for an answer, from what the request (or the connection's
-    // handshake) says about its client.
+    // Whether the requester of a request takes tasks, from what the request (or the connection's handshake) says
+    // about its client.
     virtual bool requester_takes_tasks(const ClientIdentity& client) const = 0;
+    // Whether the mechanism's own requests are answered only for a requester that takes tasks; the others are then
+    // refused for the missing client capability.
+    virtual bool requests_need_declaration() const = 0;
+    // What a call (its params, and what it says about its client) says about being answered with a task, or why
+    // what it says is malformed.
+    virtual std::variant<TaskAsk, RequestError> asked(const json& params, const ClientIdentity& client) const = 0;
+    // How a call of a tool that declares `support` is served when the requester takes a task or not.
+    virtual TaskServing serving(TaskSupport support, bool takes) const = 0;
+    // Whether the inputs a tool declares are asked by the call before a task exists (otherwise the task's handler
+    // asks for them as it asks for any input).
+    virtual bool prepares_inputs() const = 0;
     // What a requester that does not take tasks lacks, as the `requiredCapabilities` of the error for a missing client
     // capability.
     virtual json required_capabilities() const = 0;
-    // Adds to the server's capabilities object that it answers with tasks.
-    virtual void declare(json& capabilities) const = 0;
+    // Adds to the server's capabilities object that it answers with tasks; `lists`: the requester's tasks are bound to
+    // it (it carries an authorization), so that it may list them.
+    virtual void declare(json& capabilities, bool lists) const = 0;
+    // Adds to a tool as a listing writes it whether it may run as a task.
+    virtual void describe_tool(json& tool, TaskSupport support) const = 0;
 
     // Whether a client request of `method` is one of the mechanism's, and what such a request asks (or why it is
     // malformed). The session asks only about requests the profile has.
@@ -261,19 +294,29 @@ public:
     virtual json created(const TaskRecord& record) const = 0;
     // The body of the answer to a read of the task: its state, with what it ended with or the requests it waits on.
     virtual json detailed(const TaskRecord& record) const = 0;
-    // The body of the answer to an update or a cancellation that was taken.
+    // The body of the answer to an update that was taken.
     virtual json acknowledgement() const = 0;
-    // Whether a cancellation of a task that has ended is taken (and changes nothing); otherwise it is refused as one of
-    // a task that does not exist.
+    // The body of the answer to a cancellation that was taken; `record` is the task after it.
+    virtual json cancelled(const TaskRecord& record) const = 0;
+    // Whether a cancellation of a task that has ended is taken (and changes nothing); otherwise it is refused.
     virtual bool acknowledges_ended_cancel() const = 0;
+    // The answer to a result request for the task `record`, which has ended: the body of the result, or the error.
+    virtual std::variant<json, RequestError> payload(const TaskRecord& record) const = 0;
+    // The body of the answer to a listing.
+    virtual json page(const TaskPage& page) const = 0;
+    // Marks the params of a request the server sends the requester for the task `task_id`.
+    virtual void relate(json& params, std::string_view task_id) const = 0;
+    // The notification that tells the requester of a task's new status; empty when the mechanism sends none.
+    virtual std::optional<FeedMessage> status_notice(const TaskRecord& record) const = 0;
 
     // How a task started under the mechanism keeps its record (see TaskStart in neomcp/task_host.h).
     virtual bool error_result_fails() const = 0;
     virtual bool round_keys() const = 0;
     // A request for input as the record keeps it, from its method and its params as the revision writes them (null:
-    // it has none); and the method of such an entry, empty when it is not one.
+    // it has none); and the method and the params of such an entry, empty (null) when it is not one.
     virtual json input_entry(std::string method, json params) const = 0;
     virtual std::optional<std::string> input_method(const json& entry) const = 0;
+    virtual json input_params(const json& entry) const = 0;
     // Whether the progress and the log messages of a task's handler reach the requester.
     virtual bool task_notifications() const = 0;
 };

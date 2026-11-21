@@ -198,12 +198,12 @@ TEST(ServerTasksWireTest, DiscoverDeclaresTheExtensionOnlyWhenATaskCanRun) {
 }
 
 // C0.2, C0.3: a revision whose profile has no tasks serves every call as an ordinary one, whatever the client
-// declares; the requests of tasks do not exist there.
+// declares; the requests of tasks do not exist there. (2025-11-25 has tasks of its own: server_tasks_2025_test.cpp.)
 TEST(ServerTasksWireTest, RevisionsWithoutTheExtensionServeOrdinaryCalls) {
     neomcp::Server server(options_with(store_of()));
     server.tool("maybe", "Maybe a task", [] { return std::string("ordinary"); }).task_support(TaskSupport::optional);
     server.tool("always", "Only a task", [] { return std::string("ordinary too"); }).task_support(TaskSupport::required);
-    for (const std::string revision : {"2025-06-18", "2025-11-25"}) {
+    for (const std::string revision : {"2025-06-18"}) {
         const auto& profile = profile_of(revision);
         Peer peer(server);
         ASSERT_TRUE(peer.initialize(profile, patience));

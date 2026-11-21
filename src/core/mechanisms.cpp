@@ -576,7 +576,7 @@ MechanismRegistry make_builtin() {
     registry.add_feed("connection_notifications", factory<ChangeFeedMechanism, ConnectionNotifications>());
     registry.add_feed("subscriptions_listen", factory<ChangeFeedMechanism, SubscriptionsListen>());
     registry.add_tasks("none", [] { return detail::make_no_tasks(); });
-    registry.add_tasks("augmented_request", [] { return detail::make_no_tasks(); });
+    registry.add_tasks("augmented_request", [] { return detail::make_augmented_request_tasks(); });
     registry.add_tasks("server_directed", [] { return detail::make_server_directed_tasks(); });
     return registry;
 }

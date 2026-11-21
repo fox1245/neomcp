@@ -241,6 +241,17 @@ target_link_libraries(neomcp_server_tasks_wire_test PRIVATE neomcp::server GTest
 neomcp_configure_target(neomcp_server_tasks_wire_test)
 gtest_discover_tests(neomcp_server_tasks_wire_test DISCOVERY_TIMEOUT 120)
 
+# Tasks on the wire of 2025-11-25 (tasks of the core protocol), through a session.
+add_executable(neomcp_server_tasks_2025_test server_tasks_2025_test.cpp)
+target_link_libraries(neomcp_server_tasks_2025_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_server_tasks_2025_test)
+gtest_discover_tests(neomcp_server_tasks_2025_test DISCOVERY_TIMEOUT 120)
+
+add_executable(neomcp_server_tasks_2025_flow_test server_tasks_2025_flow_test.cpp)
+target_link_libraries(neomcp_server_tasks_2025_flow_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_server_tasks_2025_flow_test)
+gtest_discover_tests(neomcp_server_tasks_2025_flow_test DISCOVERY_TIMEOUT 120)
+
 # The bounds of ServerOptions that mirror those of SessionOptions, each at its limit and one past it.
 add_executable(neomcp_server_bounds_test server_bounds_test.cpp)
 target_link_libraries(neomcp_server_bounds_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
@@ -343,6 +354,11 @@ add_executable(neomcp_http_tasks_test http_tasks_test.cpp)
 target_link_libraries(neomcp_http_tasks_test PRIVATE neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)
 neomcp_configure_target(neomcp_http_tasks_test)
 gtest_discover_tests(neomcp_http_tasks_test DISCOVERY_TIMEOUT 120)
+
+add_executable(neomcp_http_tasks_2025_test http_tasks_2025_test.cpp)
+target_link_libraries(neomcp_http_tasks_2025_test PRIVATE neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_http_tasks_2025_test)
+gtest_discover_tests(neomcp_http_tasks_2025_test DISCOVERY_TIMEOUT 120)
 
 # The endpoint as an OAuth protected resource: over sockets, and through its handler for the order of the requests that
 # wait for one validation. Both reach the endpoint's internal view of what it feeds its sessions.

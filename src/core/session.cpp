@@ -137,6 +137,14 @@ constexpr std::string_view call_result_type = "CallToolResult";
 // The answer to a request about a task that does not exist for its requester: the same whether the task never existed,
 // expired or belongs to another owner, and without the id, which is the requester's secret.
 constexpr std::string_view unknown_task_message = "Invalid params: no such task (it may have expired)";
+// The refusals of a call whose request and tool disagree about running as a task, where the revision refuses them as
+// methods that do not exist.
+constexpr std::string_view task_not_offered_message = "Method not found: this tool does not run as a task";
+constexpr std::string_view task_required_message = "Method not found: this tool runs only as a task";
+// The refusal of a cancellation of a task that has ended, where the revision refuses it.
+constexpr std::string_view ended_task_message = "Invalid params: the task has ended and cannot be cancelled";
+// The refusal of a listing whose cursor the server did not give.
+constexpr std::string_view invalid_cursor_message = "Invalid params: params.cursor is not a cursor this server gave";
 
 const json* member(const json& object, std::string_view name) {
     const auto* members = object.get_ptr<const json::object_t*>();
@@ -300,7 +308,8 @@ enum class CallKind {
     resource_read,
     prompt_get,
     completion,
-    subscription  // an open subscription of the change feed: it is answered when it ends
+    subscription,  // an open subscription of the change feed: it is answered when it ends
+    task_result    // a result request for a task that has not ended: it is answered when the task ends
 };
 
 // What a call asks its host, kept to ask it again when answers arrive.
@@ -318,6 +327,7 @@ struct CallSubject {
 };
 
 struct WaitState;
+struct TaskStream;
 
 struct CallState {
     std::weak_ptr<SessionCore> core;
@@ -349,6 +359,8 @@ struct CallState {
 
     // A subscription: what of its request is honoured. Written before the call is in flight.
     ChangeFilter filter;
+    // A result request for a task: its wait for the task's end. Guarded by the core's mutex.
+    std::shared_ptr<TaskStream> task_stream;
 
     explicit CallState(RequestId request_id) : id(std::move(request_id)) {}
 };
@@ -366,6 +378,61 @@ struct WaitState {
     std::vector<RequestId> ids;                // the ids the round's requests were sent with
     std::size_t outstanding = 0;
     InputResponses answers;
+};
+
+// The wait of a result request for a task that has not ended: a listener of the task's changes, held by the request's
+// call. It answers the request once the task has ended, and sends the task's requests for input on the request's
+// stream meanwhile; the answers go to the task. It ends with the request: answered, cancelled, its stream gone, or the
+// session closed. The task does not end with it.
+struct TaskStream final : TaskListener {
+    std::weak_ptr<SessionCore> core;
+    std::weak_ptr<CallState> call;
+    std::string task_id;
+    TaskOwner owner;
+    // The requests for input sent on the stream, by the record's keys. Guarded by the core's mutex.
+    std::set<std::string> sent;
+
+    void on_task_change(const TaskChange& change) override;
+
+    // Keeps the watch, or ends it at once when the stream ended meanwhile.
+    void keep(TaskWatch started) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!ended_) {
+            watch_ = std::move(started);
+            return;
+        }
+        lock.unlock();
+        started.release();
+    }
+    // Ends the watch; the second and later calls do nothing.
+    void release() {
+        TaskWatch taken;
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            ended_ = true;
+            taken = std::move(watch_);
+        }
+        taken.release();
+    }
+    // Ends the watch when the request's stop is requested (it was cancelled, its stream is gone, the session closed).
+    void follow(std::stop_token stop) { on_stop_.emplace(std::move(stop), Releaser{this}); }
+
+private:
+    struct Releaser {
+        TaskStream* stream;
+        void operator()() const noexcept {
+            try {
+                stream->release();
+            } catch (...) {
+                // Releasing a watch takes no allocation; a store that throws keeps the watch until it is gone.
+            }
+        }
+    };
+    std::mutex mutex_;
+    TaskWatch watch_;
+    bool ended_ = false;
+    // Last: deregistered before anything it reaches is destroyed.
+    std::optional<std::stop_callback<Releaser>> on_stop_;
 };
 
 struct CompletionState {
@@ -394,6 +461,7 @@ struct Handled {
 
 class SessionCore : public std::enable_shared_from_this<SessionCore> {
     struct Private {};
+    friend struct TaskStream;
 
 public:
     SessionCore(Private, SessionOptions options, ToolHost& host, OutputSink sink)
@@ -469,13 +537,13 @@ private:
     std::optional<Answer> on_request(Message request, const Place& place);
     std::optional<Answer> serve_named(Message request, const OpenMechanism& opener, const std::string& revision,
                                       const Place& place);
-    Answer open_connection(const Message& request, const OpenMechanism& opener, bool in_batch);
+    Answer open_connection(const Message& request, const OpenMechanism& opener, bool in_batch, bool bound);
     std::optional<Answer> serve(Message request, const Served& served, Origin origin, const Place& place);
 
     std::optional<Answer> on_ping(Message& request, const Served& served, Origin&, const Place&);
     std::optional<Answer> on_tools_list(Message& request, const Served& served, Origin&, const Place&);
     std::optional<Answer> on_tools_call(Message& request, const Served& served, Origin& origin, const Place& place);
-    std::optional<Answer> on_discover(Message& request, const Served& served, Origin&, const Place&);
+    std::optional<Answer> on_discover(Message& request, const Served& served, Origin&, const Place& place);
     std::optional<Answer> on_resources_list(Message& request, const Served& served, Origin&, const Place&);
     std::optional<Answer> on_resource_templates_list(Message& request, const Served& served, Origin&, const Place&);
     std::optional<Answer> on_resources_read(Message& request, const Served& served, Origin& origin, const Place& place);
@@ -488,9 +556,22 @@ private:
     // ---- tasks (the profile's `tasks` mechanism, the host's TaskHost)
     // A request of the mechanism's own: a read, an update or a cancellation of a task.
     std::optional<Answer> on_task(Message& request, const Served& served, Origin& origin, const Place& place);
-    // The call (in flight) becomes a task: its declared inputs are asked first, as for a call; then the host starts
-    // it, and the call is answered with the task.
-    void start_task_call(const std::shared_ptr<CallState>& call, TaskHost& tasks);
+    // The call (in flight) becomes a task: its declared inputs are asked first where the mechanism asks them before a
+    // task exists, as for a call; then the host starts it, and the call is answered with the task.
+    void start_task_call(const std::shared_ptr<CallState>& call, TaskHost& tasks, const TaskAsk& opt_in);
+    // A result request: answered at once for a task that has ended, otherwise when it ends (see TaskStream).
+    std::optional<Answer> on_task_result(Message& request, const Served& served, Origin& origin, const Place& place,
+                                         TaskHost& tasks, const TaskRequest& asked, const TaskOwner& owner);
+    // The task of a result request changed (or, empty kind, its wait started): what it is now decides.
+    void on_stream_change(const std::shared_ptr<CallState>& call, TaskStream& stream, TaskChangeKind kind);
+    // Answers the result request once the task has ended, and sends the requests for input it waits on that the
+    // stream did not send yet.
+    void advance(const std::shared_ptr<CallState>& call, TaskStream& stream, const std::optional<TaskRecord>& record);
+    // An answer to a request for input a result request's stream sent: to the task.
+    void deliver(const std::shared_ptr<TaskStream>& stream, const std::string& key, const json& raw,
+                 InputResponse answer);
+    // Tells the connection of a task's new status, where the mechanism has a notice for it.
+    void task_notice(const TaskRecord& record, const TaskMechanism& mechanism, const profile::ProfilePtr& profile);
     // The refusal of a request whose requester does not declare what it needs: `required` is the
     // `requiredCapabilities` of the error.
     Answer missing_capability(const RequestId& id, const Served& served, json required) const;
@@ -545,7 +626,8 @@ private:
     // ---- answers
     // The enabled revisions, newest first: those a request can name under `opener`, or every one when null.
     json supported_versions(const OpenMechanism* opener = nullptr) const;
-    json capabilities(const Served& served) const;
+    // `bound`: the request carries an authorization, so that tasks are bound to its principal.
+    json capabilities(const Served& served, bool bound) const;
     // The kinds of change the host reports among the kinds it has things of: what the session declares.
     ChangeSupport reported() const;
     void finish_result(json& body, std::string_view type, const profile::Profile& profile) const;
@@ -1148,7 +1230,8 @@ std::optional<Answer> SessionCore::on_request(Message request, const Place& plac
     // A handshake opens the connection.
     for (const auto& entry : openers_) {
         if (entry.second->opens_connection(request)) {
-            return open_connection(request, *entry.second, place.batch != nullptr);
+            return open_connection(request, *entry.second, place.batch != nullptr,
+                                   place.claims->authorization != nullptr);
         }
     }
     // A connection a handshake opened serves the rest.
@@ -1248,7 +1331,8 @@ std::optional<Answer> SessionCore::serve_named(Message request, const OpenMechan
     return serve(std::move(request), *chosen, std::move(origin), place);
 }
 
-Answer SessionCore::open_connection(const Message& request, const OpenMechanism& opener, bool in_batch) {
+Answer SessionCore::open_connection(const Message& request, const OpenMechanism& opener, bool in_batch,
+                                    bool bound) {
     const RequestId& id = *request.id;
     if (in_batch) {
         return Answer{make_error(id, error_code::invalid_request,
@@ -1297,7 +1381,7 @@ Answer SessionCore::open_connection(const Message& request, const OpenMechanism&
 
     json body = json::object();
     body["protocolVersion"] = profile.revision();
-    body["capabilities"] = capabilities(*served);
+    body["capabilities"] = capabilities(*served, bound);
     body["serverInfo"] = to_wire(options_.server_info, profile);
     if (options_.instructions) body["instructions"] = *options_.instructions;
     finish_result(body, "InitializeResult", profile);
@@ -1434,8 +1518,19 @@ std::optional<Answer> SessionCore::on_tools_list(Message& request, const Served&
     }
     if (auto* refusal = std::get_if<Answer>(&page)) return std::move(*refusal);
     const Page& found = std::get<Page>(page);
+    // Whether each tool may run as a task, where the revision lists it.
+    TaskHost* tasks = served.tasks->answers_with_tasks() ? host_.task_host() : nullptr;
     json list = json::array();
-    for (const std::size_t index : found.items) list.push_back(to_wire(tools[index], profile));
+    try {
+        for (const std::size_t index : found.items) {
+            json item = to_wire(tools[index], profile);
+            if (tasks != nullptr) served.tasks->describe_tool(item, tasks->task_support(index));
+            list.push_back(std::move(item));
+        }
+    } catch (...) {
+        return served_answer(make_error(id, error_code::internal_error, "Internal error: the tools could not be listed"),
+                             served);
+    }
     return list_answer(request, served, "tools", std::move(list), found.next, "ListToolsResult", options_.tools_cache);
 }
 
@@ -1594,26 +1689,41 @@ std::optional<Answer> SessionCore::on_tools_call(Message& request, const Served&
     subject.request = std::move(call_request);
     if (auto refusal = take_retry(request, served, place, subject)) return refusal;
 
-    // A call of a tool that may run as a task, under a revision that has tasks: the requester's declaration decides.
+    // Under a revision that has tasks, on a server that offers them: what the tool declares and what the requester
+    // takes decide. Elsewhere whatever the call says about tasks is not read.
     TaskHost* tasks = served.tasks->answers_with_tasks() ? host_.task_host() : nullptr;
-    TaskSupport support = TaskSupport::forbidden;
+    TaskAsk opt_in;
+    TaskServing serving = TaskServing::ordinary;
     if (tasks != nullptr) {
+        auto said = served.tasks->asked(request.params, *origin.client);
+        if (const auto* error = std::get_if<RequestError>(&said)) {
+            return served_answer(make_error(id, error->code, error->message, error->data), served);
+        }
+        opt_in = std::get<TaskAsk>(said);
         try {
-            support = tasks->task_support(tool_index);
+            serving = served.tasks->serving(tasks->task_support(tool_index), opt_in.takes);
         } catch (...) {
             return served_answer(make_error(id, error_code::internal_error, "Internal error: the tool call failed"),
                                  served);
         }
     }
-    const bool as_task = support != TaskSupport::forbidden && served.tasks->requester_takes_tasks(*origin.client);
-    if (support == TaskSupport::required && !as_task) {
-        return missing_capability(id, served, served.tasks->required_capabilities());
+    switch (serving) {
+        case TaskServing::ordinary:
+        case TaskServing::task: break;
+        case TaskServing::method_not_found:
+            // The code the revision gives; the method itself exists, so this is no refusal of the request as such.
+            return served_answer(make_error(id, error_code::method_not_found,
+                                            opt_in.takes ? std::string(task_not_offered_message)
+                                                         : std::string(task_required_message)),
+                                 served);
+        case TaskServing::missing_capability:
+            return missing_capability(id, served, served.tasks->required_capabilities());
     }
 
     auto call = begin_call(CallKind::tool, id, served, origin, place, std::move(progress_token), std::move(subject));
     if (!call) return std::nullopt;
-    if (as_task) {
-        start_task_call(call, *tasks);
+    if (serving == TaskServing::task) {
+        start_task_call(call, *tasks, opt_in);
     } else {
         start(call, call->subject.request);
     }
@@ -1888,11 +1998,11 @@ std::optional<Answer> SessionCore::on_prompts_get(Message& request, const Served
     return std::nullopt;
 }
 
-std::optional<Answer> SessionCore::on_discover(Message& request, const Served& served, Origin&, const Place&) {
+std::optional<Answer> SessionCore::on_discover(Message& request, const Served& served, Origin&, const Place& place) {
     const profile::Profile& profile = *served.profile;
     json body = json::object();
     body["supportedVersions"] = supported_versions(served.open);
-    body["capabilities"] = capabilities(served);
+    body["capabilities"] = capabilities(served, place.claims->authorization != nullptr);
     if (options_.instructions) body["instructions"] = *options_.instructions;
     finish_result(body, "DiscoverResult", profile);
     return served_answer(make_result(*request.id, std::move(body)), served);
@@ -1936,8 +2046,8 @@ std::optional<Answer> SessionCore::on_task(Message& request, const Served& serve
     const RequestId& id = *request.id;
     TaskHost* tasks = host_.task_host();
     if (tasks == nullptr) return method_not_found(request, served);
-    // Only a requester that declares tasks in this very request may ask about one.
-    if (!served.tasks->requester_takes_tasks(*origin.client)) {
+    // Where the revision wants it, only a requester that declares tasks in this very request may ask about one.
+    if (served.tasks->requests_need_declaration() && !served.tasks->requester_takes_tasks(*origin.client)) {
         return missing_capability(id, served, served.tasks->required_capabilities());
     }
     auto read = served.tasks->read(request);
@@ -2038,17 +2148,41 @@ std::optional<Answer> SessionCore::on_task(Message& request, const Served& serve
             switch (result.outcome) {
                 case TaskCancelOutcome::not_found: return unknown();
                 case TaskCancelOutcome::ended:
-                    if (!served.tasks->acknowledges_ended_cancel()) return unknown();
-                    break;
+                    if (!served.tasks->acknowledges_ended_cancel()) {
+                        return served_answer(
+                            make_error(id, error_code::invalid_params, std::string(ended_task_message)), served);
+                    }
+                    return acknowledged();
                 case TaskCancelOutcome::cancelled: break;
             }
-            return acknowledged();
+            if (!result.record) return failed();
+            json body = served.tasks->cancelled(*result.record);
+            finish_task_body(body, profile);
+            return served_answer(make_result(id, std::move(body)), served);
+        }
+        case TaskRequest::Action::result: return on_task_result(request, served, origin, place, *tasks, asked, owner);
+        case TaskRequest::Action::list: {
+            // A listing shows the tasks of a principal; a requester that carries none has no tasks of its own to see.
+            if (owner.principal.empty()) return method_not_found(request, served);
+            std::optional<TaskPage> found;
+            try {
+                found = tasks->list_tasks(owner, asked.cursor);
+            } catch (...) {
+                return failed();
+            }
+            if (!found) {
+                return served_answer(make_error(id, error_code::invalid_params, std::string(invalid_cursor_message)),
+                                     served);
+            }
+            json body = served.tasks->page(*found);
+            finish_task_body(body, profile);
+            return served_answer(make_result(id, std::move(body)), served);
         }
     }
     return method_not_found(request, served);
 }
 
-void SessionCore::start_task_call(const std::shared_ptr<CallState>& call, TaskHost& tasks) {
+void SessionCore::start_task_call(const std::shared_ptr<CallState>& call, TaskHost& tasks, const TaskAsk& opt_in) {
     const Served& served = *call->served;
     const CallRequest& request = std::get<CallRequest>(call->subject.request);
 
@@ -2068,13 +2202,16 @@ void SessionCore::start_task_call(const std::shared_ptr<CallState>& call, TaskHo
         origin->follows_connection_level = call->follows_connection_level;
     }
 
-    // Inputs the tool declares are asked by the call, as for any call, before a task exists.
+    // Inputs the tool declares are asked by the call, as for any call, before a task exists, where the revision asks
+    // them so; otherwise the task's handler asks for them.
     TaskPreparation prepared;
-    try {
-        prepared = tasks.prepare_task(request, CallControl(origin));
-    } catch (...) {
-        complete(call, CallOutcome(HostFailure{"the task could not be prepared"}));
-        return;
+    if (served.tasks->prepares_inputs()) {
+        try {
+            prepared = tasks.prepare_task(request, CallControl(origin));
+        } catch (...) {
+            complete(call, CallOutcome(HostFailure{"the task could not be prepared"}));
+            return;
+        }
     }
     if (auto* inputs = std::get_if<InputRequired>(&prepared)) {
         complete(call, CallOutcome(std::move(*inputs)));
@@ -2088,6 +2225,7 @@ void SessionCore::start_task_call(const std::shared_ptr<CallState>& call, TaskHo
     // How the record keeps what the handler produces: as the revision writes it, with nothing of the session in it.
     const profile::ProfilePtr profile = call->profile;
     TaskStart start;
+    start.ttl = opt_in.ttl;
     start.error_result_fails = served.tasks->error_result_fails();
     start.round_keys = served.tasks->round_keys();
     std::optional<Implementation> info;
@@ -2106,6 +2244,14 @@ void SessionCore::start_task_call(const std::shared_ptr<CallState>& call, TaskHo
         if (std::holds_alternative<std::string>(params)) return std::nullopt;
         return mechanism->input_entry(std::string(method_of(asked)), std::get<json>(std::move(params)));
     };
+    // The changes of the task's status reach the connection that created it while it is open, where the revision
+    // tells of them.
+    if (served.tasks->task_notifications()) {
+        start.on_change = [core = weak_from_this(), profile, mechanism = served.tasks_handle](const TaskRecord& record) {
+            const auto session = core.lock();
+            if (session && mechanism) session->task_notice(record, *mechanism, profile);
+        };
+    }
 
     TaskStartResult started = TaskRefusal::off;
     try {
@@ -2132,6 +2278,176 @@ void SessionCore::start_task_call(const std::shared_ptr<CallState>& call, TaskHo
         case TaskRefusal::shut_down:
             complete(call, CallOutcome(HostFailure{"the task could not be started"}));
             return;
+    }
+}
+
+std::optional<Answer> SessionCore::on_task_result(Message& request, const Served& served, Origin& origin,
+                                                  const Place& place, TaskHost& tasks, const TaskRequest& asked,
+                                                  const TaskOwner& owner) {
+    const RequestId& id = *request.id;
+    CallSubject subject;
+    subject.method = request.method;
+    // A request in flight, so that its cancellation, the end of its stream and the session's end end the wait.
+    auto call = begin_call(CallKind::task_result, id, served, origin, place, json(nullptr), std::move(subject));
+    if (!call) return std::nullopt;
+    auto stream = std::make_shared<TaskStream>();
+    stream->core = weak_from_this();
+    stream->call = call;
+    stream->task_id = asked.task_id;
+    stream->owner = owner;
+    stream->follow(call->stop.get_token());
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        call->task_stream = stream;
+    }
+    TaskWatchStart started;
+    try {
+        started = tasks.watch_task(asked.task_id, owner, stream);
+    } catch (...) {
+        finish_call(call, make_error(id, error_code::internal_error, "Internal error: the task could not be reached"));
+        return std::nullopt;
+    }
+    switch (started.outcome) {
+        case WatchOutcome::watching: break;
+        case WatchOutcome::not_found:
+            finish_call(call, make_error(id, error_code::invalid_params, std::string(unknown_task_message)));
+            return std::nullopt;
+        case WatchOutcome::limit: {
+            json data = json::object();
+            data["reason"] = "busy";
+            finish_call(call, make_error(id, error_code::internal_error, "Internal error: the server is busy",
+                                         std::move(data)));
+            return std::nullopt;
+        }
+    }
+    stream->keep(std::move(started.watch));
+    // Every change after the watch started reaches the stream; the task as it was then decides first.
+    advance(call, *stream, started.record);
+    return std::nullopt;
+}
+
+void TaskStream::on_task_change(const TaskChange& change) {
+    const auto session = core.lock();
+    const auto state = call.lock();
+    if (!session || !state) return;
+    try {
+        session->on_stream_change(state, *this, change.kind);
+    } catch (...) {
+        // A listener must not throw; the request is still answered when the task ends, or when it ends otherwise.
+    }
+}
+
+void SessionCore::on_stream_change(const std::shared_ptr<CallState>& call, TaskStream& stream, TaskChangeKind kind) {
+    if (kind == TaskChangeKind::removed) {
+        advance(call, stream, std::nullopt);
+        return;
+    }
+    TaskHost* tasks = host_.task_host();
+    if (tasks == nullptr) return;
+    std::optional<TaskRecord> record;
+    try {
+        record = tasks->current_task(stream.task_id, stream.owner);
+    } catch (...) {
+        finish_call(call, make_error(call->id, error_code::internal_error, "Internal error: the task could not be reached"));
+        return;
+    }
+    advance(call, stream, record);
+}
+
+void SessionCore::advance(const std::shared_ptr<CallState>& call, TaskStream& stream,
+                          const std::optional<TaskRecord>& record) {
+    const Served& served = *call->served;
+    if (!record) {
+        // Gone: its lifetime ended while the request waited.
+        finish_call(call, make_error(call->id, error_code::invalid_params, std::string(unknown_task_message)));
+        return;
+    }
+    if (is_terminal(record->status)) {
+        auto payload = served.tasks->payload(*record);
+        if (auto* body = std::get_if<json>(&payload)) {
+            finish_call(call, make_result(call->id, std::move(*body)));
+        } else {
+            auto& error = std::get<RequestError>(payload);
+            finish_call(call, make_error(call->id, error.code, std::move(error.message), std::move(error.data)));
+        }
+        return;
+    }
+    if (record->status != TaskStatus::input_required || !record->asked || !record->asked->is_object()) return;
+    // The requests for input still outstanding, as requests of the server marked with the task.
+    struct Pending {
+        std::string key;
+        std::string method;
+        json params;
+    };
+    std::vector<Pending> pending;
+    for (const auto& item : record->asked->items()) {
+        if (record->answers && member(*record->answers, item.key()) != nullptr) continue;
+        auto method = served.tasks->input_method(item.value());
+        if (!method) continue;
+        json params = served.tasks->input_params(item.value());
+        served.tasks->relate(params, record->id);
+        pending.push_back(Pending{item.key(), std::move(*method), std::move(params)});
+    }
+    if (pending.empty() || served.input == nullptr || served.input->delivery() != InputDelivery::requests) return;
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (closed_ || !call->active) return;
+    if (call->unit && (call->unit->abandoned || call->unit->finished)) return;
+    std::shared_ptr<WaitState> wait = call->wait;
+    if (!wait) {
+        // One wait for the whole stream: it ends with the request, not with a round.
+        wait = std::make_shared<WaitState>();
+        wait->core = weak_from_this();
+        wait->call = call;
+        call->wait = wait;
+    }
+    bool queued = false;
+    for (auto& entry : pending) {
+        if (!stream.sent.insert(entry.key).second) continue;  // sent on this stream already
+        const RequestId request_id(next_outgoing_++);
+        outgoing_.emplace(request_id, Outgoing{wait, entry.key});
+        wait->ids.push_back(request_id);
+        wait->asked.insert_or_assign(entry.key, entry.method);
+        ++wait->outstanding;
+        std::string line = serialize(served.input->asking_request(request_id, entry.method, std::move(entry.params)));
+        queued = enqueue(Queued{make_output(std::move(line), OutputKind::request, false, RefusalReason::none,
+                                            call->profile),
+                                call, call->unit}) ||
+                 queued;
+    }
+    if (queued) drain(lock, Writer::host);
+}
+
+void SessionCore::deliver(const std::shared_ptr<TaskStream>& stream, const std::string& key, const json& raw,
+                          InputResponse answer) {
+    TaskHost* tasks = host_.task_host();
+    if (tasks == nullptr) return;
+    json kept = json::object();
+    kept[key] = raw;
+    InputResponses responses;
+    responses.emplace(key, std::move(answer));
+    try {
+        // An answer the task cannot take (it asked no more, or the answer is too large to keep) leaves it waiting:
+        // it ends as a task does whose requests are not answered.
+        static_cast<void>(tasks->answer_task(stream->task_id, stream->owner, std::move(kept), std::move(responses)));
+    } catch (...) {
+        // The same.
+    }
+}
+
+void SessionCore::task_notice(const TaskRecord& record, const TaskMechanism& mechanism,
+                              const profile::ProfilePtr& profile) {
+    std::optional<FeedMessage> notice = mechanism.status_notice(record);
+    if (!notice || !profile) return;
+    const profile::Message* entry = profile->notification(notice->method);
+    if (entry == nullptr || !entry->from_server) return;
+    if (entry->params) keep_members(notice->params, *entry->params, *profile);
+    std::string line = serialize(make_notification(entry->method, std::move(notice->params)));
+    std::unique_lock<std::mutex> lock(mutex_);
+    // The connection that created the task, while it is open and its client is ready; dropped while the queue is full.
+    if (closed_ || !connection_ || !connection_->ready || queue_.size() >= options_.max_queued_notifications) return;
+    if (enqueue(Queued{make_output(std::move(line), OutputKind::notification, false, RefusalReason::none, profile),
+                       nullptr, nullptr})) {
+        drain(lock, Writer::host);
     }
 }
 
@@ -2695,7 +3011,7 @@ json SessionCore::supported_versions(const OpenMechanism* opener) const {
     return list;
 }
 
-json SessionCore::capabilities(const Served& served) const {
+json SessionCore::capabilities(const Served& served, bool bound) const {
     const profile::Profile& profile = *served.profile;
     const ChangeSupport reported = this->reported();
     json capabilities = json::object();
@@ -2715,7 +3031,7 @@ json SessionCore::capabilities(const Served& served) const {
         capabilities["prompts"] = std::move(prompts);
     }
     if (host_.completion_host() != nullptr) capabilities["completions"] = json::object();
-    if (served.tasks->answers_with_tasks() && host_.task_host() != nullptr) served.tasks->declare(capabilities);
+    if (served.tasks->answers_with_tasks() && host_.task_host() != nullptr) served.tasks->declare(capabilities, bound);
     // Every revision's schema gives the capabilities of tools, prompts and resources these members, so only the
     // capabilities themselves are filtered.
     keep_members(capabilities, "ServerCapabilities", profile);
@@ -2854,6 +3170,7 @@ void SessionCore::finish_call(const std::shared_ptr<CallState>& call, json respo
     call->active = false;
     std::shared_ptr<WaitState> wait = call->wait;
     if (wait) close_wait(wait);
+    std::shared_ptr<TaskStream> stream = std::move(call->task_stream);
     if (const auto found = in_flight_.find(call->id); found != in_flight_.end() && found->second == call) {
         in_flight_.erase(found);
     }
@@ -2869,6 +3186,7 @@ void SessionCore::finish_call(const std::shared_ptr<CallState>& call, json respo
     }
     lock.unlock();
     if (wait) wait->ended.request_stop();
+    if (stream) stream->release();
     if (batch_finished) emit_batch(call->batch, Writer::host);
 }
 
@@ -3172,13 +3490,19 @@ void SessionCore::on_response(const Message& response) {
     }
     std::shared_ptr<CallState> call;
     bool done = false;
+    std::shared_ptr<TaskStream> stream;  // the answer is the task's, which the stream of a result request asked
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         const auto found = outgoing_.find(*response.id);
         if (found == outgoing_.end() || found->second.wait != wait || !wait->open) return;
         outgoing_.erase(found);
         call = wait->call.lock();
-        if (!call || !call->active) {
+        if (call && call->active && call->kind == CallKind::task_result) {
+            // The wait stays open for the stream's later rounds; it ends with the request.
+            --wait->outstanding;
+            stream = call->task_stream;
+            if (!stream) return;
+        } else if (!call || !call->active) {
             close_wait(wait);
             done = true;
             call.reset();
@@ -3192,6 +3516,12 @@ void SessionCore::on_response(const Message& response) {
                 done = true;
             }
         }
+    }
+    if (stream) {
+        // An error, or an answer that is malformed, answers nothing: the task waits on, and ends as a task does whose
+        // requests are not answered.
+        if (answer) deliver(stream, key, response.outcome, std::move(*answer));
+        return;
     }
     if (!done) return;
     wait->ended.request_stop();
@@ -3512,8 +3842,10 @@ void SessionCore::abandon(UnitId number) {
             const std::shared_ptr<CallState> call = it->second;
             const bool waiting = call->wait != nullptr;
             const bool subscription = call->kind == CallKind::subscription;
+            // A result request for a task waits only to write on its stream: it ends with it (the task does not).
+            const bool streamed = subscription || call->kind == CallKind::task_result;
             if (call->unit != unit ||
-                (!waiting && !subscription && !call->served->cancel->stops_on_stream_close())) {
+                (!waiting && !streamed && !call->served->cancel->stops_on_stream_close())) {
                 ++it;
                 continue;
             }
