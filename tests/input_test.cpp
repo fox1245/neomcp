@@ -133,6 +133,11 @@ public:
         resource.uri = "test://input-required";
         resource.name = "a resource that asks";
         resources_.push_back(std::move(resource));
+        // A resource that never asks and states caching hints.
+        neomcp::ResourceDefinition cached;
+        cached.uri = "test://cached";
+        cached.name = "a resource with caching hints";
+        resources_.push_back(std::move(cached));
     }
 
     neomcp::ResourceHost* resource_host() noexcept override { return this; }
@@ -180,6 +185,13 @@ public:
 
     void read(const neomcp::ReadRequest& request, neomcp::CallControl, neomcp::Completion done) override {
         record(request.uri, request.input_responses, request.request_state);
+        if (request.uri == "test://cached") {
+            neomcp::ReadResult result;
+            result.contents.emplace_back(neomcp::TextResourceContents{request.uri, "text/plain", "cached", std::nullopt});
+            result.cache = neomcp::CacheHints{60000, neomcp::CacheScope::public_scope};
+            done(neomcp::FeatureOutcome(std::move(result)));
+            return;
+        }
         const auto found = request.input_responses.find("roots");
         if (found != request.input_responses.end()) {
             if (const auto* roots = std::get_if<neomcp::RootsAnswer>(&found->second)) {
@@ -558,6 +570,42 @@ TEST(InputRequiredResult, AResourceReadAsksAndItsRetriedResultIsNotCached) {
     EXPECT_EQ(result_of(second).at("contents").at(0).at("text"), "1 roots");
     EXPECT_EQ(result_of(second).at("ttlMs"), 0) << "the host's hints do not apply to a retry";
     EXPECT_EQ(result_of(second).at("cacheScope"), "private");
+}
+
+// Caching hints say how long a result may be reused for the same request. A request that carries answers is a retry:
+// its result depends on inputs that are not part of a cache key. Answers the session dropped (answers_need_state, and
+// no state) never reach the host, so the request is the first round of its call and its hints are written.
+TEST(InputRequiredResult, AReadWhoseAnswersWereDroppedKeepsTheHostsCachingHints) {
+    json params = json::object();
+    params["uri"] = "test://cached";
+
+    Modern plain;
+    const json first = plain.ask("resources/read", params);
+    ASSERT_TRUE(completes(first)) << first.dump();
+    EXPECT_EQ(result_of(first).at("ttlMs"), 60000) << "a first round states the host's hints";
+    EXPECT_EQ(result_of(first).at("cacheScope"), "public");
+
+    // Answers without a state reach the host, which makes the request a retry.
+    params["inputResponses"] = one("roots", roots_answer());
+    const json retried = plain.ask("resources/read", params);
+    ASSERT_TRUE(completes(retried)) << retried.dump();
+    EXPECT_EQ(result_of(retried).at("ttlMs"), 0);
+    EXPECT_EQ(result_of(retried).at("cacheScope"), "private");
+    const auto delivered = plain.host.last("test://cached");
+    ASSERT_TRUE(delivered);
+    EXPECT_EQ(delivered->answers.size(), 1u);
+
+    // The same request where answers need a state: the answers are dropped, the host sees none.
+    neomcp::SessionOptions strict_options = input_options();
+    strict_options.answers_need_state = true;
+    Modern strict(strict_options);
+    const json dropped = strict.ask("resources/read", params);
+    ASSERT_TRUE(completes(dropped)) << dropped.dump();
+    const auto seen = strict.host.last("test://cached");
+    ASSERT_TRUE(seen);
+    EXPECT_TRUE(seen->answers.empty());
+    EXPECT_EQ(result_of(dropped).at("ttlMs"), 60000) << "dropped answers leave the request a first round";
+    EXPECT_EQ(result_of(dropped).at("cacheScope"), "public");
 }
 
 TEST(InputRequiredResult, ResultTypeIsAnOwnMember) {

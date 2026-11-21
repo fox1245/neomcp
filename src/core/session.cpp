@@ -270,7 +270,7 @@ struct CallSubject {
     std::string name;
     json arguments = json::object();
     HostRequest request;  // the first round's request to the host
-    bool retry = false;   // the request carried answers or a state of an earlier round
+    bool retry = false;   // an answer or the state of an earlier round reached the host with the request
     std::uint64_t round = 0;  // how many times the call asked before, by its sealed state
 };
 
@@ -2414,10 +2414,11 @@ std::optional<Answer> SessionCore::take_retry(const Message& request, const Serv
         return served_answer(make_error(id, error->code, error->message, error->data), served);
     }
     InputRetry& retry = std::get<InputRetry>(read);
-    subject.retry = retry.responses.has_value() || retry.state.has_value();
     if (!retry.state) {
         // No state says what was asked. Strict: such answers are no answers, and the host asks for what it still needs.
+        // Nothing of an earlier round reaches the host then, so the request is the first round of its call.
         if (options_.answers_need_state || !retry.responses) return std::nullopt;
+        subject.retry = true;
         // Otherwise each answer reaches the host as the answer of the one kind of request its members make it; keys
         // the host did not ask by it ignores.
         InputResponses answers;
@@ -2444,6 +2445,7 @@ std::optional<Answer> SessionCore::take_retry(const Message& request, const Serv
             subject.request);
         return std::nullopt;
     }
+    subject.retry = true;
     const auto refuse = [&](RequestStateProblem problem) {
         Answer answer = state_refusal(id, problem, request.method);
         answer.profile = served.profile;

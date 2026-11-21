@@ -89,8 +89,6 @@ times in a row at most; certificate verification cannot be switched off; libcurl
 - The keywords a form of elicitation may use are written out in `src/server/form_schema.cpp` for the newest
   revision; they should come from the profile's types, so that a revision whose types differ (2025-06-18 has no
   `default` for strings) gets the form it defines.
-- Where the request state is required (`answers_need_state`), a retry whose answers are dropped is still treated as
-  a retry when caching hints are written.
 - stdio: cancelling a request by an id that is in use under both eras at once.
 - `lastModified` of a resource is written under 2024-11-05, whose types have no annotations.
 - Sampling messages of 2025-11-25 and 2026-07-28 may hold tool use and tool result blocks (`ToolUseContent`,
