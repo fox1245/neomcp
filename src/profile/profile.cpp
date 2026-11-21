@@ -22,6 +22,7 @@ std::string_view to_string(Slot slot) noexcept {
         case Slot::server_input: return "server_input";
         case Slot::change_feed: return "change_feed";
         case Slot::batch: return "batch";
+        case Slot::tasks: return "tasks";
     }
     return {};
 }
@@ -85,6 +86,16 @@ bool Profile::error_response_may_omit_id() const {
 
 std::string_view Profile::mechanism(Slot slot) const noexcept {
     return mechanisms_[static_cast<std::size_t>(slot)];
+}
+
+bool ExtensionProfile::applies_to(std::string_view revision) const noexcept {
+    return std::find(revisions_.begin(), revisions_.end(), revision) != revisions_.end();
+}
+
+std::optional<std::string_view> ExtensionProfile::mechanism(Slot slot) const noexcept {
+    const std::string_view name = mechanisms_[static_cast<std::size_t>(slot)];
+    if (name.empty()) return std::nullopt;
+    return name;
 }
 
 std::optional<int> Profile::error_code(std::string_view name) const {
@@ -392,8 +403,25 @@ public:
         return std::make_shared<const Profile>(std::move(loader.profile_));
     }
 
+    static ExtensionPtr run_extension(const Json& document) {
+        ProfileLoader loader;
+        loader.extension_root(Node(document, ""));
+        return std::make_shared<const ExtensionProfile>(std::move(loader.extension_));
+    }
+
+    // Adds the extensions to a copy of the core profile. The first problem is returned.
+    static std::variant<ProfilePtr, Error> compose(const Profile& core, std::span<const ExtensionPtr> extensions) {
+        Profile result = core;
+        for (std::size_t i = 0; i < extensions.size(); ++i) {
+            if (extensions[i] == nullptr) return Error{"", "an extension", "found a null extension"};
+            if (auto problem = add_extension(result, *extensions[i])) return std::move(*problem);
+        }
+        return std::make_shared<const Profile>(std::move(result));
+    }
+
 private:
     Profile profile_;
+    ExtensionProfile extension_;
 
     void root(const Node& node) {
         const Object object(node, {{"profile_version", true},
@@ -453,6 +481,247 @@ private:
     void tools(const Node& node) {
         const Object object(node, {{"invalid_arguments", true}});
         profile_.invalid_arguments_ = declared_name(object.at("invalid_arguments"), declared_invalid_arguments());
+    }
+
+    // ----- extensions
+
+    void extension_root(const Node& node) {
+        const Object object(node, {{"profile_version", true},
+                                   {"extension", true},
+                                   {"revisions", true},
+                                   {"evidence", true},
+                                   {"mechanisms", true},
+                                   {"senders", true},
+                                   {"transports", false},
+                                   {"errors", false},
+                                   {"wire", true}});
+
+        const Node version = object.at("profile_version");
+        if (const int number = int_of(version); number != 1) {
+            fail(version.pointer(), "1", "found " + std::to_string(number));
+        }
+        extension_.extension_ = nonempty_string_of(object.at("extension"));
+        const Node revisions = object.at("revisions");
+        extension_.revisions_ = strings_of(revisions, true);
+        if (extension_.revisions_.empty()) fail(revisions.pointer(), "at least one revision", "an empty array");
+        for (const auto& revision : extension_.revisions_) {
+            if (revision.empty()) fail(revisions.pointer(), "non-empty revisions", "found an empty string");
+        }
+
+        evidence(object.at("evidence"));
+        extension_.evidence_ = std::move(profile_.evidence_);
+
+        std::vector<MemberSpec> slots;
+        for (std::size_t i = 0; i < slot_count; ++i) slots.push_back({to_string(static_cast<Slot>(i)), false});
+        const Node mechanisms_node = object.at("mechanisms");
+        const Object mechanisms_object(mechanisms_node, slots);
+        extension_.mechanisms_.assign(slot_count, std::string_view());
+        for (std::size_t i = 0; i < slot_count; ++i) {
+            const Slot slot = static_cast<Slot>(i);
+            if (const auto chosen = mechanisms_object.find(to_string(slot))) {
+                extension_.mechanisms_[i] = declared_name(*chosen, declared_mechanisms(slot));
+            }
+        }
+
+        wire(object.at("wire"));
+        extension_.wire_schema_ = std::move(profile_.wire_schema_);
+        extension_.requests_ = std::move(profile_.requests_);
+        extension_.notifications_ = std::move(profile_.notifications_);
+        extension_.input_requests_ = std::move(profile_.input_requests_);
+        extension_.unlisted_message_types_ = std::move(profile_.unlisted_message_types_);
+        extension_.types_ = std::move(profile_.types_);
+        extension_.unions_ = std::move(profile_.unions_);
+
+        senders(object.at("senders"));
+
+        if (const auto errors_node = object.find("errors")) {
+            for_each_entry(*errors_node, [&](const std::string& name, const Node& value) {
+                extension_.error_codes_.push_back(NamedCode{name, int_of(value)});
+            });
+            std::sort(extension_.error_codes_.begin(), extension_.error_codes_.end(),
+                      [](const NamedCode& a, const NamedCode& b) { return a.name < b.name; });
+        }
+
+        if (const auto transports_node = object.find("transports")) {
+            const Object transports_object(*transports_node, {{"streamable_http", true}});
+            const Node streamable = transports_object.at("streamable_http");
+            const Object body(streamable, {{"request_headers", true}});
+            const Node headers = body.at("request_headers");
+            const auto& array = array_of(headers);
+            HeaderNames names;
+            for (std::size_t i = 0; i < array.size(); ++i) {
+                extension_.request_headers_.push_back(request_header(headers.element(array[i], i), names));
+            }
+        }
+    }
+
+    // The senders written by hand agree with the wire tables derived from the schema: the same messages, the same
+    // senders.
+    void senders(const Node& node) {
+        const Object object(node, {{"requests", true}, {"notifications", true}});
+        const auto check = [&](std::string_view member, const std::vector<Message>& table) {
+            const Node listed = object.at(member);
+            std::size_t counted = 0;
+            for_each_entry(listed, [&](const std::string& type, const Node& value) {
+                const auto& array = array_of(value);
+                bool client = false;
+                bool server = false;
+                for (std::size_t i = 0; i < array.size(); ++i) {
+                    const Node sender = value.element(array[i], i);
+                    static constexpr std::array<std::pair<std::string_view, bool>, 2> sender_names{
+                        {{"client", true}, {"server", false}}};
+                    bool& flag = pick(sender, sender_names) ? client : server;
+                    if (flag) fail(sender.pointer(), "distinct senders", "'" + string_of(sender) + "' repeats an earlier entry");
+                    flag = true;
+                }
+                if (!client && !server) fail(value.pointer(), "at least one sender", "an empty array");
+                const auto message = std::find_if(table.begin(), table.end(),
+                                                  [&](const Message& entry) { return entry.type == type; });
+                if (message == table.end()) {
+                    fail(value.pointer(), "a message type of wire." + std::string(member),
+                         "'" + type + "' is not one");
+                }
+                if (message->from_client != client || message->from_server != server) {
+                    fail(value.pointer(), "the senders of wire." + std::string(member) + "'s " + type, "other senders");
+                }
+                ++counted;
+            });
+            if (counted != table.size()) {
+                fail(listed.pointer(), "every message of wire." + std::string(member) + " listed",
+                     "the messages of the wire tables are " + std::to_string(table.size()) + ", the senders list " +
+                         std::to_string(counted));
+            }
+        };
+        check("requests", extension_.requests_);
+        check("notifications", extension_.notifications_);
+    }
+
+    // ----- composition
+
+    static std::string by_name(const NamedCode& entry) { return entry.name; }
+    static std::string by_name(const Type& entry) { return entry.name; }
+    static std::string by_name(const Union& entry) { return entry.name; }
+    static std::string by_name(const Message& entry) { return entry.method; }
+    static std::string by_name(const InputRequest& entry) { return entry.method; }
+
+    static bool same(const NamedCode& a, const NamedCode& b) { return a.code == b.code; }
+    static bool same(const Message& a, const Message& b) {
+        return a.from_client == b.from_client && a.from_server == b.from_server && a.type == b.type &&
+               a.params == b.params && a.params_required == b.params_required;
+    }
+    static bool same(const InputRequest& a, const InputRequest& b) {
+        return a.type == b.type && a.params == b.params && a.params_required == b.params_required;
+    }
+    static bool same(const Type& a, const Type& b) {
+        const auto property_types_equal = [](const std::vector<PropertyType>& x, const std::vector<PropertyType>& y) {
+            return std::equal(x.begin(), x.end(), y.begin(), y.end(), [](const PropertyType& l, const PropertyType& r) {
+                return l.property == r.property && l.type == r.type;
+            });
+        };
+        return a.properties == b.properties && a.required == b.required && a.type_values == b.type_values &&
+               property_types_equal(a.property_types, b.property_types);
+    }
+    static bool same(const Union& a, const Union& b) { return a.alternatives == b.alternatives; }
+
+    // Adds the entries of `source` that `target` lacks, keeping `target` sorted by name; an entry both have must be
+    // the same. `table` names the place in the extension's document.
+    template <typename Entry>
+    static std::optional<Error> merge_table(std::vector<Entry>& target, const std::vector<Entry>& source,
+                                            const std::string& place, std::string_view extension) {
+        const auto less = [](const Entry& entry, const std::string& key) { return by_name(entry) < key; };
+        for (const Entry& entry : source) {
+            const std::string name = by_name(entry);
+            auto it = std::lower_bound(target.begin(), target.end(), name, less);
+            if (it != target.end() && by_name(*it) == name) {
+                if (!same(*it, entry)) {
+                    return Error{place + "/" + escape_token(name), "a definition equal to the one already in the profile",
+                                 "the extension " + std::string(extension) + " defines '" + name + "' differently"};
+                }
+                continue;
+            }
+            target.insert(it, entry);
+        }
+        return std::nullopt;
+    }
+
+    static std::optional<Error> add_extension(Profile& result, const ExtensionProfile& extension) {
+        const std::string& id = extension.extension();
+        if (!extension.applies_to(result.revision_)) {
+            return Error{"/revisions", "a list that names " + result.revision_,
+                         "the extension " + id + " is not defined for this revision"};
+        }
+        if (std::find(result.extensions_.begin(), result.extensions_.end(), id) != result.extensions_.end()) {
+            return Error{"/extension", "an extension that is composed once", "'" + id + "' is composed twice"};
+        }
+
+        for (std::size_t i = 0; i < slot_count; ++i) {
+            if (const auto chosen = extension.mechanism(static_cast<Slot>(i))) result.mechanisms_[i] = *chosen;
+        }
+
+        if (auto problem = merge_table(result.error_codes_, extension.error_codes_, "/errors", id)) return problem;
+        if (auto problem = merge_table(result.requests_, extension.requests_, "/wire/requests", id)) return problem;
+        if (auto problem = merge_table(result.notifications_, extension.notifications_, "/wire/notifications", id)) {
+            return problem;
+        }
+        if (auto problem = merge_table(result.input_requests_, extension.input_requests_, "/wire/input_requests", id)) {
+            return problem;
+        }
+        if (auto problem = merge_table(result.types_, extension.types_, "/wire/types", id)) return problem;
+        if (auto problem = merge_table(result.unions_, extension.unions_, "/wire/unions", id)) return problem;
+        for (const std::string& name : extension.unlisted_message_types_) {
+            const auto it = std::lower_bound(result.unlisted_message_types_.begin(),
+                                             result.unlisted_message_types_.end(), name);
+            if (it == result.unlisted_message_types_.end() || *it != name) {
+                result.unlisted_message_types_.insert(it, name);
+            }
+        }
+
+        if (!extension.request_headers_.empty() && result.streamable_http_) {
+            if (auto problem = add_headers(result, extension)) return problem;
+        }
+        result.extensions_.push_back(id);
+        return std::nullopt;
+    }
+
+    // The extension's headers join the transport's: a header the transport has already (compared ignoring ASCII
+    // case) gets the extension's methods added; any other is appended. Every method then names a member its request
+    // carries.
+    static std::optional<Error> add_headers(Profile& result, const ExtensionProfile& extension) {
+        auto& headers = result.streamable_http_->request_headers;
+        for (std::size_t i = 0; i < extension.request_headers_.size(); ++i) {
+            const RequestHeader& added = extension.request_headers_[i];
+            const std::string place = "/transports/streamable_http/request_headers/" + std::to_string(i);
+            const std::string lowered = ascii_lower(added.name);
+            const auto existing = std::find_if(headers.begin(), headers.end(), [&](const RequestHeader& header) {
+                return ascii_lower(header.name) == lowered;
+            });
+            std::size_t index = 0;
+            if (existing == headers.end()) {
+                headers.push_back(added);
+                index = headers.size() - 1;
+            } else {
+                if (existing->value != added.value || existing->scope != HeaderScopeKind::per_method ||
+                    added.scope != HeaderScopeKind::per_method) {
+                    return Error{place, "a header that names members of the params of some methods, as the transport's " +
+                                            existing->name + " does",
+                                 "the transport's header of that name is of another kind"};
+                }
+                for (const MethodMember& entry : added.methods) {
+                    const auto listed = std::find_if(existing->methods.begin(), existing->methods.end(),
+                                                     [&](const MethodMember& old) { return old.method == entry.method; });
+                    if (listed != existing->methods.end()) {
+                        return Error{place + "/on/" + escape_token(entry.method), "a method the header does not list yet",
+                                     "'" + entry.method + "' is listed by the revision already"};
+                    }
+                    existing->methods.push_back(entry);
+                }
+                index = static_cast<std::size_t>(existing - headers.begin());
+            }
+            if (headers[index].value == HeaderValue::params_member) {
+                if (auto problem = check_members(result, place + "/on", added)) return problem;
+            }
+        }
+        return std::nullopt;
     }
 
     // ----- authorization
@@ -732,14 +1001,15 @@ private:
 
     // The object types behind a name, each once: the type itself, or for a union the types of all of its
     // alternatives. `visited` holds the names already followed.
-    void object_types(const std::string& name, std::vector<const Type*>& out, std::set<std::string>& visited) const {
+    static void object_types(const Profile& profile, const std::string& name, std::vector<const Type*>& out,
+                             std::set<std::string>& visited) {
         if (!visited.insert(name).second) return;
-        if (const Type* type = profile_.type(name)) {
+        if (const Type* type = profile.type(name)) {
             out.push_back(type);
             return;
         }
-        for (const auto& alternative : profile_.union_type(name)->alternatives) {
-            object_types(alternative, out, visited);
+        for (const auto& alternative : profile.union_type(name)->alternatives) {
+            object_types(profile, alternative, out, visited);
         }
     }
 
@@ -855,7 +1125,14 @@ private:
         if (const auto headers = object.find("request_headers")) {
             const auto& array = array_of(*headers);
             for (std::size_t i = 0; i < array.size(); ++i) {
-                transport.request_headers.push_back(request_header(headers->element(array[i], i), names));
+                const Node entry = headers->element(array[i], i);
+                transport.request_headers.push_back(request_header(entry, names));
+                const RequestHeader& header = transport.request_headers.back();
+                if (header.value == HeaderValue::params_member) {
+                    if (const auto problem = check_members(profile_, entry.member_pointer("on"), header)) {
+                        throw Failure{*problem};
+                    }
+                }
             }
         }
         if (const auto arguments = object.find("argument_headers")) {
@@ -894,7 +1171,7 @@ private:
         return table;
     }
 
-    RequestHeader request_header(const Node& node, HeaderNames& names) {
+    static RequestHeader request_header(const Node& node, HeaderNames& names) {
         const Object object(node, {{"name", true}, {"value", true}, {"on", true}});
         RequestHeader header;
         const Node name = object.at("name");
@@ -933,37 +1210,67 @@ private:
             fail(on.pointer(), "\"every_message\" or \"every_request\", because the value is not params_member",
                  "found an object of method to params member");
         }
-        if (header.value == HeaderValue::params_member) check_members(on, header);
         return header;
     }
 
-    // Every method a header lists is a request whose params type has the named member.
-    void check_members(const Node& on, const RequestHeader& header) {
+    // The type of the params of a request: the type the profile names for them or, where the schema writes the params
+    // inline in the request's definition, the type of that object (the request type's property `params`).
+    static const Type* params_type_of(const Profile& profile, const Message& request) {
+        static constexpr std::string_view params_member = "params";
+        if (request.params) return profile.type(*request.params);
+        const Type* owner = profile.type(request.type);
+        return owner == nullptr ? nullptr : profile.property_type(*owner, params_member);
+    }
+
+    // Every method a header lists is a request whose params type has the named member. `pointer` is the place of the
+    // header's `on` member.
+    static std::optional<Error> check_members(const Profile& profile, const std::string& on_pointer,
+                                              const RequestHeader& header) {
         for (const auto& entry : header.methods) {
-            const std::string pointer = on.member_pointer(entry.method);
-            const Message* request = profile_.request(entry.method);
+            const std::string pointer = on_pointer + "/" + escape_token(entry.method);
+            const Message* request = profile.request(entry.method);
             if (request == nullptr) {
-                fail(pointer, "a method of wire.requests", "'" + entry.method + "' is not a request of this revision");
-            }
-            if (!request->params) {
-                fail(pointer, "a request that has a params type", "'" + entry.method + "' has no params type");
-            }
-            if (profile_.type(*request->params) == nullptr && profile_.union_type(*request->params) == nullptr) {
-                fail(pointer, "a params type that is listed in wire.types or wire.unions",
-                     "'" + *request->params + "' of '" + entry.method + "' is listed in neither");
+                return Error{pointer, "a method of wire.requests", "'" + entry.method + "' is not a request of this revision"};
             }
             std::vector<const Type*> candidates;
-            std::set<std::string> visited;
-            object_types(*request->params, candidates, visited);
+            if (request->params) {
+                if (profile.type(*request->params) == nullptr && profile.union_type(*request->params) == nullptr) {
+                    return Error{pointer, "a params type that is listed in wire.types or wire.unions",
+                                 "'" + *request->params + "' of '" + entry.method + "' is listed in neither"};
+                }
+                std::set<std::string> visited;
+                object_types(profile, *request->params, candidates, visited);
+            } else if (const Type* inline_params = params_type_of(profile, *request)) {
+                candidates.push_back(inline_params);
+            } else {
+                return Error{pointer, "a request that has a params type", "'" + entry.method + "' has no params type"};
+            }
             for (const Type* type : candidates) {
                 if (!type->has_property(entry.member)) {
-                    fail(pointer, "a property of " + type->name + ", which '" + entry.method + "' may carry",
-                         "'" + entry.member + "' is not a property of " + type->name);
+                    return Error{pointer, "a property of " + type->name + ", which '" + entry.method + "' may carry",
+                                 "'" + entry.member + "' is not a property of " + type->name};
                 }
             }
         }
+        return std::nullopt;
     }
 };
+
+std::variant<ExtensionPtr, Error> load_extension(std::string_view json_text) {
+    try {
+        const Json document = Json::parse(json_text, nullptr, false);
+        if (document.is_discarded()) return Error{"", "a JSON document", "the text is not valid JSON"};
+        return ProfileLoader::run_extension(document);
+    } catch (const Failure& failure) {
+        return failure.error;
+    } catch (const Json::exception& problem) {
+        return Error{"", "a readable JSON document", problem.what()};
+    }
+}
+
+std::variant<ProfilePtr, Error> compose(const Profile& core, std::span<const ExtensionPtr> extensions) {
+    return ProfileLoader::compose(core, extensions);
+}
 
 std::variant<ProfilePtr, Error> load(std::string_view json_text) {
     try {

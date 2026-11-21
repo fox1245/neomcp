@@ -14,6 +14,10 @@ constexpr std::array<std::string_view, 2> state_names{"connection", "none"};
 constexpr std::array<std::string_view, 2> server_input_names{"server_request", "input_required_result"};
 constexpr std::array<std::string_view, 2> change_feed_names{"connection_notifications", "subscriptions_listen"};
 constexpr std::array<std::string_view, 2> batch_names{"array", "none"};
+// How a long-running request is answered with a task the requester polls: none (no tasks); augmented_request (the
+// requester asks for a task with a member of the request); server_directed (the server decides, for a requester that
+// declared the extension).
+constexpr std::array<std::string_view, 3> tasks_names{"none", "augmented_request", "server_directed"};
 
 constexpr std::array<std::string_view, 1> stdio_cancel_names{"cancelled_notification"};
 constexpr std::array<std::string_view, 1> http_sse_cancel_names{"cancelled_notification"};
@@ -63,6 +67,7 @@ Names declared_mechanisms(Slot slot) {
         case Slot::server_input: return server_input_names;
         case Slot::change_feed: return change_feed_names;
         case Slot::batch: return batch_names;
+        case Slot::tasks: return tasks_names;
     }
     return {};
 }

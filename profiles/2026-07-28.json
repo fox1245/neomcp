@@ -7,6 +7,7 @@
     "repository": "https://github.com/modelcontextprotocol/modelcontextprotocol",
     "commit": "d4b317231161ee96d3eefb2448bda4230c76f4c6",
     "pages": [
+      "docs/specification/2026-07-28/changelog.mdx",
       "docs/specification/2026-07-28/basic/authorization/authorization-server-discovery.mdx",
       "docs/specification/2026-07-28/basic/index.mdx",
       "docs/specification/2026-07-28/basic/versioning.mdx",
@@ -25,7 +26,8 @@
     "state": "none",
     "server_input": "input_required_result",
     "change_feed": "subscriptions_listen",
-    "batch": "none"
+    "batch": "none",
+    "tasks": "none"
   },
   "transports": {
     "stdio": {

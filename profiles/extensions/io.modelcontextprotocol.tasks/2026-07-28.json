@@ -1,0 +1,1076 @@
+{
+  "profile_version": 1,
+  "extension": "io.modelcontextprotocol/tasks",
+  "revisions": [
+    "2026-07-28"
+  ],
+  "evidence": {
+    "verified_at": "2026-11-21",
+    "repository": "https://github.com/modelcontextprotocol/ext-tasks",
+    "commit": "0d0a6bd4c258b35caa3c810a1dd506cf105b1501",
+    "pages": [
+      "README.md",
+      "specification/2026-07-28/tasks.md"
+    ],
+    "schema": "schema/2026-07-28/schema.json"
+  },
+  "mechanisms": {
+    "tasks": "server_directed"
+  },
+  "senders": {
+    "requests": {
+      "GetTaskRequest": [
+        "client"
+      ],
+      "UpdateTaskRequest": [
+        "client"
+      ],
+      "CancelTaskRequest": [
+        "client"
+      ]
+    },
+    "notifications": {}
+  },
+  "transports": {
+    "streamable_http": {
+      "request_headers": [
+        {
+          "name": "Mcp-Name",
+          "value": "params_member",
+          "on": {
+            "tasks/get": "taskId",
+            "tasks/update": "taskId",
+            "tasks/cancel": "taskId"
+          }
+        }
+      ]
+    }
+  },
+  "errors": {
+    "missing_required_client_capability": -32021
+  },
+  "wire": {
+    "schema": {
+      "dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "bf30afb7ac251e3e22c037b7a685f60ef6603031b5484c0d08b1fa0bbe86d460"
+    },
+    "requests": {
+      "tasks/cancel": {
+        "from": [
+          "client"
+        ],
+        "type": "CancelTaskRequest",
+        "params": null,
+        "params_required": [
+          "taskId"
+        ]
+      },
+      "tasks/get": {
+        "from": [
+          "client"
+        ],
+        "type": "GetTaskRequest",
+        "params": null,
+        "params_required": [
+          "taskId"
+        ]
+      },
+      "tasks/update": {
+        "from": [
+          "client"
+        ],
+        "type": "UpdateTaskRequest",
+        "params": null,
+        "params_required": [
+          "inputResponses",
+          "taskId"
+        ]
+      }
+    },
+    "notifications": {},
+    "input_requests": {
+      "elicitation/create": {
+        "type": "ElicitRequest",
+        "params": "ElicitRequestParams",
+        "params_required": [
+          "message"
+        ]
+      },
+      "roots/list": {
+        "type": "ListRootsRequest",
+        "params": null,
+        "params_required": []
+      },
+      "sampling/createMessage": {
+        "type": "CreateMessageRequest",
+        "params": "CreateMessageRequestParams",
+        "params_required": [
+          "maxTokens",
+          "messages"
+        ]
+      }
+    },
+    "unlisted_message_types": [
+      "TaskStatusNotification"
+    ],
+    "types": {
+      "Annotations": {
+        "properties": [
+          "audience",
+          "lastModified",
+          "priority"
+        ],
+        "required": []
+      },
+      "AudioContent": {
+        "properties": [
+          "_meta",
+          "annotations",
+          "data",
+          "mimeType",
+          "type"
+        ],
+        "required": [
+          "data",
+          "mimeType",
+          "type"
+        ],
+        "type_values": [
+          "audio"
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
+      },
+      "BlobResourceContents": {
+        "properties": [
+          "_meta",
+          "blob",
+          "mimeType",
+          "uri"
+        ],
+        "required": [
+          "blob",
+          "uri"
+        ]
+      },
+      "BooleanSchema": {
+        "properties": [
+          "default",
+          "description",
+          "title",
+          "type"
+        ],
+        "required": [
+          "type"
+        ],
+        "type_values": [
+          "boolean"
+        ]
+      },
+      "CancelTaskRequest": {
+        "properties": [
+          "id",
+          "jsonrpc",
+          "method",
+          "params"
+        ],
+        "required": [
+          "id",
+          "jsonrpc",
+          "method",
+          "params"
+        ],
+        "property_types": {
+          "params": "CancelTaskRequest.params"
+        }
+      },
+      "CancelTaskRequest.params": {
+        "properties": [
+          "taskId"
+        ],
+        "required": [
+          "taskId"
+        ]
+      },
+      "CancelTaskResult": {
+        "properties": [
+          "_meta",
+          "resultType"
+        ],
+        "required": [
+          "resultType"
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject"
+        }
+      },
+      "CancelledTask": {
+        "properties": [
+          "createdAt",
+          "lastUpdatedAt",
+          "pollIntervalMs",
+          "status",
+          "statusMessage",
+          "taskId",
+          "ttlMs"
+        ],
+        "required": [
+          "createdAt",
+          "lastUpdatedAt",
+          "status",
+          "taskId",
+          "ttlMs"
+        ]
+      },
+      "CompletedTask": {
+        "properties": [
+          "createdAt",
+          "lastUpdatedAt",
+          "pollIntervalMs",
+          "result",
+          "status",
+          "statusMessage",
+          "taskId",
+          "ttlMs"
+        ],
+        "required": [
+          "createdAt",
+          "lastUpdatedAt",
+          "result",
+          "status",
+          "taskId",
+          "ttlMs"
+        ]
+      },
+      "CreateMessageRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method",
+          "params"
+        ],
+        "property_types": {
+          "params": "CreateMessageRequestParams"
+        }
+      },
+      "CreateMessageRequestParams": {
+        "properties": [
+          "includeContext",
+          "maxTokens",
+          "messages",
+          "metadata",
+          "modelPreferences",
+          "stopSequences",
+          "systemPrompt",
+          "temperature",
+          "toolChoice",
+          "tools"
+        ],
+        "required": [
+          "maxTokens",
+          "messages"
+        ],
+        "property_types": {
+          "modelPreferences": "ModelPreferences",
+          "toolChoice": "ToolChoice"
+        }
+      },
+      "CreateMessageResult": {
+        "properties": [
+          "_meta",
+          "content",
+          "model",
+          "role",
+          "stopReason"
+        ],
+        "required": [
+          "content",
+          "model",
+          "role"
+        ]
+      },
+      "CreateTaskResult": {
+        "properties": [
+          "_meta",
+          "createdAt",
+          "lastUpdatedAt",
+          "pollIntervalMs",
+          "resultType",
+          "status",
+          "statusMessage",
+          "taskId",
+          "ttlMs"
+        ],
+        "required": [
+          "createdAt",
+          "lastUpdatedAt",
+          "resultType",
+          "status",
+          "taskId",
+          "ttlMs"
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject"
+        }
+      },
+      "ElicitRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method",
+          "params"
+        ]
+      },
+      "ElicitRequestFormParams": {
+        "properties": [
+          "message",
+          "mode",
+          "requestedSchema"
+        ],
+        "required": [
+          "message",
+          "requestedSchema"
+        ],
+        "property_types": {
+          "requestedSchema": "ElicitRequestFormParams.requestedSchema"
+        }
+      },
+      "ElicitRequestFormParams.requestedSchema": {
+        "properties": [
+          "$schema",
+          "properties",
+          "required",
+          "type"
+        ],
+        "required": [
+          "properties",
+          "type"
+        ],
+        "type_values": [
+          "object"
+        ]
+      },
+      "ElicitRequestURLParams": {
+        "properties": [
+          "message",
+          "mode",
+          "url"
+        ],
+        "required": [
+          "message",
+          "mode",
+          "url"
+        ]
+      },
+      "ElicitResult": {
+        "properties": [
+          "action",
+          "content"
+        ],
+        "required": [
+          "action"
+        ]
+      },
+      "EmbeddedResource": {
+        "properties": [
+          "_meta",
+          "annotations",
+          "resource",
+          "type"
+        ],
+        "required": [
+          "resource",
+          "type"
+        ],
+        "type_values": [
+          "resource"
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
+      },
+      "Error": {
+        "properties": [
+          "code",
+          "data",
+          "message"
+        ],
+        "required": [
+          "code",
+          "message"
+        ]
+      },
+      "FailedTask": {
+        "properties": [
+          "createdAt",
+          "error",
+          "lastUpdatedAt",
+          "pollIntervalMs",
+          "status",
+          "statusMessage",
+          "taskId",
+          "ttlMs"
+        ],
+        "required": [
+          "createdAt",
+          "error",
+          "lastUpdatedAt",
+          "status",
+          "taskId",
+          "ttlMs"
+        ],
+        "property_types": {
+          "error": "Error"
+        }
+      },
+      "GetTaskRequest": {
+        "properties": [
+          "id",
+          "jsonrpc",
+          "method",
+          "params"
+        ],
+        "required": [
+          "id",
+          "jsonrpc",
+          "method",
+          "params"
+        ],
+        "property_types": {
+          "params": "GetTaskRequest.params"
+        }
+      },
+      "GetTaskRequest.params": {
+        "properties": [
+          "taskId"
+        ],
+        "required": [
+          "taskId"
+        ]
+      },
+      "Icon": {
+        "properties": [
+          "mimeType",
+          "sizes",
+          "src",
+          "theme"
+        ],
+        "required": [
+          "src"
+        ]
+      },
+      "ImageContent": {
+        "properties": [
+          "_meta",
+          "annotations",
+          "data",
+          "mimeType",
+          "type"
+        ],
+        "required": [
+          "data",
+          "mimeType",
+          "type"
+        ],
+        "type_values": [
+          "image"
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
+      },
+      "Implementation": {
+        "properties": [
+          "description",
+          "icons",
+          "name",
+          "title",
+          "version",
+          "websiteUrl"
+        ],
+        "required": [
+          "name",
+          "version"
+        ]
+      },
+      "InputRequiredTask": {
+        "properties": [
+          "createdAt",
+          "inputRequests",
+          "lastUpdatedAt",
+          "pollIntervalMs",
+          "status",
+          "statusMessage",
+          "taskId",
+          "ttlMs"
+        ],
+        "required": [
+          "createdAt",
+          "inputRequests",
+          "lastUpdatedAt",
+          "status",
+          "taskId",
+          "ttlMs"
+        ]
+      },
+      "JSONRPCNotification": {
+        "properties": [
+          "jsonrpc",
+          "method",
+          "params"
+        ],
+        "required": [
+          "jsonrpc",
+          "method"
+        ]
+      },
+      "JSONRPCRequest": {
+        "properties": [
+          "id",
+          "jsonrpc",
+          "method",
+          "params"
+        ],
+        "required": [
+          "id",
+          "jsonrpc",
+          "method"
+        ]
+      },
+      "LegacyTitledEnumSchema": {
+        "properties": [
+          "default",
+          "description",
+          "enum",
+          "enumNames",
+          "title",
+          "type"
+        ],
+        "required": [
+          "enum",
+          "type"
+        ],
+        "type_values": [
+          "string"
+        ]
+      },
+      "ListRootsRequest": {
+        "properties": [
+          "method",
+          "params"
+        ],
+        "required": [
+          "method"
+        ],
+        "property_types": {
+          "params": "ListRootsRequest.params"
+        }
+      },
+      "ListRootsRequest.params": {
+        "properties": [
+          "_meta"
+        ],
+        "required": []
+      },
+      "ListRootsResult": {
+        "properties": [
+          "roots"
+        ],
+        "required": [
+          "roots"
+        ]
+      },
+      "ModelHint": {
+        "properties": [
+          "name"
+        ],
+        "required": []
+      },
+      "ModelPreferences": {
+        "properties": [
+          "costPriority",
+          "hints",
+          "intelligencePriority",
+          "speedPriority"
+        ],
+        "required": []
+      },
+      "NotificationMetaObject": {
+        "properties": [
+          "io.modelcontextprotocol/subscriptionId"
+        ],
+        "required": []
+      },
+      "NotificationParams": {
+        "properties": [
+          "_meta"
+        ],
+        "required": [],
+        "property_types": {
+          "_meta": "NotificationMetaObject"
+        }
+      },
+      "NumberSchema": {
+        "properties": [
+          "default",
+          "description",
+          "maximum",
+          "minimum",
+          "title",
+          "type"
+        ],
+        "required": [
+          "type"
+        ],
+        "type_values": [
+          "integer",
+          "number"
+        ]
+      },
+      "ResourceLink": {
+        "properties": [
+          "_meta",
+          "annotations",
+          "description",
+          "icons",
+          "mimeType",
+          "name",
+          "size",
+          "title",
+          "type",
+          "uri"
+        ],
+        "required": [
+          "name",
+          "type",
+          "uri"
+        ],
+        "type_values": [
+          "resource_link"
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
+      },
+      "Result": {
+        "properties": [
+          "_meta",
+          "resultType"
+        ],
+        "required": [
+          "resultType"
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject"
+        }
+      },
+      "ResultMetaObject": {
+        "properties": [
+          "io.modelcontextprotocol/serverInfo"
+        ],
+        "required": [],
+        "property_types": {
+          "io.modelcontextprotocol/serverInfo": "Implementation"
+        }
+      },
+      "Root": {
+        "properties": [
+          "_meta",
+          "name",
+          "uri"
+        ],
+        "required": [
+          "uri"
+        ]
+      },
+      "SamplingMessage": {
+        "properties": [
+          "_meta",
+          "content",
+          "role"
+        ],
+        "required": [
+          "content",
+          "role"
+        ]
+      },
+      "StringSchema": {
+        "properties": [
+          "default",
+          "description",
+          "format",
+          "maxLength",
+          "minLength",
+          "title",
+          "type"
+        ],
+        "required": [
+          "type"
+        ],
+        "type_values": [
+          "string"
+        ]
+      },
+      "Task": {
+        "properties": [
+          "createdAt",
+          "lastUpdatedAt",
+          "pollIntervalMs",
+          "status",
+          "statusMessage",
+          "taskId",
+          "ttlMs"
+        ],
+        "required": [
+          "createdAt",
+          "lastUpdatedAt",
+          "status",
+          "taskId",
+          "ttlMs"
+        ]
+      },
+      "TaskStatusNotification": {
+        "properties": [
+          "jsonrpc",
+          "method",
+          "params"
+        ],
+        "required": [
+          "jsonrpc",
+          "method",
+          "params"
+        ]
+      },
+      "TaskSubscriptionAcknowledgedNotifications": {
+        "properties": [
+          "taskIds"
+        ],
+        "required": []
+      },
+      "TaskSubscriptionNotifications": {
+        "properties": [
+          "taskIds"
+        ],
+        "required": []
+      },
+      "TextContent": {
+        "properties": [
+          "_meta",
+          "annotations",
+          "text",
+          "type"
+        ],
+        "required": [
+          "text",
+          "type"
+        ],
+        "type_values": [
+          "text"
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
+      },
+      "TextResourceContents": {
+        "properties": [
+          "_meta",
+          "mimeType",
+          "text",
+          "uri"
+        ],
+        "required": [
+          "text",
+          "uri"
+        ]
+      },
+      "TitledMultiSelectEnumSchema": {
+        "properties": [
+          "default",
+          "description",
+          "items",
+          "maxItems",
+          "minItems",
+          "title",
+          "type"
+        ],
+        "required": [
+          "items",
+          "type"
+        ],
+        "type_values": [
+          "array"
+        ],
+        "property_types": {
+          "items": "TitledMultiSelectEnumSchema.items"
+        }
+      },
+      "TitledMultiSelectEnumSchema.items": {
+        "properties": [
+          "anyOf"
+        ],
+        "required": [
+          "anyOf"
+        ]
+      },
+      "TitledSingleSelectEnumSchema": {
+        "properties": [
+          "default",
+          "description",
+          "oneOf",
+          "title",
+          "type"
+        ],
+        "required": [
+          "oneOf",
+          "type"
+        ],
+        "type_values": [
+          "string"
+        ]
+      },
+      "Tool": {
+        "properties": [
+          "_meta",
+          "annotations",
+          "description",
+          "icons",
+          "inputSchema",
+          "name",
+          "outputSchema",
+          "title"
+        ],
+        "required": [
+          "inputSchema",
+          "name"
+        ],
+        "property_types": {
+          "annotations": "ToolAnnotations",
+          "inputSchema": "Tool.inputSchema",
+          "outputSchema": "Tool.outputSchema"
+        }
+      },
+      "Tool.inputSchema": {
+        "properties": [
+          "$schema",
+          "type"
+        ],
+        "required": [
+          "type"
+        ],
+        "type_values": [
+          "object"
+        ]
+      },
+      "Tool.outputSchema": {
+        "properties": [
+          "$schema"
+        ],
+        "required": []
+      },
+      "ToolAnnotations": {
+        "properties": [
+          "destructiveHint",
+          "idempotentHint",
+          "openWorldHint",
+          "readOnlyHint",
+          "title"
+        ],
+        "required": []
+      },
+      "ToolChoice": {
+        "properties": [
+          "mode"
+        ],
+        "required": []
+      },
+      "ToolResultContent": {
+        "properties": [
+          "_meta",
+          "content",
+          "isError",
+          "structuredContent",
+          "toolUseId",
+          "type"
+        ],
+        "required": [
+          "content",
+          "toolUseId",
+          "type"
+        ],
+        "type_values": [
+          "tool_result"
+        ]
+      },
+      "ToolUseContent": {
+        "properties": [
+          "_meta",
+          "id",
+          "input",
+          "name",
+          "type"
+        ],
+        "required": [
+          "id",
+          "input",
+          "name",
+          "type"
+        ],
+        "type_values": [
+          "tool_use"
+        ]
+      },
+      "UntitledMultiSelectEnumSchema": {
+        "properties": [
+          "default",
+          "description",
+          "items",
+          "maxItems",
+          "minItems",
+          "title",
+          "type"
+        ],
+        "required": [
+          "items",
+          "type"
+        ],
+        "type_values": [
+          "array"
+        ],
+        "property_types": {
+          "items": "UntitledMultiSelectEnumSchema.items"
+        }
+      },
+      "UntitledMultiSelectEnumSchema.items": {
+        "properties": [
+          "enum",
+          "type"
+        ],
+        "required": [
+          "enum",
+          "type"
+        ],
+        "type_values": [
+          "string"
+        ]
+      },
+      "UntitledSingleSelectEnumSchema": {
+        "properties": [
+          "default",
+          "description",
+          "enum",
+          "title",
+          "type"
+        ],
+        "required": [
+          "enum",
+          "type"
+        ],
+        "type_values": [
+          "string"
+        ]
+      },
+      "UpdateTaskRequest": {
+        "properties": [
+          "id",
+          "jsonrpc",
+          "method",
+          "params"
+        ],
+        "required": [
+          "id",
+          "jsonrpc",
+          "method",
+          "params"
+        ],
+        "property_types": {
+          "params": "UpdateTaskRequest.params"
+        }
+      },
+      "UpdateTaskRequest.params": {
+        "properties": [
+          "inputResponses",
+          "taskId"
+        ],
+        "required": [
+          "inputResponses",
+          "taskId"
+        ]
+      },
+      "UpdateTaskResult": {
+        "properties": [
+          "_meta",
+          "resultType"
+        ],
+        "required": [
+          "resultType"
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject"
+        }
+      },
+      "WorkingTask": {
+        "properties": [
+          "createdAt",
+          "lastUpdatedAt",
+          "pollIntervalMs",
+          "status",
+          "statusMessage",
+          "taskId",
+          "ttlMs"
+        ],
+        "required": [
+          "createdAt",
+          "lastUpdatedAt",
+          "status",
+          "taskId",
+          "ttlMs"
+        ]
+      }
+    },
+    "unions": {
+      "ContentBlock": [
+        "AudioContent",
+        "EmbeddedResource",
+        "ImageContent",
+        "ResourceLink",
+        "TextContent"
+      ],
+      "ElicitRequestParams": [
+        "ElicitRequestFormParams",
+        "ElicitRequestURLParams"
+      ],
+      "InputRequest": [
+        "CreateMessageRequest",
+        "ElicitRequest",
+        "ListRootsRequest"
+      ],
+      "InputResponse": [
+        "CreateMessageResult",
+        "ElicitResult",
+        "ListRootsResult"
+      ],
+      "PrimitiveSchemaDefinition": [
+        "BooleanSchema",
+        "LegacyTitledEnumSchema",
+        "NumberSchema",
+        "StringSchema",
+        "TitledMultiSelectEnumSchema",
+        "TitledSingleSelectEnumSchema",
+        "UntitledMultiSelectEnumSchema",
+        "UntitledSingleSelectEnumSchema"
+      ],
+      "SamplingMessageContentBlock": [
+        "AudioContent",
+        "ImageContent",
+        "TextContent",
+        "ToolResultContent",
+        "ToolUseContent"
+      ]
+    }
+  }
+}

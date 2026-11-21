@@ -18,4 +18,15 @@ struct BuiltinEntry {
 
 std::span<const BuiltinEntry> builtin_entries() noexcept;
 
+// An extension profile document built into the library; the table is generated from
+// profiles/extensions/<folder>/<revision>.json at build time.
+struct BuiltinExtensionEntry {
+    std::string_view folder;    // the folder the file is in
+    std::string_view revision;  // the file name without ".json"
+    const unsigned char* data;
+    std::size_t size;
+};
+
+std::span<const BuiltinExtensionEntry> builtin_extension_entries() noexcept;
+
 }  // namespace neomcp::profile::detail

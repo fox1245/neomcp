@@ -895,3 +895,475 @@ TEST(Rejects, RootThatIsNotAnObject) {
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------------------------------------------
+// Tasks and extensions
+
+namespace {
+
+// The identifier of the one extension profile built into the library.
+constexpr std::string_view tasks_extension = "io.modelcontextprotocol/tasks";
+
+json extension_document() {
+    const std::string_view text = builtin_extension_text(tasks_extension, modern_revision);
+    EXPECT_FALSE(text.empty());
+    return json::parse(text);
+}
+
+Error rejected_extension(const json& document) {
+    auto result = load_extension(document.dump());
+    auto* error = std::get_if<Error>(&result);
+    EXPECT_NE(error, nullptr) << "the document was accepted";
+    return error != nullptr ? *error : Error{};
+}
+
+ExtensionPtr accepted_extension(const json& document) {
+    auto result = load_extension(document.dump());
+    auto* extension = std::get_if<ExtensionPtr>(&result);
+    EXPECT_NE(extension, nullptr) << "the document was rejected";
+    return extension != nullptr ? *extension : nullptr;
+}
+
+Error rejected_composition(const Profile& core, const ExtensionPtr& extension) {
+    auto result = compose(core, std::span<const ExtensionPtr>(&extension, 1));
+    auto* error = std::get_if<Error>(&result);
+    EXPECT_NE(error, nullptr) << "the composition was accepted";
+    return error != nullptr ? *error : Error{};
+}
+
+ProfilePtr composed(const Profile& core, const ExtensionPtr& extension) {
+    auto result = compose(core, std::span<const ExtensionPtr>(&extension, 1));
+    auto* profile = std::get_if<ProfilePtr>(&result);
+    EXPECT_NE(profile, nullptr) << "the composition was rejected";
+    return profile != nullptr ? *profile : nullptr;
+}
+
+const RequestHeader* header_named(const Profile& profile, std::string_view name) {
+    for (const RequestHeader& header : profile.streamable_http()->request_headers) {
+        if (header.name == name) return &header;
+    }
+    return nullptr;
+}
+
+}  // namespace
+
+TEST(Tasks, EveryCoreRevisionNamesItsTasksMechanism) {
+    // Stated here from the pages of each revision, not read back from the profiles: only 2025-11-25 defines tasks in
+    // the core protocol, and 2026-07-28 moved them to an extension, so its core profile selects none.
+    EXPECT_EQ(require_builtin("2024-11-05")->mechanism(Slot::tasks), "none");
+    EXPECT_EQ(require_builtin("2025-03-26")->mechanism(Slot::tasks), "none");
+    EXPECT_EQ(require_builtin("2025-06-18")->mechanism(Slot::tasks), "none");
+    EXPECT_EQ(require_builtin("2025-11-25")->mechanism(Slot::tasks), "augmented_request");
+    EXPECT_EQ(require_builtin("2026-07-28")->mechanism(Slot::tasks), "none");
+    EXPECT_EQ(to_string(Slot::tasks), "tasks");
+}
+
+TEST(Tasks, TheTasksSlotDeclaresItsThreeNames) {
+    const auto names = declared_mechanisms(Slot::tasks);
+    std::vector<std::string_view> sorted(names.begin(), names.end());
+    std::sort(sorted.begin(), sorted.end());
+    EXPECT_EQ(sorted, (std::vector<std::string_view>{"augmented_request", "none", "server_directed"}));
+}
+
+TEST(Tasks, ACoreProfileThatNamesAnUndeclaredTasksMechanism) {
+    json document = builtin_document(modern_revision);
+    document["mechanisms"]["tasks"] = "polling";
+    EXPECT_EQ(rejected(document).pointer, "/mechanisms/tasks");
+    document["mechanisms"].erase("tasks");
+    EXPECT_EQ(rejected(document).pointer, "/mechanisms/tasks");
+}
+
+TEST(Tasks, OnlyTheLastLegacyRevisionHasTaskMessagesInItsWire) {
+    for (const auto method : {"tasks/get", "tasks/result", "tasks/list", "tasks/cancel"}) {
+        EXPECT_NE(require_builtin(last_legacy_revision)->request(method), nullptr) << method;
+        EXPECT_EQ(require_builtin(modern_revision)->request(method), nullptr) << method;
+        EXPECT_EQ(require_builtin("2025-06-18")->request(method), nullptr) << method;
+    }
+}
+
+TEST(Extension, TheBuiltInExtensionLoads) {
+    const auto names = builtin_extensions();
+    ASSERT_EQ(names.size(), 1u);
+    EXPECT_EQ(names[0], tasks_extension);
+    const ExtensionPtr extension = builtin_extension(tasks_extension, modern_revision);
+    ASSERT_NE(extension, nullptr);
+    EXPECT_EQ(builtin_extension(tasks_extension, modern_revision), extension) << "loaded once";
+    EXPECT_EQ(extension->extension(), tasks_extension);
+    ASSERT_EQ(extension->revisions().size(), 1u);
+    EXPECT_EQ(extension->revisions()[0], modern_revision);
+    EXPECT_TRUE(extension->applies_to(modern_revision));
+    EXPECT_FALSE(extension->applies_to(last_legacy_revision));
+    EXPECT_FALSE(extension->evidence().commit.empty());
+    EXPECT_FALSE(extension->wire_schema().sha256.empty());
+
+    EXPECT_EQ(extension->mechanism(Slot::tasks), std::optional<std::string_view>("server_directed"));
+    for (const Slot slot : {Slot::open, Slot::state, Slot::server_input, Slot::change_feed, Slot::batch}) {
+        EXPECT_EQ(extension->mechanism(slot), std::nullopt) << to_string(slot);
+    }
+}
+
+TEST(Extension, UnknownExtensionOrRevision) {
+    EXPECT_EQ(builtin_extension("example/none", modern_revision), nullptr);
+    EXPECT_EQ(builtin_extension(tasks_extension, last_legacy_revision), nullptr);
+    EXPECT_EQ(builtin_extension(tasks_extension, "no-such-revision"), nullptr);
+    EXPECT_TRUE(builtin_extension_text("example/none", modern_revision).empty());
+}
+
+TEST(Extension, ItsWireHasTheThreeRequestsAndTheirSenders) {
+    const ExtensionPtr extension = builtin_extension(tasks_extension, modern_revision);
+    ASSERT_NE(extension, nullptr);
+    std::vector<std::pair<std::string, std::string>> requests;
+    for (const Message& message : extension->requests()) {
+        EXPECT_TRUE(message.from_client) << message.method;
+        EXPECT_FALSE(message.from_server) << message.method;
+        EXPECT_EQ(std::count(message.params_required.begin(), message.params_required.end(), "taskId"), 1)
+            << message.method;
+        requests.emplace_back(message.method, message.type);
+    }
+    EXPECT_EQ(requests, (std::vector<std::pair<std::string, std::string>>{{"tasks/cancel", "CancelTaskRequest"},
+                                                                          {"tasks/get", "GetTaskRequest"},
+                                                                          {"tasks/update", "UpdateTaskRequest"}}));
+    EXPECT_TRUE(extension->notifications().empty());
+    // The status notification names a method of its own that the schema assigns to no sender.
+    ASSERT_EQ(extension->unlisted_message_types().size(), 1u);
+    EXPECT_EQ(extension->unlisted_message_types()[0], "TaskStatusNotification");
+    ASSERT_EQ(extension->error_codes().size(), 1u);
+    EXPECT_EQ(extension->error_codes()[0].name, "missing_required_client_capability");
+    EXPECT_EQ(extension->error_codes()[0].code, -32021);
+    ASSERT_EQ(extension->request_headers().size(), 1u);
+}
+
+TEST(Extension, TheCoreProfileAloneHasNoTaskMessage) {
+    const ProfilePtr core = require_builtin(modern_revision);
+    EXPECT_TRUE(core->extensions().empty());
+    for (const auto method : {"tasks/get", "tasks/update", "tasks/cancel", "tasks/result", "tasks/list"}) {
+        EXPECT_EQ(core->request(method), nullptr) << method;
+    }
+    EXPECT_EQ(core->type("CreateTaskResult"), nullptr);
+}
+
+TEST(Extension, ComposedWithTheExtensionTheRevisionHasTheTaskMessagesAndHeader) {
+    const ProfilePtr core = require_builtin(modern_revision);
+    const ExtensionPtr extension = builtin_extension(tasks_extension, modern_revision);
+    ASSERT_NE(extension, nullptr);
+    const ProfilePtr served = composed(*core, extension);
+    ASSERT_NE(served, nullptr);
+
+    ASSERT_EQ(served->extensions().size(), 1u);
+    EXPECT_EQ(served->extensions()[0], tasks_extension);
+    EXPECT_EQ(served->revision(), modern_revision);
+    EXPECT_EQ(served->mechanism(Slot::tasks), "server_directed");
+    // The other slots are the core's.
+    for (const Slot slot : {Slot::open, Slot::state, Slot::server_input, Slot::change_feed, Slot::batch}) {
+        EXPECT_EQ(served->mechanism(slot), core->mechanism(slot)) << to_string(slot);
+    }
+    for (const auto method : {"tasks/get", "tasks/update", "tasks/cancel"}) {
+        const Message* message = served->request(method);
+        ASSERT_NE(message, nullptr) << method;
+        EXPECT_TRUE(message->from_client);
+    }
+    EXPECT_EQ(served->request("tasks/result"), nullptr);
+    EXPECT_EQ(served->request("tasks/list"), nullptr);
+    EXPECT_NE(served->request("tools/call"), nullptr) << "the core's requests stay";
+    EXPECT_NE(served->type("CreateTaskResult"), nullptr);
+    EXPECT_NE(served->type("Tool"), nullptr);
+    EXPECT_EQ(served->error_code("missing_required_client_capability"), std::optional<int>(-32021));
+    EXPECT_EQ(served->unlisted_message_types().size(), 1u);
+    // The tables stay sorted, so the lookups above are valid.
+    EXPECT_TRUE(std::is_sorted(served->requests().begin(), served->requests().end(),
+                               [](const Message& a, const Message& b) { return a.method < b.method; }));
+    EXPECT_TRUE(std::is_sorted(served->types().begin(), served->types().end(),
+                               [](const Type& a, const Type& b) { return a.name < b.name; }));
+
+    // The routing header names the task id for the three methods, beside the methods the revision already had.
+    const RequestHeader* header = header_named(*served, "Mcp-Name");
+    ASSERT_NE(header, nullptr);
+    EXPECT_EQ(header->params_member("tasks/get"), std::optional<std::string_view>("taskId"));
+    EXPECT_EQ(header->params_member("tasks/update"), std::optional<std::string_view>("taskId"));
+    EXPECT_EQ(header->params_member("tasks/cancel"), std::optional<std::string_view>("taskId"));
+    EXPECT_EQ(header->params_member("tools/call"), std::optional<std::string_view>("name"));
+    EXPECT_EQ(header->params_member("tasks/result"), std::nullopt);
+
+    // The core is unchanged by the composition.
+    EXPECT_EQ(core->request("tasks/get"), nullptr);
+    EXPECT_EQ(core->mechanism(Slot::tasks), "none");
+    EXPECT_EQ(header_named(*core, "Mcp-Name")->params_member("tasks/get"), std::nullopt);
+}
+
+TEST(Extension, TheBuiltInComposedProfileIsCached) {
+    const std::vector<std::string_view> with_tasks{tasks_extension};
+    const ProfilePtr served = builtin(modern_revision, with_tasks);
+    ASSERT_NE(served, nullptr);
+    EXPECT_EQ(builtin(modern_revision, with_tasks), served);
+    EXPECT_NE(served, builtin(modern_revision));
+    EXPECT_NE(served->request("tasks/get"), nullptr);
+    EXPECT_EQ(builtin(modern_revision, {}), builtin(modern_revision)) << "no extension is the plain profile";
+}
+
+TEST(Extension, TheBuiltInComposedProfileIsNullForWhatIsNotBuiltIn) {
+    const std::vector<std::string_view> with_tasks{tasks_extension};
+    EXPECT_EQ(builtin(last_legacy_revision, with_tasks), nullptr) << "the extension is not defined for 2025-11-25";
+    EXPECT_EQ(builtin("no-such-revision", with_tasks), nullptr);
+    const std::vector<std::string_view> other{"example/none"};
+    EXPECT_EQ(builtin(modern_revision, other), nullptr);
+}
+
+TEST(Extension, ConcurrentFirstUseSharesOneComposedProfile) {
+    const std::vector<std::string_view> with_tasks{tasks_extension};
+    std::vector<ProfilePtr> seen(8);
+    std::vector<std::thread> threads;
+    for (auto& slot : seen) threads.emplace_back([&slot, &with_tasks] { slot = builtin(modern_revision, with_tasks); });
+    for (auto& thread : threads) thread.join();
+    for (const auto& profile : seen) {
+        ASSERT_NE(profile, nullptr);
+        EXPECT_EQ(profile, seen.front());
+    }
+}
+
+TEST(Extension, ComposingForARevisionTheExtensionIsNotDefinedFor) {
+    const ExtensionPtr extension = builtin_extension(tasks_extension, modern_revision);
+    ASSERT_NE(extension, nullptr);
+    EXPECT_EQ(rejected_composition(*require_builtin(last_legacy_revision), extension).pointer, "/revisions");
+}
+
+TEST(Extension, ComposingTheSameExtensionTwice) {
+    const ProfilePtr core = require_builtin(modern_revision);
+    const ExtensionPtr extension = builtin_extension(tasks_extension, modern_revision);
+    const std::vector<ExtensionPtr> twice{extension, extension};
+    auto result = compose(*core, twice);
+    const auto* error = std::get_if<Error>(&result);
+    ASSERT_NE(error, nullptr);
+    EXPECT_EQ(error->pointer, "/extension");
+}
+
+TEST(Extension, ComposingANullExtension) {
+    const ProfilePtr core = require_builtin(modern_revision);
+    const std::vector<ExtensionPtr> none{nullptr};
+    auto result = compose(*core, none);
+    EXPECT_NE(std::get_if<Error>(&result), nullptr);
+}
+
+TEST(Extension, ComposingWithNoExtensionIsACopy) {
+    const ProfilePtr core = require_builtin(modern_revision);
+    auto result = compose(*core, {});
+    const auto* copy = std::get_if<ProfilePtr>(&result);
+    ASSERT_NE(copy, nullptr);
+    EXPECT_NE(*copy, core);
+    EXPECT_EQ((*copy)->requests().size(), core->requests().size());
+    EXPECT_TRUE((*copy)->extensions().empty());
+}
+
+TEST(Extension, ATypeTheExtensionDefinesDifferentlyFromTheCoreIsRefused) {
+    json document = extension_document();
+    // `Tool` is a type both define.
+    ASSERT_TRUE(document["wire"]["types"].contains("Tool"));
+    document["wire"]["types"]["Tool"]["required"].push_back("annotations");
+    const ExtensionPtr extension = accepted_extension(document);
+    ASSERT_NE(extension, nullptr);
+    EXPECT_EQ(rejected_composition(*require_builtin(modern_revision), extension).pointer, "/wire/types/Tool");
+}
+
+TEST(Extension, ARequestTheExtensionDefinesDifferentlyFromTheCoreIsRefused) {
+    json document = extension_document();
+    // The core already has tools/list; the extension defines the same method with other required members.
+    json claimed = document["wire"]["requests"]["tasks/get"];
+    claimed["type"] = "ListToolsRequest";
+    document["wire"]["requests"]["tools/list"] = claimed;
+    document["senders"]["requests"]["ListToolsRequest"] = json::array({"client"});
+    const ExtensionPtr extension = accepted_extension(document);
+    ASSERT_NE(extension, nullptr);
+    EXPECT_EQ(rejected_composition(*require_builtin(modern_revision), extension).pointer,
+              "/wire/requests/tools~1list");
+}
+
+TEST(Extension, AnErrorCodeTheExtensionGivesAnotherNumberIsRefused) {
+    json document = extension_document();
+    document["errors"]["missing_required_client_capability"] = -32099;
+    const ExtensionPtr extension = accepted_extension(document);
+    ASSERT_NE(extension, nullptr);
+    EXPECT_EQ(rejected_composition(*require_builtin(modern_revision), extension).pointer,
+              "/errors/missing_required_client_capability");
+}
+
+TEST(Extension, AHeaderMethodTheRevisionAlreadyListsIsRefused) {
+    json document = extension_document();
+    document["transports"]["streamable_http"]["request_headers"][0]["on"]["tools/call"] = "name";
+    const ExtensionPtr extension = accepted_extension(document);
+    ASSERT_NE(extension, nullptr);
+    EXPECT_EQ(rejected_composition(*require_builtin(modern_revision), extension).pointer,
+              "/transports/streamable_http/request_headers/0/on/tools~1call");
+}
+
+TEST(Extension, AHeaderMemberTheRequestDoesNotCarryIsRefused) {
+    json document = extension_document();
+    document["transports"]["streamable_http"]["request_headers"][0]["on"]["tasks/get"] = "no_such_member";
+    const ExtensionPtr extension = accepted_extension(document);
+    ASSERT_NE(extension, nullptr);
+    EXPECT_EQ(rejected_composition(*require_builtin(modern_revision), extension).pointer,
+              "/transports/streamable_http/request_headers/0/on/tasks~1get");
+}
+
+TEST(Extension, AHeaderMethodNoRequestHasIsRefused) {
+    json document = extension_document();
+    document["transports"]["streamable_http"]["request_headers"][0]["on"]["tasks/result"] = "taskId";
+    const ExtensionPtr extension = accepted_extension(document);
+    ASSERT_NE(extension, nullptr);
+    EXPECT_EQ(rejected_composition(*require_builtin(modern_revision), extension).pointer,
+              "/transports/streamable_http/request_headers/0/on/tasks~1result");
+}
+
+TEST(Extension, ANewHeaderIsAppendedToTheTransport) {
+    json document = extension_document();
+    document["transports"]["streamable_http"]["request_headers"] = json::array(
+        {json{{"name", "Mcp-Task"}, {"value", "params_member"}, {"on", json{{"tasks/get", "taskId"}}}}});
+    const ExtensionPtr extension = accepted_extension(document);
+    ASSERT_NE(extension, nullptr);
+    const ProfilePtr served = composed(*require_builtin(modern_revision), extension);
+    ASSERT_NE(served, nullptr);
+    const RequestHeader* header = header_named(*served, "Mcp-Task");
+    ASSERT_NE(header, nullptr);
+    EXPECT_EQ(header->params_member("tasks/get"), std::optional<std::string_view>("taskId"));
+    EXPECT_EQ(header_named(*served, "Mcp-Name")->params_member("tasks/get"), std::nullopt);
+}
+
+TEST(Extension, ARevisionWithoutTheStreamableTransportTakesNoHeader) {
+    json core_document = builtin_document(modern_revision);
+    core_document["transports"].erase("streamable_http");
+    auto loaded = load(core_document.dump());
+    const auto* core = std::get_if<ProfilePtr>(&loaded);
+    ASSERT_NE(core, nullptr);
+    const ProfilePtr served = composed(**core, builtin_extension(tasks_extension, modern_revision));
+    ASSERT_NE(served, nullptr);
+    EXPECT_FALSE(served->streamable_http().has_value());
+    EXPECT_NE(served->request("tasks/get"), nullptr);
+}
+
+TEST(ExtensionRejects, EveryRequiredTopLevelMemberRemovedInTurn) {
+    const json original = extension_document();
+    for (const char* name : {"profile_version", "extension", "revisions", "evidence", "mechanisms", "senders", "wire"}) {
+        SCOPED_TRACE(name);
+        json document = original;
+        document.erase(name);
+        EXPECT_EQ(rejected_extension(document).pointer, std::string("/") + name);
+    }
+}
+
+TEST(ExtensionRejects, TheOptionalMembersMayBeLeftOut) {
+    json document = extension_document();
+    document.erase("transports");
+    document.erase("errors");
+    const ExtensionPtr extension = accepted_extension(document);
+    ASSERT_NE(extension, nullptr);
+    EXPECT_TRUE(extension->request_headers().empty());
+    EXPECT_TRUE(extension->error_codes().empty());
+}
+
+TEST(ExtensionRejects, AnUnknownTopLevelMember) {
+    json document = extension_document();
+    document["era"] = "modern";
+    EXPECT_EQ(rejected_extension(document).pointer, "/era");
+}
+
+TEST(ExtensionRejects, AMechanismNameThatIsNotDeclared) {
+    json document = extension_document();
+    document["mechanisms"]["tasks"] = "polling";
+    EXPECT_EQ(rejected_extension(document).pointer, "/mechanisms/tasks");
+}
+
+TEST(ExtensionRejects, AMechanismSlotThatDoesNotExist) {
+    json document = extension_document();
+    document["mechanisms"]["telepathy"] = "none";
+    EXPECT_EQ(rejected_extension(document).pointer, "/mechanisms/telepathy");
+}
+
+TEST(ExtensionRejects, NoRevision) {
+    json document = extension_document();
+    document["revisions"] = json::array();
+    EXPECT_EQ(rejected_extension(document).pointer, "/revisions");
+}
+
+TEST(ExtensionRejects, ARevisionThatRepeats) {
+    json document = extension_document();
+    document["revisions"] = json::array({"2026-07-28", "2026-07-28"});
+    EXPECT_EQ(rejected_extension(document).pointer, "/revisions/1");
+}
+
+TEST(ExtensionRejects, AnEmptyIdentifier) {
+    json document = extension_document();
+    document["extension"] = "";
+    EXPECT_EQ(rejected_extension(document).pointer, "/extension");
+}
+
+TEST(ExtensionRejects, UnsupportedProfileVersion) {
+    json document = extension_document();
+    document["profile_version"] = 2;
+    EXPECT_EQ(rejected_extension(document).pointer, "/profile_version");
+}
+
+TEST(ExtensionRejects, ASenderListThatLeavesAMessageOut) {
+    json document = extension_document();
+    document["senders"]["requests"].erase("UpdateTaskRequest");
+    EXPECT_EQ(rejected_extension(document).pointer, "/senders/requests");
+}
+
+TEST(ExtensionRejects, ASenderThatDiffersFromTheWire) {
+    json document = extension_document();
+    document["senders"]["requests"]["GetTaskRequest"] = json::array({"server"});
+    EXPECT_EQ(rejected_extension(document).pointer, "/senders/requests/GetTaskRequest");
+}
+
+TEST(ExtensionRejects, ASenderListForATypeThatIsNotAMessage) {
+    json document = extension_document();
+    document["senders"]["requests"]["Task"] = json::array({"client"});
+    EXPECT_EQ(rejected_extension(document).pointer, "/senders/requests/Task");
+}
+
+TEST(ExtensionRejects, ASenderThatRepeatsOrIsUnknown) {
+    json document = extension_document();
+    document["senders"]["requests"]["GetTaskRequest"] = json::array({"client", "client"});
+    EXPECT_EQ(rejected_extension(document).pointer, "/senders/requests/GetTaskRequest/1");
+    document["senders"]["requests"]["GetTaskRequest"] = json::array({"proxy"});
+    EXPECT_EQ(rejected_extension(document).pointer, "/senders/requests/GetTaskRequest/0");
+    document["senders"]["requests"]["GetTaskRequest"] = json::array();
+    EXPECT_EQ(rejected_extension(document).pointer, "/senders/requests/GetTaskRequest");
+}
+
+TEST(ExtensionRejects, ASenderListForANotificationTheWireLacks) {
+    json document = extension_document();
+    document["senders"]["notifications"]["TaskStatusNotification"] = json::array({"server"});
+    EXPECT_EQ(rejected_extension(document).pointer, "/senders/notifications/TaskStatusNotification");
+}
+
+TEST(ExtensionRejects, ATransportOtherThanStreamableHttp) {
+    json document = extension_document();
+    document["transports"]["stdio"] = json{{"cancel", "cancelled_notification"}};
+    EXPECT_EQ(rejected_extension(document).pointer, "/transports/stdio");
+}
+
+TEST(ExtensionRejects, TwoHeadersWhoseNamesDifferOnlyInCase) {
+    json document = extension_document();
+    json& headers = document["transports"]["streamable_http"]["request_headers"];
+    headers.push_back(json{{"name", "mcp-name"}, {"value", "method"}, {"on", "every_request"}});
+    EXPECT_EQ(rejected_extension(document).pointer, "/transports/streamable_http/request_headers/1/name");
+}
+
+TEST(ExtensionRejects, AnErrorCodeOutOfRange) {
+    json document = extension_document();
+    document["errors"]["missing_required_client_capability"] = -(std::int64_t{1} << 40);
+    EXPECT_EQ(rejected_extension(document).pointer, "/errors/missing_required_client_capability");
+}
+
+TEST(ExtensionRejects, AWireThatIsBroken) {
+    json document = extension_document();
+    document["wire"]["requests"]["tasks/get"]["type"] = "";
+    EXPECT_EQ(rejected_extension(document).pointer, "/wire/requests/tasks~1get/type");
+}
+
+TEST(ExtensionRejects, TextThatIsNotJsonOrNotAnObject) {
+    auto text = load_extension("{");
+    ASSERT_NE(std::get_if<Error>(&text), nullptr);
+    EXPECT_EQ(std::get<Error>(text).pointer, "");
+    auto array = load_extension("[]");
+    ASSERT_NE(std::get_if<Error>(&array), nullptr);
+    EXPECT_EQ(std::get<Error>(array).pointer, "");
+}

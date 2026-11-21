@@ -1036,17 +1036,6 @@ ClientMechanismRegistry make_builtin() {
     return registry;
 }
 
-MechanismSlot slot_of(profile::Slot slot) {
-    switch (slot) {
-        case profile::Slot::open: return MechanismSlot::open;
-        case profile::Slot::state: return MechanismSlot::state;
-        case profile::Slot::server_input: return MechanismSlot::server_input;
-        case profile::Slot::change_feed: return MechanismSlot::change_feed;
-        case profile::Slot::batch: return MechanismSlot::batch;
-    }
-    return MechanismSlot::open;
-}
-
 // The name of the cancellation mechanism the profile's entry for the transport names; empty when the profile does
 // not define the transport.
 std::optional<std::string_view> cancel_name(const profile::Profile& profile, profile::Transport transport) {
@@ -1181,10 +1170,10 @@ std::variant<std::vector<ClientMechanisms>, ClientMechanismsError> select_client
         }
         const std::string_view state_name = profile->mechanism(profile::Slot::state);
         halves.state = registry.make_state(state_name);
-        if (halves.state == nullptr) missing(revision, slot_of(profile::Slot::state), state_name);
+        if (halves.state == nullptr) missing(revision, MechanismSlot::state, state_name);
         const std::string_view batch_name = profile->mechanism(profile::Slot::batch);
         halves.batch = registry.make_batch(batch_name);
-        if (halves.batch == nullptr) missing(revision, slot_of(profile::Slot::batch), batch_name);
+        if (halves.batch == nullptr) missing(revision, MechanismSlot::batch, batch_name);
         halves.cancel = registry.make_cancel(*cancel);
         if (halves.cancel == nullptr) {
             missing(revision, MechanismSlot::cancel, *cancel);

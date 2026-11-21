@@ -1,25 +1,24 @@
 # Generates one C++ source that embeds the profiles. Run as
-#   cmake -DLIST_FILE=<file holding one profile path per line> -DOUTPUT=<source to write> -P EmbedProfiles.cmake
+#   cmake -DLIST_FILE=<file holding one profile path per line>
+#         -DEXTENSION_LIST_FILE=<file holding one extension profile path per line>
+#         -DOUTPUT=<source to write> -P EmbedProfiles.cmake
 # Each profile becomes a byte array (a string literal per file would meet compiler limits on literal length), and
-# a table names every array by the file name without its extension, which is the revision.
+# a table names every array by the file name without its extension, which is the revision. The extension profiles
+# are in a table of their own, which also names the folder each one is in.
 
-if(NOT LIST_FILE OR NOT OUTPUT)
-    message(FATAL_ERROR "EmbedProfiles.cmake needs LIST_FILE and OUTPUT")
+if(NOT LIST_FILE OR NOT EXTENSION_LIST_FILE OR NOT OUTPUT)
+    message(FATAL_ERROR "EmbedProfiles.cmake needs LIST_FILE, EXTENSION_LIST_FILE and OUTPUT")
 endif()
 
-file(STRINGS "${LIST_FILE}" profile_paths)
+# A C++ string literal body for a text.
+function(neomcp_literal out text)
+    string(REPLACE "\\" "\\\\" literal "${text}")
+    string(REPLACE "\"" "\\\"" literal "${literal}")
+    set(${out} "${literal}" PARENT_SCOPE)
+endfunction()
 
-set(arrays "")
-set(entries "")
-set(index 0)
-foreach(path IN LISTS profile_paths)
-    if(path STREQUAL "")
-        continue()
-    endif()
-    get_filename_component(revision "${path}" NAME_WLE)
-    string(REPLACE "\\" "\\\\" revision_literal "${revision}")
-    string(REPLACE "\"" "\\\"" revision_literal "${revision_literal}")
-
+# The bytes of a file as the body of a C++ array initializer.
+function(neomcp_bytes out path)
     file(READ "${path}" hex HEX)
     string(LENGTH "${hex}" hex_length)
     # Two hex digits per byte, 32 bytes per output line.
@@ -38,7 +37,22 @@ foreach(path IN LISTS profile_paths)
         string(APPEND body "    ${line}\n")
         math(EXPR position "${position} + 64")
     endwhile()
+    set(${out} "${body}" PARENT_SCOPE)
+endfunction()
 
+file(STRINGS "${LIST_FILE}" profile_paths)
+file(STRINGS "${EXTENSION_LIST_FILE}" extension_paths)
+
+set(arrays "")
+set(entries "")
+set(index 0)
+foreach(path IN LISTS profile_paths)
+    if(path STREQUAL "")
+        continue()
+    endif()
+    get_filename_component(revision "${path}" NAME_WLE)
+    neomcp_literal(revision_literal "${revision}")
+    neomcp_bytes(body "${path}")
     string(APPEND arrays "const unsigned char profile_data_${index}[] = {\n${body}};\n\n")
     string(APPEND entries "    {\"${revision_literal}\", profile_data_${index}, sizeof profile_data_${index}},\n")
     math(EXPR index "${index} + 1")
@@ -46,6 +60,31 @@ endforeach()
 
 if(index EQUAL 0)
     message(FATAL_ERROR "EmbedProfiles.cmake: no profile listed in ${LIST_FILE}")
+endif()
+
+set(extension_entries "")
+set(extension_index 0)
+foreach(path IN LISTS extension_paths)
+    if(path STREQUAL "")
+        continue()
+    endif()
+    get_filename_component(revision "${path}" NAME_WLE)
+    get_filename_component(folder "${path}" DIRECTORY)
+    get_filename_component(folder "${folder}" NAME)
+    neomcp_literal(revision_literal "${revision}")
+    neomcp_literal(folder_literal "${folder}")
+    neomcp_bytes(body "${path}")
+    string(APPEND arrays "const unsigned char extension_data_${extension_index}[] = {\n${body}};\n\n")
+    string(APPEND extension_entries
+        "    {\"${folder_literal}\", \"${revision_literal}\", extension_data_${extension_index}, sizeof extension_data_${extension_index}},\n")
+    math(EXPR extension_index "${extension_index} + 1")
+endforeach()
+
+# An array has at least one element, so an empty table is a function that returns no entries.
+if(extension_index EQUAL 0)
+    set(extension_function "    return {};")
+else()
+    set(extension_function "    static const BuiltinExtensionEntry extension_table[] = {\n${extension_entries}    };\n    return extension_table;")
 endif()
 
 file(WRITE "${OUTPUT}"
@@ -62,6 +101,10 @@ ${entries}};
 
 std::span<const BuiltinEntry> builtin_entries() noexcept {
     return table;
+}
+
+std::span<const BuiltinExtensionEntry> builtin_extension_entries() noexcept {
+${extension_function}
 }
 
 }  // namespace neomcp::profile::detail

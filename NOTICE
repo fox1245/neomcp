@@ -19,6 +19,16 @@ What is derived from it and how it was changed
   `wire.schema.sha256`. The other members of the profiles were written by hand from the specification's pages, and
   hold identifiers and numbers, no prose of the specification.
 
+This product also contains data derived from the schema of an official extension of the protocol.
+
+  Extension:      Tasks (io.modelcontextprotocol/tasks)
+  Repository:     https://github.com/modelcontextprotocol/ext-tasks, licensed under the Apache License, Version 2.0
+                  (its text is reproduced below)
+  Used:           schema/2026-07-28/schema.json, read at commit 0d0a6bd4c258b35caa3c810a1dd506cf105b1501.
+  Derived:        the member `wire` of profiles/extensions/io.modelcontextprotocol.tasks/2026-07-28.json, made as
+                  described above by tools/profile_wire.py. Its other members were written by hand and hold
+                  identifiers and numbers.
+
 The licence of the specification
 
   The LICENSE file of the specification repository begins: "The MCP project is undergoing a licensing transition from

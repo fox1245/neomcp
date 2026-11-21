@@ -12,7 +12,8 @@
       "docs/specification/2025-11-25/basic/lifecycle.mdx",
       "docs/specification/2025-11-25/basic/transports.mdx",
       "docs/specification/2025-11-25/basic/utilities/cancellation.mdx",
-      "docs/specification/2025-11-25/server/tools.mdx"
+      "docs/specification/2025-11-25/server/tools.mdx",
+      "docs/specification/2025-11-25/basic/utilities/tasks.mdx"
     ],
     "schema": "schema/2025-11-25/schema.json"
   },
@@ -21,7 +22,8 @@
     "state": "connection",
     "server_input": "server_request",
     "change_feed": "connection_notifications",
-    "batch": "none"
+    "batch": "none",
+    "tasks": "augmented_request"
   },
   "transports": {
     "stdio": {

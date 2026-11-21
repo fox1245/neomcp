@@ -33,8 +33,8 @@ struct Error {
 enum class Era { legacy, modern };
 
 // The places where revisions differ in how they work. A profile selects one named mechanism for each slot.
-enum class Slot { open, state, server_input, change_feed, batch };
-inline constexpr std::size_t slot_count = 5;
+enum class Slot { open, state, server_input, change_feed, batch, tasks };
+inline constexpr std::size_t slot_count = 6;
 
 // The member of `mechanisms` that holds the slot, and the document's spelling of the era.
 std::string_view to_string(Slot slot) noexcept;
@@ -47,7 +47,8 @@ enum class Transport { stdio, http_sse, streamable_http };
 std::string_view to_string(Transport transport) noexcept;
 
 // The names the library declares. A profile may select only these, and code that implements a mechanism attaches
-// to one of them: the mechanisms of a slot, the cancellation mechanisms of a transport, the ways a revision
+// to one of them: the mechanisms of a slot (for `tasks`: `none`, `augmented_request`, where the requester asks for a
+// task in the request, and `server_directed`, where the server decides and the requester declares an extension), the cancellation mechanisms of a transport, the ways a revision
 // reports tool arguments that fail the tool's input schema (`tools.invalid_arguments`), and the reasons a
 // Streamable HTTP status map gives a status for (`transports.streamable_http.status`).
 std::span<const std::string_view> declared_mechanisms(Slot slot);
@@ -230,6 +231,9 @@ struct Union {
     std::vector<std::string> alternatives;  // distinct, in document order
 };
 
+class ExtensionProfile;
+using ExtensionPtr = std::shared_ptr<const ExtensionProfile>;
+
 class Profile {
 public:
     const std::string& revision() const noexcept { return revision_; }
@@ -238,6 +242,11 @@ public:
 
     // The name of the mechanism the profile selects for the slot.
     std::string_view mechanism(Slot slot) const noexcept;
+
+    // The identifiers of the extensions composed into this profile (see compose), in the order they were applied;
+    // empty for a profile as loaded. The wire tables, the headers, the error codes and the mechanisms an extension
+    // adds are part of the profile, and this tells which extensions they came from.
+    std::span<const std::string> extensions() const noexcept { return extensions_; }
 
     // How the revision reports tool arguments that fail the tool's input schema (member `tools.invalid_arguments`):
     // one of declared_invalid_arguments().
@@ -288,6 +297,7 @@ private:
     friend class ProfileLoader;
     Profile() = default;
 
+    std::vector<std::string> extensions_;
     std::string revision_;
     Era era_ = Era::legacy;
     Evidence evidence_;
@@ -310,8 +320,71 @@ private:
 
 using ProfilePtr = std::shared_ptr<const Profile>;
 
+// What an extension to a revision adds to that revision's profile: the mechanism of a slot, the wire tables of the
+// messages and types it defines, request headers of the Streamable HTTP transport, and error codes. It is a
+// document of its own (see load_extension) and takes effect only when composed into the profile of a revision
+// (see compose): a revision that is served without the extension behaves as its profile says.
+class ExtensionProfile {
+public:
+    // The extension's identifier, for example `io.modelcontextprotocol/tasks`.
+    const std::string& extension() const noexcept { return extension_; }
+    // The revisions the extension is defined for, in document order.
+    std::span<const std::string> revisions() const noexcept { return revisions_; }
+    bool applies_to(std::string_view revision) const noexcept;
+    const Evidence& evidence() const noexcept { return evidence_; }
+
+    // The mechanism the extension selects for the slot; empty for a slot it does not change.
+    std::optional<std::string_view> mechanism(Slot slot) const noexcept;
+
+    // The error codes the extension uses, sorted by name.
+    std::span<const NamedCode> error_codes() const noexcept { return error_codes_; }
+    // The headers of the Streamable HTTP transport the extension adds to, or defines for, the transport's requests.
+    std::span<const RequestHeader> request_headers() const noexcept { return request_headers_; }
+
+    const WireSchema& wire_schema() const noexcept { return wire_schema_; }
+    // The wire tables of the extension alone, sorted as a profile's are.
+    std::span<const Message> requests() const noexcept { return requests_; }
+    std::span<const Message> notifications() const noexcept { return notifications_; }
+    std::span<const InputRequest> input_requests() const noexcept { return input_requests_; }
+    std::span<const Type> types() const noexcept { return types_; }
+    std::span<const Union> unions() const noexcept { return unions_; }
+    std::span<const std::string> unlisted_message_types() const noexcept { return unlisted_message_types_; }
+
+private:
+    friend class ProfileLoader;
+    ExtensionProfile() = default;
+
+    std::string extension_;
+    std::vector<std::string> revisions_;
+    Evidence evidence_;
+    std::vector<std::string_view> mechanisms_;  // indexed by Slot; empty views for the slots left unchanged
+    std::vector<NamedCode> error_codes_;
+    std::vector<RequestHeader> request_headers_;
+    WireSchema wire_schema_;
+    std::vector<Message> requests_;
+    std::vector<Message> notifications_;
+    std::vector<InputRequest> input_requests_;
+    std::vector<std::string> unlisted_message_types_;
+    std::vector<Type> types_;
+    std::vector<Union> unions_;
+};
+
 // Checks a profile document and returns the profile, or the first place that is wrong. Bad input never throws.
 std::variant<ProfilePtr, Error> load(std::string_view json_text);
+
+// Checks the document of an extension and returns the extension, or the first place that is wrong. The document has
+// the members `profile_version`, `extension`, `revisions`, `evidence`, `mechanisms` (a subset of the slots),
+// `senders`, `transports` (only `streamable_http.request_headers`), `errors` and `wire`. Bad input never throws.
+std::variant<ExtensionPtr, Error> load_extension(std::string_view json_text);
+
+// The profile that revision `core` has when it is served with the extensions: a copy of `core` in which each
+// extension's mechanisms replace the core's, its wire tables are added, its headers are added to the transport's
+// (an extension may add methods to a header the revision already has; a revision without the Streamable HTTP
+// transport takes none), and its error codes are added. An extension
+// that is not defined for the revision, a message, type, union or code that the core and an extension, or two
+// extensions, define differently, and a header that names a method or a member the composed
+// tables do not have, are an Error that names the place in the extension's document. The core is not changed.
+std::variant<ProfilePtr, Error> compose(const Profile& core, std::span<const ExtensionPtr> extensions);
 
 // The profiles built into the library: every profiles/*.json of the source tree, by revision.
 // Revisions are sorted ascending.
@@ -322,5 +395,19 @@ std::string_view builtin_text(std::string_view revision);
 // Thread-safe. A built-in document that fails to load is a defect of the library and throws std::logic_error
 // naming the revision and the pointer.
 ProfilePtr builtin(std::string_view revision);
+
+// The extension profiles built into the library: every profiles/extensions/*/*.json of the source tree. The
+// identifiers are sorted and each appears once.
+std::span<const std::string> builtin_extensions();
+// The document text of the built-in extension with the identifier for the revision; empty when there is none.
+std::string_view builtin_extension_text(std::string_view extension, std::string_view revision);
+// The built-in extension with the identifier for the revision, loaded once and cached; null when there is none.
+// Thread-safe. A built-in document that fails to load, or two that define the same extension for the same revision,
+// is a defect of the library and throws std::logic_error.
+ExtensionPtr builtin_extension(std::string_view extension, std::string_view revision);
+// The built-in profile of the revision served with the built-in extensions (see compose), cached by revision and
+// extensions. Null when the revision, or an extension for it, is not built in. A composition that fails is a defect
+// of the library and throws std::logic_error. With no extension this is `builtin(revision)`.
+ProfilePtr builtin(std::string_view revision, std::span<const std::string_view> extensions);
 
 }  // namespace neomcp::profile

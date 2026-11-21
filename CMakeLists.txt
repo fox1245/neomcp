@@ -47,16 +47,20 @@ function(neomcp_configure_target target)
     endif()
 endfunction()
 
-# Every profiles/*.json is built into the library; the set is whatever the folder holds.
+# Every profiles/*.json is built into the library; the set is whatever the folder holds. So is every extension
+# profile, profiles/extensions/<extension>/<revision>.json.
 file(GLOB NEOMCP_PROFILE_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/profiles/*.json")
 list(SORT NEOMCP_PROFILE_FILES)
 if(NOT NEOMCP_PROFILE_FILES)
     message(FATAL_ERROR "neomcp: profiles/ holds no *.json file")
 endif()
+file(GLOB NEOMCP_EXTENSION_PROFILE_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/profiles/extensions/*/*.json")
+list(SORT NEOMCP_EXTENSION_PROFILE_FILES)
 
 set(NEOMCP_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(NEOMCP_PROFILE_DATA_CPP "${NEOMCP_GENERATED_DIR}/neomcp_profile_data.cpp")
 set(NEOMCP_PROFILE_LIST "${NEOMCP_GENERATED_DIR}/profile_files.txt")
+set(NEOMCP_EXTENSION_PROFILE_LIST "${NEOMCP_GENERATED_DIR}/extension_profile_files.txt")
 
 # The list of files goes to the generator through a file that changes only when the list changes.
 string(REPLACE ";" "\n" NEOMCP_PROFILE_LIST_TEXT "${NEOMCP_PROFILE_FILES}")
@@ -67,14 +71,24 @@ endif()
 if(NOT NEOMCP_PROFILE_LIST_OLD STREQUAL "${NEOMCP_PROFILE_LIST_TEXT}\n")
     file(WRITE "${NEOMCP_PROFILE_LIST}" "${NEOMCP_PROFILE_LIST_TEXT}\n")
 endif()
+string(REPLACE ";" "\n" NEOMCP_EXTENSION_PROFILE_LIST_TEXT "${NEOMCP_EXTENSION_PROFILE_FILES}")
+set(NEOMCP_EXTENSION_PROFILE_LIST_OLD "")
+if(EXISTS "${NEOMCP_EXTENSION_PROFILE_LIST}")
+    file(READ "${NEOMCP_EXTENSION_PROFILE_LIST}" NEOMCP_EXTENSION_PROFILE_LIST_OLD)
+endif()
+if(NOT NEOMCP_EXTENSION_PROFILE_LIST_OLD STREQUAL "${NEOMCP_EXTENSION_PROFILE_LIST_TEXT}\n")
+    file(WRITE "${NEOMCP_EXTENSION_PROFILE_LIST}" "${NEOMCP_EXTENSION_PROFILE_LIST_TEXT}\n")
+endif()
 
 add_custom_command(
     OUTPUT "${NEOMCP_PROFILE_DATA_CPP}"
     COMMAND ${CMAKE_COMMAND}
         "-DLIST_FILE=${NEOMCP_PROFILE_LIST}"
+        "-DEXTENSION_LIST_FILE=${NEOMCP_EXTENSION_PROFILE_LIST}"
         "-DOUTPUT=${NEOMCP_PROFILE_DATA_CPP}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedProfiles.cmake"
-    DEPENDS ${NEOMCP_PROFILE_FILES} "${NEOMCP_PROFILE_LIST}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedProfiles.cmake"
+    DEPENDS ${NEOMCP_PROFILE_FILES} ${NEOMCP_EXTENSION_PROFILE_FILES} "${NEOMCP_PROFILE_LIST}"
+            "${NEOMCP_EXTENSION_PROFILE_LIST}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedProfiles.cmake"
     COMMENT "Embedding the revision profiles"
     VERBATIM)
 

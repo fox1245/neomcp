@@ -12,7 +12,8 @@ name: CI
 # One more job checks the translation of regular expressions for the schema keyword `pattern` against V8: Node writes
 # patterns with the answers of V8, and a test executable compares the validator with them.
 # One more job compares the wire data of every profile in profiles/ with the schema the protocol's specification
-# publishes, read at the one commit that NOTICE names.
+# publishes, read at the one commit that NOTICE names, and the wire data of every extension profile with the schema of
+# its extension, read at the commit its evidence names (which NOTICE names too).
 # Two more jobs on Linux (GCC with static libraries, Clang with shared ones) and one on Windows install neomcp, move the
 # prefix and build and run a project that uses the installed package.
 
@@ -496,6 +497,35 @@ jobs:
             fi
             if python3 -I tools/profile_wire.py "$schema" --check "$profile"; then
               echo "$profile matches schema/$revision/schema.json"
+            else
+              status=1
+            fi
+          done
+          exit "$status"
+      - name: The wire data of each extension profile matches the schema of its extension
+        run: |
+          status=0
+          for profile in profiles/extensions/*/*.json; do
+            repository="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["evidence"]["repository"])' "$profile")"
+            commit="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["evidence"]["commit"])' "$profile")"
+            schema_path="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["evidence"]["schema"])' "$profile")"
+            if ! grep -F "$commit" NOTICE; then
+              echo "::error file=$profile::NOTICE does not name the commit $commit"
+              status=1
+              continue
+            fi
+            checkout="$RUNNER_TEMP/extension-$(basename "$(dirname "$profile")")"
+            git clone --quiet --filter=blob:none --no-checkout "$repository" "$checkout"
+            git -C "$checkout" checkout --quiet "$commit"
+            test "$(git -C "$checkout" rev-parse HEAD)" = "$commit"
+            schema="$checkout/$schema_path"
+            if [ ! -f "$schema" ]; then
+              echo "::error file=$profile::the extension has no $schema_path"
+              status=1
+              continue
+            fi
+            if python3 -I tools/profile_wire.py "$schema" --senders "$profile" --check "$profile"; then
+              echo "$profile matches $schema_path"
             else
               status=1
             fi

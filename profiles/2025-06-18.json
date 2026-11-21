@@ -21,7 +21,8 @@
     "state": "connection",
     "server_input": "server_request",
     "change_feed": "connection_notifications",
-    "batch": "none"
+    "batch": "none",
+    "tasks": "none"
   },
   "transports": {
     "stdio": {

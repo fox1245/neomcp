@@ -12,6 +12,12 @@ other members are written by hand from the specification's prose.
     profile_wire.py SCHEMA                  print the wire member
     profile_wire.py SCHEMA --write PROFILE  replace the wire member of PROFILE
     profile_wire.py SCHEMA --check PROFILE  exit 1 unless PROFILE's wire member matches
+
+A schema of an extension has no unions that say who sends a message. With `--senders FILE` the senders are read
+from the `senders` member of the profile document FILE instead: `{"requests": {TYPE: [SENDER, ...]},
+"notifications": {TYPE: [SENDER, ...]}}`, TYPE the name of a message type of the schema and SENDER `client` or
+`server`. The schema's own sender unions, when it has them, are not used then. A message type the schema defines
+and the file does not list is reported in `unlisted_message_types`.
 """
 
 import argparse
@@ -31,6 +37,8 @@ SENDER_UNIONS = (
 INPUT_REQUEST_UNION = "InputRequest"
 # The property that says which of the types of a union an object is: its values are recorded per type.
 DISCRIMINATOR = "type"
+# The senders a message can have.
+SENDERS = {"client", "server"}
 # An object written inline as a property of a type has no name in the schema. It is recorded as a type of its own,
 # named after the type that writes it and the property, joined by this separator ("Resource.annotations"). A name in
 # the schema never holds it, so the derived name cannot be one the schema defines.
@@ -43,7 +51,16 @@ def ref_name(node):
 
 
 def constant_method(definition):
-    return definition.get("properties", {}).get("method", {}).get("const")
+    """The constant `method` of a message type: written in the definition's properties or, for a type composed
+    with allOf, in one of the parts."""
+    method = definition.get("properties", {}).get("method", {}).get("const")
+    if method is not None:
+        return method
+    for part in definition.get("allOf", []):
+        method = constant_method(part)
+        if method is not None:
+            return method
+    return None
 
 
 def union_members(definitions, union):
@@ -183,11 +200,14 @@ def required_whatever_the_alternative(definitions, name, seen=()):
 
 
 def params_of(definitions, name):
-    definition = definitions[name]
-    params = definition.get("properties", {}).get("params")
+    """The parameters of a message type: the name of their type, and the members that type requires. The type is
+    named only when the schema refers to it; parameters written inline in the definition have no name here (the
+    definition's property_types names that object, as for any inline object)."""
+    found = member_schemas(definitions, definitions[name], name).get("params")
     entry = {"params": None, "params_required": []}
-    if params is None:
+    if found is None:
         return entry
+    params = found[0]
     target = ref_name(params)
     entry["params"] = target
     shape = object_shape(definitions, params)
@@ -228,7 +248,25 @@ def add_object_type(definitions, types, name, node, writer):
         entry["property_types"] = dict(sorted(property_types.items()))
 
 
-def derive(schema_path):
+def hand_senders(path):
+    """The senders written by hand in the `senders` member of a profile document, as [(table, type name, senders)].
+    The senders of one message are listed in the order client, server."""
+    document = json.loads(Path(path).read_text(encoding="utf-8"))
+    senders = document.get("senders")
+    if not isinstance(senders, dict) or set(senders) != {"requests", "notifications"}:
+        raise SystemExit(f"{path}: `senders` must be an object with the members requests and notifications")
+    listed = []
+    for table in ("requests", "notifications"):
+        if not isinstance(senders[table], dict):
+            raise SystemExit(f"{path}: senders.{table} must be an object of type name to senders")
+        for name, who in senders[table].items():
+            if not isinstance(who, list) or not who or len(set(who)) != len(who) or not set(who) <= SENDERS:
+                raise SystemExit(f"{path}: senders.{table}.{name} must list distinct senders of {sorted(SENDERS)}")
+            listed.append((table, name, [sender for sender in ("client", "server") if sender in who]))
+    return listed
+
+
+def derive(schema_path, senders_path=None):
     raw = Path(schema_path).read_bytes()
     document = json.loads(raw)
     definitions = document.get("$defs")
@@ -239,17 +277,28 @@ def derive(schema_path):
 
     tables = {"requests": {}, "notifications": {}}
     listed = {union for union, _, _ in SENDER_UNIONS} | {INPUT_REQUEST_UNION}
-    for union, table, sender in SENDER_UNIONS:
-        for name in union_members(definitions, union):
-            listed.add(name)
-            method = method_of(definitions, name)
-            entry = tables[table].get(method)
-            if entry is None:
-                entry = {"from": [], "type": name, **params_of(definitions, name)}
-                tables[table][method] = entry
-            elif entry["type"] != name:
-                raise SystemExit(f"{method} is defined by both {entry['type']} and {name}")
-            entry["from"].append(sender)
+
+    def add_message(table, name, sender):
+        method = method_of(definitions, name)
+        entry = tables[table].get(method)
+        if entry is None:
+            entry = {"from": [], "type": name, **params_of(definitions, name)}
+            tables[table][method] = entry
+        elif entry["type"] != name:
+            raise SystemExit(f"{method} is defined by both {entry['type']} and {name}")
+        entry["from"].append(sender)
+        listed.add(name)
+
+    if senders_path is None:
+        for union, table, sender in SENDER_UNIONS:
+            for name in union_members(definitions, union):
+                add_message(table, name, sender)
+    else:
+        for table, name, who in hand_senders(senders_path):
+            if name not in definitions:
+                raise SystemExit(f"{senders_path}: senders.{table} names {name}, which the schema does not define")
+            for sender in who:
+                add_message(table, name, sender)
 
     input_requests = {}
     for name in union_members(definitions, INPUT_REQUEST_UNION):
@@ -288,12 +337,14 @@ def derive(schema_path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("schema", help="path of an official schema.json")
+    parser.add_argument("--senders", metavar="FILE",
+                        help="read the senders of messages from the `senders` member of this profile document")
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--write", metavar="PROFILE", help="replace the wire member of this profile")
     action.add_argument("--check", metavar="PROFILE", help="compare the wire member of this profile")
     arguments = parser.parse_args()
 
-    wire = derive(arguments.schema)
+    wire = derive(arguments.schema, arguments.senders)
     if arguments.write:
         path = Path(arguments.write)
         profile = json.loads(path.read_text(encoding="utf-8"))
