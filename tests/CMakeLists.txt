@@ -223,13 +223,19 @@ target_link_libraries(neomcp_server_declared_test PRIVATE neomcp::server GTest::
 neomcp_configure_target(neomcp_server_declared_test)
 gtest_discover_tests(neomcp_server_declared_test DISCOVERY_TIMEOUT 120)
 
-# The bounds of ServerOptions that mirror those of SessionOptions, each at its limit and one past it.
 # The task store: records of long-running requests, their bounds, and the races a store settles.
 add_executable(neomcp_task_store_test task_store_test.cpp)
 target_link_libraries(neomcp_task_store_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
 neomcp_configure_target(neomcp_task_store_test)
 gtest_discover_tests(neomcp_task_store_test DISCOVERY_TIMEOUT 120)
 
+# Tasks run by the server: their own stop token, their place in the bounds, cancellation, failures, recovery.
+add_executable(neomcp_server_tasks_test server_tasks_test.cpp)
+target_link_libraries(neomcp_server_tasks_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_server_tasks_test)
+gtest_discover_tests(neomcp_server_tasks_test DISCOVERY_TIMEOUT 120)
+
+# The bounds of ServerOptions that mirror those of SessionOptions, each at its limit and one past it.
 add_executable(neomcp_server_bounds_test server_bounds_test.cpp)
 target_link_libraries(neomcp_server_bounds_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
 neomcp_configure_target(neomcp_server_bounds_test)

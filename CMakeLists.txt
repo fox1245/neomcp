@@ -211,7 +211,8 @@ add_library(neomcp_server
     src/server/server.cpp
     src/server/form_schema.cpp
     src/server/inputs.cpp
-    src/server/task_store.cpp)
+    src/server/task_store.cpp
+    src/server/tasks.cpp)
 add_library(neomcp::server ALIAS neomcp_server)
 target_include_directories(neomcp_server
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

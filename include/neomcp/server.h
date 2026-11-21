@@ -164,6 +164,20 @@
 // process) there is no identity, and declared scopes are not checked: an item that must be protected is served only
 // over a transport that authorizes every request.
 //
+// Tasks. A tool that may take long declares that it may run as a task:
+//
+//   server.tool<ExportArgs>("export", "Export everything", export_all).task_support(neomcp::TaskSupport::optional);
+//
+// and the server, given a store (ServerOptions::tasks), can start a call of it as a task: the call is answered at once
+// with the task's record, and the handler runs on after that request, and its session, ended. The store keeps the
+// task's status and, once it ended, its outcome, until its lifetime ends. A handler is the same whether it runs as a
+// call or as a task; Context::task_id tells it which, and Context::task_status sets the task's status message.
+// Cancelling a task marks it cancelled at once and requests the handler's stop token, and whatever the handler
+// returns later is dropped: a handler that runs long checks its stop token, or it keeps its place in the bounds until
+// it returns. When the server starts, every task its store holds that was still working or waiting for input is failed
+// (the code that ran it is gone); when it is destroyed, the tasks it still runs are stopped and failed. Tools that do
+// not declare it never run as tasks, and without a store nothing of this is active.
+//
 // Threads. Plain-function handlers run on a pool of worker threads the server owns, bounded by
 // ServerOptions::max_concurrent_calls and max_pending_calls. Coroutine handlers run on one thread the server owns,
 // which drives an asio::io_context, and are bounded by max_coroutine_calls; a coroutine handler must not block, or
@@ -178,6 +192,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -196,10 +211,90 @@
 #include "neomcp/server/form_schema.h"
 #include "neomcp/server/handler.h"
 #include "neomcp/server/inputs.h"
+#include "neomcp/server/task_store.h"
 #include "neomcp/session.h"
 #include "neomcp/tool_host.h"
 
 namespace neomcp {
+
+// ---- Tasks: a tool call answered at once with the id of a task, whose handler runs on after the request (and its
+// session) ended, and which the requester asks about by that id.
+
+// Whether a tool may run as a task. Only a tool that declares it ever does; the default is forbidden.
+enum class TaskSupport {
+    forbidden,  // never a task
+    optional,   // a task when the requester takes one, an ordinary call otherwise
+    required    // only as a task
+};
+
+// The defaults of TaskOptions. The numbers are the library's choice, not the protocol's.
+struct TaskDefaults {
+    static constexpr std::chrono::milliseconds min_poll_interval{200};
+    static constexpr std::size_t max_waiting_results = 64;
+    static constexpr std::chrono::milliseconds sweep_interval{std::chrono::seconds(1)};
+};
+
+// How the server runs tasks. The bounds of the records themselves (how many, how long, how large) are the store's.
+struct TaskOptions {
+    // Where the tasks are kept; null: tasks are off (the default), and the server behaves as one without them. The
+    // server shares it: a store that outlives the server keeps the tasks that ended. When the server starts, every task
+    // of the store that is still working or waiting for input is failed, because the code that ran it is gone; two
+    // servers must not share a store, or each would fail the other's running tasks.
+    std::shared_ptr<TaskStore> store{};
+    // A read of one task (Server::task) sooner than this after the last read of it by the same owner is answered with
+    // that last read's copy, without asking the store. Zero is an error. Default 200 ms.
+    std::chrono::milliseconds min_poll_interval = TaskDefaults::min_poll_interval;
+    // The most watches of tasks (Server::watch_task) at once, over all owners; one more is refused. Zero is an
+    // error. Default 64.
+    std::size_t max_waiting_results = TaskDefaults::max_waiting_results;
+    // How often the server removes the tasks whose lifetime ended, stops the handlers of those still running, and
+    // fails the tasks that waited longer than ServerOptions::input_timeout for their answers. Zero is an error.
+    // Default 1 second.
+    std::chrono::milliseconds sweep_interval = TaskDefaults::sweep_interval;
+    // The time given to TaskStore::expire; empty: the system clock. It should be the store's own clock.
+    TaskClock clock{};
+};
+
+// How a task is started: what the requester asked for, and how the revision it is served under reads the outcome.
+struct TaskStart {
+    // The lifetime asked for; empty: the store's default.
+    std::optional<std::chrono::milliseconds> ttl{};
+    // Whether a result marked as an error (a tool execution error) ends the task failed; otherwise it ends it
+    // completed, with that result. An error that is not a result (the call could not run) always fails it.
+    bool error_result_fails = false;
+    // Writes one request for input as the task's record keeps it (the form the revision carries it in). Empty, or
+    // empty for a request: the task cannot ask, and a handler that asks fails it.
+    std::function<std::optional<json>(const InputRequest&)> write_input{};
+};
+
+// Why a task was not started. No record exists for a task that was refused, except one whose start the server's
+// shutdown overtook, or whose coroutine could not be started, after the record was made: that one is failed.
+enum class TaskRefusal {
+    off,            // the server has no task store
+    unknown_tool,   // no tool of that name is on
+    not_declared,   // the tool does not declare that it may run as a task
+    not_permitted,  // the call's authorization lacks a scope the tool needs
+    busy,           // no capacity: the pools of handlers, or the store's bounds
+    no_id,          // the store could not draw an id
+    shut_down       // the server is shutting down
+};
+
+using TaskStartResult = std::variant<TaskRecord, TaskRefusal>;
+
+enum class TaskCancelOutcome {
+    cancelled,  // the task is now cancelled, and its handler was asked to stop; `record` is the task
+    ended,      // the task had ended already, and stays as it ended; `record` is the task
+    not_found   // no such task for that owner (or it expired)
+};
+
+struct TaskCancelResult {
+    TaskCancelOutcome outcome = TaskCancelOutcome::not_found;
+    std::optional<TaskRecord> record;
+};
+
+// The owner of the tasks a request with `authorization` starts and may see: its principal, or the empty owner when it
+// carries none.
+TaskOwner task_owner_of(const Authorization* authorization);
 
 struct ServerOptions {
     // Who the server is (the members of Implementation), so that `{.name = "calc", .version = "1.0.0"}` works.
@@ -310,6 +405,9 @@ struct ServerOptions {
     // Which granted scopes imply which others, for the scopes items declare; closed when made. Empty: a scope is met
     // only by itself.
     ScopeImplications scope_implications{};
+
+    // ---- Tasks (see "Tasks" above); off unless a store is given.
+    TaskOptions tasks{};
 };
 
 class Server;
@@ -332,6 +430,8 @@ public:
     // was set before. Not written to the wire. Throws std::invalid_argument, naming the tool, for one that is not a
     // scope-token (neomcp/authorization.h).
     ToolHandle scopes(std::vector<std::string> list) const;
+    // Whether the tool may run as a task (see "Tasks" in the Server's description). Default forbidden.
+    ToolHandle task_support(TaskSupport mode) const;
     // Switches the tool on or off (see Server). Unlike the setters it may be called at any time, from any thread.
     ToolHandle enable(bool on = true) const;
     bool enabled() const;
@@ -521,6 +621,32 @@ public:
     // Whether any tool, resource, template or prompt declares scopes: a transport that serves without authorizing its
     // requests can refuse to start then, so that a forgotten option cannot leave a protected item open.
     bool declares_scopes() const;
+
+    // ---- Tasks (see "Tasks" above). Every call is thread-safe.
+    // Whether the tool at `index` of tools() may run as a task.
+    TaskSupport task_support(std::size_t index) const;
+    // Starts the call `request` (the call of a tool, as a session hands it to call()) as a task, for the owner that
+    // `origin`'s authorization gives (task_owner_of). The record exists in the store when this returns, and the handler
+    // runs on the server's threads, counted in the same bounds as the other calls: a call that finds no place is
+    // refused as busy, and no record is made. The handler's stop token belongs to the task: it is requested when the
+    // task is cancelled, when its lifetime ends and when the server is destroyed, never because `origin`'s request or
+    // session ended. `origin` gives the handler's Context the revision, the client and the authorization; what the
+    // handler reports through it after its session closed is dropped.
+    TaskStartResult start_task(const CallRequest& request, CallControl origin, TaskStart start);
+    // The task, when it exists for `owner`; see TaskOptions::min_poll_interval.
+    std::optional<TaskRecord> task(std::string_view id, const TaskOwner& owner);
+    // Cancels the task: it is cancelled before this returns, its handler is asked to stop, and what the handler
+    // returns after that is dropped. A handler that does not look at its stop token keeps its place in the bounds
+    // until it returns.
+    TaskCancelResult cancel_task(std::string_view id, const TaskOwner& owner);
+    // The answers to the requests for input of a task waiting for them: `answers` as the record keeps them (an
+    // object by key), and the same answers read (`responses`, by the same keys). Answers for keys that were not
+    // asked, or were answered already, are ignored. When every request has its answer, the handler is entered again
+    // with them, from its start, as for a call; a task that then finds no place in the bounds fails as busy.
+    AnswersResult answer_task(std::string_view id, const TaskOwner& owner, json answers, InputResponses responses);
+    // Watches the task (see TaskStore::watch), counted against TaskOptions::max_waiting_results: beyond it the
+    // outcome is `limit`.
+    TaskWatchStart watch_task(std::string_view id, const TaskOwner& owner, std::weak_ptr<TaskListener> listener);
 
     const ServerOptions& options() const noexcept;
 

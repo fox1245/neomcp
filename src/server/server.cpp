@@ -31,11 +31,19 @@
 //   listener is called or the watcher callback runs. shutdown() closes the feed first: the thread tells what is still
 //   pending, then tells every listener that the feed ended (each session ends its subscriptions gracefully), and
 //   leaves.
+// - Tasks (when ServerOptions::tasks has a store): the runner (tasks.h) keeps the records, and a task's handler runs
+//   here as a call does, in a CallRecord that has no Completion and follows the task's stop source instead of the
+//   session's. A task takes its place in the pools before its record is made (reserved_ for the workers, coroutines_
+//   for the io thread), so that a task that would be refused as busy leaves no record. finish() hands the outcome to
+//   the runner. A timer on the io thread sweeps the runner every TaskOptions::sweep_interval; shutdown() cancels it
+//   with the input timers.
 #include "neomcp/server.h"
 
 #include "neomcp/argument_headers.h"
 #include "neomcp/feature_host.h"
 #include "neomcp/uri_template.h"
+
+#include "server/tasks.h"
 
 #include <algorithm>
 #include <atomic>
@@ -184,6 +192,7 @@ struct ToolEntry final : Callable {
     std::optional<json_schema::Validator> input;
     std::optional<json_schema::Validator> output;
     std::string name_label;
+    TaskSupport task_support = TaskSupport::forbidden;  // fixed once the server serves
 
 protected:
     JobOutcome do_plain(const CallRecord& record, Context& context) override;
@@ -215,10 +224,10 @@ protected:
     JobOutcome failure(const CallRecord& record, const std::exception_ptr& thrown) const override;
 };
 
-// One call, from admission until it is answered.
+// One call, from admission until it is answered; or one entry of a task's handler, which has no completion.
 struct CallRecord {
-    CallRecord(Callable& callable_to_run, CallControl call_control, Completion completion, json call_arguments,
-               json call_meta)
+    CallRecord(Callable& callable_to_run, CallControl call_control, std::optional<Completion> completion,
+               json call_arguments, json call_meta)
         : callable(&callable_to_run),
           control(std::move(call_control)),
           done(std::move(completion)),
@@ -227,7 +236,8 @@ struct CallRecord {
 
     Callable* callable;
     CallControl control;
-    Completion done;
+    std::optional<Completion> done;  // empty for a task's entry
+    std::shared_ptr<TaskRun> task;   // the task the entry runs for; null for a call
     json arguments;
     json meta;
     Answers answers;                     // of the round before, when the thing asked for input
@@ -239,7 +249,7 @@ struct CallRecord {
 
     // The handler's stop source, and the callbacks that request it; the callbacks are destroyed first.
     std::stop_source stop;
-    std::optional<std::stop_callback<StopForward>> follow;  // the session's stop
+    std::optional<std::stop_callback<StopForward>> follow;  // the session's stop, or the task's
 
     // Coroutine calls only. The signal is used on the io thread after the coroutine was spawned.
     asio::cancellation_signal signal;
@@ -333,6 +343,15 @@ public:
     void post_cancel(const std::weak_ptr<CallRecord>& record);
     void finish(const std::shared_ptr<CallRecord>& record, JobOutcome outcome);
 
+    // Tasks.
+    void set_task_support(std::size_t index, TaskSupport mode);
+    TaskSupport task_support(std::size_t index) const { return entries_.at(index)->task_support; }
+    TaskStartResult start_task(const CallRequest& request, CallControl origin, TaskStart start);
+    std::optional<TaskRecord> task(std::string_view id, const TaskOwner& owner);
+    TaskCancelResult cancel_task(std::string_view id, const TaskOwner& owner);
+    AnswersResult answer_task(std::string_view id, const TaskOwner& owner, json answers, InputResponses responses);
+    TaskWatchStart watch_task(std::string_view id, const TaskOwner& owner, std::weak_ptr<TaskListener> listener);
+
     // A call waits for its client's answers: its time-out starts.
     void awaiting_input(InputWait wait) override;
     void cancel_timer(const std::weak_ptr<InputTimer>& timer);
@@ -385,6 +404,20 @@ private:
     void unwatch(std::uint64_t id);
     void watchers_changed() const;
     void run_feed();
+
+    // With mutex_ held, for a call that was admitted: puts it in flight, queued for a worker or spawned on the io
+    // thread. False when its coroutine could not be spawned; nothing of it is in flight then.
+    bool start_locked(const std::shared_ptr<CallRecord>& record);
+    // After start_locked, without the lock: wakes a worker, or arms the cancellation of the coroutine.
+    void started(const std::shared_ptr<CallRecord>& record);
+
+    // Tasks. `reserved`: the entry has the place start_task reserved for it.
+    enum class Launch { started, busy, stopping };
+    Launch launch(const std::shared_ptr<TaskRun>& run, Answers answers, bool reserved);
+    void unreserve(bool coroutine);  // gives back a place reserved for a task, with mutex_ held
+    void settle_task(const std::shared_ptr<TaskRun>& run, JobOutcome outcome, bool stopping);
+    void resume_task(const std::shared_ptr<TaskRun>& run, TaskResume resume);
+    void arm_sweep();  // on the io thread
 
     void work();
     void run_io();
@@ -458,7 +491,8 @@ private:
     std::condition_variable work_ready_;
     std::deque<std::shared_ptr<CallRecord>> queue_;
     std::size_t running_ = 0;
-    std::size_t coroutines_ = 0;  // coroutine calls in flight
+    std::size_t coroutines_ = 0;  // coroutine calls in flight, and places reserved for tasks of coroutine tools
+    std::size_t reserved_ = 0;    // places reserved for tasks of plain tools, counted as calls that wait
     bool stopping_ = false;
     std::uint64_t next_serial_ = 0;
     std::map<std::uint64_t, std::shared_ptr<CallRecord>> in_flight_;
@@ -473,6 +507,10 @@ private:
     bool timers_open_ = true;  // input timers may still be started
     std::map<std::uint64_t, std::weak_ptr<InputTimer>> timers_;
     std::uint64_t next_timer_ = 0;
+
+    // Tasks: null when the server has no task store. The sweep's timer is used on the io thread only.
+    std::unique_ptr<TaskRunner> tasks_;
+    std::optional<asio::steady_timer> sweep_timer_;
 };
 
 void CancelPoster::operator()() const noexcept { core->post_cancel(record); }
@@ -528,7 +566,14 @@ ServerCore::ServerCore(ServerOptions options)
                                         std::to_string(min_request_state_key_size) + " bytes");
         }
     }
+    TaskRunner::check(options_.tasks);
+    // Before any thread runs: the store's unfinished tasks are failed before a new one can start.
+    if (options_.tasks.store) {
+        tasks_ = std::make_unique<TaskRunner>(options_);
+        sweep_timer_.emplace(io_);
+    }
     io_work_.emplace(asio::make_work_guard(io_));
+    if (tasks_) asio::post(io_, [this] { arm_sweep(); });
     try {
         feed_thread_ = std::thread([this] { run_feed(); });
         io_thread_ = std::thread([this] { run_io(); });
@@ -566,6 +611,8 @@ void ServerCore::shutdown() {
     for (const auto& record : waiting) {
         finish(record, HostFailure{"the server shut down before " + record->callable->label() + " ran"});
     }
+    // Tasks that wait for answers have no handler to stop; they fail here.
+    if (tasks_) tasks_->shutdown();
     for (auto& worker : workers_) {
         if (worker.joinable()) worker.join();
     }
@@ -574,6 +621,9 @@ void ServerCore::shutdown() {
         const std::lock_guard<std::mutex> lock(io_mutex_);
         timers_open_ = false;
         for (const auto& entry : timers_) cancel_timer_locked(entry.second);
+        if (sweep_timer_ && io_open_) {
+            asio::post(io_, [this] { sweep_timer_->cancel(); });
+        }
     }
     // call() spawns no coroutine once stopping_ is set, so the io_context runs out of work when the coroutines in
     // flight have finished.
@@ -1083,7 +1133,8 @@ std::optional<std::string> ServerCore::check(const ToolDefinition& tool, const j
 bool ServerCore::admits() const {
     // Calls a worker will take at once, then the ones that may wait.
     const std::size_t idle = options_.max_concurrent_calls - running_;
-    return queue_.size() < idle || queue_.size() - idle < options_.max_pending_calls;
+    const std::size_t waiting = queue_.size() + reserved_;
+    return waiting < idle || waiting - idle < options_.max_pending_calls;
 }
 
 void ServerCore::call(const CallRequest& request, CallControl control, Completion done) {
@@ -1118,40 +1169,197 @@ void ServerCore::admit(Callable& callable, json arguments, json meta, CallContro
         std::unique_lock<std::mutex> lock(mutex_);
         if (stopping_) {
             lock.unlock();
-            record->done(HostFailure{"the server has shut down"});
+            (*record->done)(HostFailure{"the server has shut down"});
             return;
         }
         if (coroutine ? coroutines_ >= options_.max_coroutine_calls : !admits()) {
             lock.unlock();
-            record->done(Refusal::busy);
+            (*record->done)(Refusal::busy);
             return;
         }
-        record->serial = next_serial_++;
-        in_flight_.emplace(record->serial, record);
-        if (!coroutine) {
-            queue_.push_back(record);
-        } else {
-            ++coroutines_;
-            // Nothing of the call runs here (drive() begins by posting), so spawning may happen under the lock; it
-            // does, so that shutdown() cannot let the io_context run out of work in between.
-            try {
-                asio::co_spawn(io_, drive(record),
-                               asio::bind_cancellation_slot(record->signal.slot(), Spawned{this, record}));
-            } catch (...) {
-                in_flight_.erase(record->serial);
-                --coroutines_;
-                lock.unlock();
-                record->done(HostFailure{record->callable->label() + " could not be started"});
-                return;
-            }
+        if (!start_locked(record)) {
+            lock.unlock();
+            (*record->done)(HostFailure{record->callable->label() + " could not be started"});
+            return;
         }
     }
-    if (!coroutine) {
+    started(record);
+}
+
+bool ServerCore::start_locked(const std::shared_ptr<CallRecord>& record) {
+    record->serial = next_serial_++;
+    in_flight_.emplace(record->serial, record);
+    if (!record->coroutine) {
+        queue_.push_back(record);
+        return true;
+    }
+    ++coroutines_;
+    // Nothing of the call runs here (drive() begins by posting), so spawning may happen under the lock; it does, so
+    // that shutdown() cannot let the io_context run out of work in between.
+    try {
+        asio::co_spawn(io_, drive(record), asio::bind_cancellation_slot(record->signal.slot(), Spawned{this, record}));
+    } catch (...) {
+        in_flight_.erase(record->serial);
+        --coroutines_;
+        return false;
+    }
+    return true;
+}
+
+void ServerCore::started(const std::shared_ptr<CallRecord>& record) {
+    if (!record->coroutine) {
         work_ready_.notify_one();
         return;
     }
     // After spawning: the cancellation it posts must find the coroutine's handler in the signal's slot.
     record->poster.emplace(record->stop.get_token(), CancelPoster{this, record});
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Tasks
+
+void ServerCore::set_task_support(std::size_t index, TaskSupport mode) {
+    ToolEntry& entry = *entries_.at(index);
+    ensure_registering(entry.label(), "changed");
+    entry.task_support = mode;
+}
+
+void ServerCore::unreserve(bool coroutine) {
+    if (coroutine) {
+        --coroutines_;
+    } else {
+        --reserved_;
+    }
+}
+
+TaskStartResult ServerCore::start_task(const CallRequest& request, CallControl origin, TaskStart start) {
+    serving_.store(true);
+    if (!tasks_) return TaskRefusal::off;
+    const auto found = by_name_.find(request.name);
+    if (found == by_name_.end() || !tool_on_[found->second].load()) return TaskRefusal::unknown_tool;
+    const std::size_t index = found->second;
+    const ToolEntry& entry = *entries_[index];
+    if (entry.task_support == TaskSupport::forbidden) return TaskRefusal::not_declared;
+    if (!permits(origin, entry.scopes)) return TaskRefusal::not_permitted;
+    // The place first, then the record: a task refused as busy leaves nothing behind.
+    const bool coroutine = entry.coroutine();
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_) return TaskRefusal::shut_down;
+        if (coroutine ? coroutines_ >= options_.max_coroutine_calls : !admits()) return TaskRefusal::busy;
+        if (coroutine) {
+            ++coroutines_;
+        } else {
+            ++reserved_;
+        }
+    }
+    std::variant<TaskRunner::Created, TaskRefusal> created = TaskRefusal::busy;
+    try {
+        created = tasks_->create(index, request, std::move(origin), std::move(start));
+    } catch (...) {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        unreserve(coroutine);
+        throw;
+    }
+    if (const auto* refused = std::get_if<TaskRefusal>(&created)) {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        unreserve(coroutine);
+        return *refused;
+    }
+    auto& made = std::get<TaskRunner::Created>(created);
+    const Launch launched = launch(made.run, Answers{}, true);
+    if (launched != Launch::started) {
+        tasks_->fail_to_run(made.run, launched == Launch::busy);
+        return launched == Launch::busy ? TaskRefusal::busy : TaskRefusal::shut_down;
+    }
+    return std::move(made.record);
+}
+
+ServerCore::Launch ServerCore::launch(const std::shared_ptr<TaskRun>& run, Answers answers, bool reserved) {
+    ToolEntry& entry = *entries_[run->tool];
+    auto record = std::make_shared<CallRecord>(entry, run->origin, std::nullopt, run->request.arguments,
+                                               run->request.meta);
+    record->task = run;
+    record->answers = std::move(answers);
+    // The task's stop, never the session's: the task outlives the request that started it. Runs at once when the
+    // task was cancelled already.
+    record->follow.emplace(run->stop.get_token(), StopForward{&record->stop});
+    record->coroutine = entry.coroutine();
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        // A reserved place becomes the entry's own.
+        if (reserved) unreserve(record->coroutine);
+        if (stopping_) return Launch::stopping;
+        if (!reserved && (record->coroutine ? coroutines_ >= options_.max_coroutine_calls : !admits())) {
+            return Launch::busy;
+        }
+        if (!start_locked(record)) return Launch::busy;
+    }
+    started(record);
+    return Launch::started;
+}
+
+void ServerCore::settle_task(const std::shared_ptr<TaskRun>& run, JobOutcome outcome, bool stopping) {
+    TaskOutcome ended = std::visit(
+        [](auto&& value) -> TaskOutcome {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, ToolResult> || std::is_same_v<T, Refusal> || std::is_same_v<T, HostFailure> ||
+                          std::is_same_v<T, InvalidRequest> || std::is_same_v<T, InputRequired>) {
+                return TaskOutcome(std::move(value));
+            } else {
+                return TaskOutcome(HostFailure{"the tool answered with a result of another kind"});
+            }
+        },
+        std::move(outcome));
+    std::optional<TaskResume> resume = tasks_->settle(run, std::move(ended), stopping);
+    if (resume) resume_task(run, std::move(*resume));
+}
+
+void ServerCore::resume_task(const std::shared_ptr<TaskRun>& run, TaskResume resume) {
+    const Launch launched = launch(run, Answers{std::move(resume.responses), std::move(resume.state)}, false);
+    if (launched != Launch::started) tasks_->fail_to_run(run, launched == Launch::busy);
+}
+
+std::optional<TaskRecord> ServerCore::task(std::string_view id, const TaskOwner& owner) {
+    if (!tasks_) return std::nullopt;
+    return tasks_->read(id, owner);
+}
+
+TaskCancelResult ServerCore::cancel_task(std::string_view id, const TaskOwner& owner) {
+    if (!tasks_) return {};
+    return tasks_->cancel(id, owner);
+}
+
+AnswersResult ServerCore::answer_task(std::string_view id, const TaskOwner& owner, json answers,
+                                      InputResponses responses) {
+    if (!tasks_) return {};
+    TaskRunner::Answered answered = tasks_->answer(id, owner, std::move(answers), std::move(responses));
+    if (answered.resume) resume_task(answered.run, std::move(*answered.resume));
+    return std::move(answered.result);
+}
+
+TaskWatchStart ServerCore::watch_task(std::string_view id, const TaskOwner& owner,
+                                      std::weak_ptr<TaskListener> listener) {
+    if (!tasks_) return {};
+    return tasks_->watch(id, owner, std::move(listener));
+}
+
+void ServerCore::arm_sweep() {
+    {
+        const std::lock_guard<std::mutex> lock(io_mutex_);
+        if (!timers_open_) return;
+    }
+    // shutdown() posts the timer's cancellation after it closed the timers, so a timer armed here is cancelled.
+    sweep_timer_->expires_after(tasks_->sweep_interval());
+    sweep_timer_->async_wait([this](const std::error_code& error) {
+        if (error) return;
+        try {
+            tasks_->sweep();
+        } catch (...) {
+            // A store that failed: the next sweep tries again.
+        }
+        arm_sweep();
+    });
 }
 
 ResourceHost* ServerCore::resource_host() noexcept {
@@ -1341,9 +1549,15 @@ void ServerCore::post_cancel(const std::weak_ptr<CallRecord>& record) {
 void ServerCore::finish(const std::shared_ptr<CallRecord>& record, JobOutcome outcome) {
     // The call leaves the calls in flight, and a coroutine call gives back its place, before the answer is written:
     // a client that has the answer may start another call at once. Only the first finish() finds the call there.
+    bool stopping = false;
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         if (in_flight_.erase(record->serial) != 0 && record->coroutine) --coroutines_;
+        stopping = stopping_;
+    }
+    if (record->task) {
+        settle_task(record->task, std::move(outcome), stopping);
+        return;
     }
     if (auto* read = std::get_if<ReadResult>(&outcome)) {
         // A result that carries no hints of its own gets the resource's, else the server's default for reads.
@@ -1354,9 +1568,9 @@ void ServerCore::finish(const std::shared_ptr<CallRecord>& record, JobOutcome ou
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, ToolResult> || std::is_same_v<T, Refusal> || std::is_same_v<T, HostFailure> ||
                           std::is_same_v<T, InputRequired>) {
-                record->done(CallOutcome(std::move(value)));
+                (*record->done)(CallOutcome(std::move(value)));
             } else {
-                record->done(FeatureOutcome(std::move(value)));
+                (*record->done)(FeatureOutcome(std::move(value)));
             }
         },
         std::move(outcome));
@@ -1525,7 +1739,7 @@ void ServerCore::run_plain(const std::shared_ptr<CallRecord>& record) {
     JobOutcome outcome = HostFailure{};
     {
         Context context(record->control, record->meta, record->stop.get_token(), record->answers.responses,
-                        record->answers.state);
+                        record->answers.state, record->task.get());
         outcome = record->callable->run_plain(*record, context);
     }
     finish(record, std::move(outcome));
@@ -1539,7 +1753,7 @@ asio::awaitable<void> ServerCore::drive(std::shared_ptr<CallRecord> record) {
         co_await asio::post(io_, asio::use_awaitable);
         if (!record->stop.stop_requested()) {
             Context context(record->control, record->meta, record->stop.get_token(), record->answers.responses,
-                            record->answers.state);
+                            record->answers.state, record->task.get());
             outcome = co_await record->callable->run_async(*record, context);
         }
     } catch (...) {
@@ -1644,6 +1858,11 @@ ToolHandle ToolHandle::icons(std::vector<Icon> list) const {
 
 ToolHandle ToolHandle::scopes(std::vector<std::string> list) const {
     core_->set_tool_scopes(index_, std::move(list));
+    return *this;
+}
+
+ToolHandle ToolHandle::task_support(TaskSupport mode) const {
+    core_->set_task_support(index_, mode);
     return *this;
 }
 
@@ -1849,6 +2068,27 @@ bool Server::tool_enabled(std::size_t index) const { return core_->tool_enabled(
 std::span<const std::string> Server::tool_scopes(std::size_t index) const { return core_->tool_scopes(index); }
 
 bool Server::declares_scopes() const { return core_->declares_scopes(); }
+
+TaskSupport Server::task_support(std::size_t index) const { return core_->task_support(index); }
+
+TaskStartResult Server::start_task(const CallRequest& request, CallControl origin, TaskStart start) {
+    return core_->start_task(request, std::move(origin), std::move(start));
+}
+
+std::optional<TaskRecord> Server::task(std::string_view id, const TaskOwner& owner) { return core_->task(id, owner); }
+
+TaskCancelResult Server::cancel_task(std::string_view id, const TaskOwner& owner) {
+    return core_->cancel_task(id, owner);
+}
+
+AnswersResult Server::answer_task(std::string_view id, const TaskOwner& owner, json answers,
+                                  InputResponses responses) {
+    return core_->answer_task(id, owner, std::move(answers), std::move(responses));
+}
+
+TaskWatchStart Server::watch_task(std::string_view id, const TaskOwner& owner, std::weak_ptr<TaskListener> listener) {
+    return core_->watch_task(id, owner, std::move(listener));
+}
 
 ChangeSupport Server::change_support() const { return core_->change_support(); }
 
