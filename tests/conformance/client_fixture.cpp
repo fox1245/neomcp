@@ -404,6 +404,8 @@ const std::map<std::string, Scenario, std::less<>>& scenarios() {
         {"auth/iss-unexpected", &Flow::sign_in},
         {"auth/iss-normalized", &Flow::sign_in},
         {"auth/metadata-issuer-mismatch", &Flow::sign_in},
+        {"auth/2025-03-26-oauth-metadata-backcompat", &Flow::sign_in},
+        {"auth/2025-03-26-oauth-endpoint-fallback", &Flow::sign_in},
     };
     return table;
 }
