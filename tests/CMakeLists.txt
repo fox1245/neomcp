@@ -376,8 +376,9 @@ gtest_discover_tests(neomcp_http_resource_server_flight_test DISCOVERY_TIMEOUT 1
 
 # The same feature, one scenario per test over loopback sockets (tests/support/resource_scenario.h holds what they
 # share): the checks on every token, the scopes of each kind of item, and the metadata, the owner of a session and the
-# end of a stream. Kept in files apart so that no compile takes long.
-foreach(scenario_name IN ITEMS token scope session)
+# end of a stream, and the bounds of the remembered verdicts, the authorization servers and the metadata document. Kept
+# in files apart so that no compile takes long.
+foreach(scenario_name IN ITEMS token scope session bounds)
     add_executable(neomcp_http_resource_server_scenario_${scenario_name}_test
         http_resource_server_scenario_${scenario_name}_test.cpp)
     target_link_libraries(neomcp_http_resource_server_scenario_${scenario_name}_test
