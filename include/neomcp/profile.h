@@ -200,6 +200,12 @@ struct InputRequest {
     std::vector<std::string> params_required;  // sorted
 };
 
+// The type of one property of an object type, where that property is an object of a type of its own.
+struct PropertyType {
+    std::string property;
+    std::string type;  // a name of the profile's types
+};
+
 // An object type: its properties and the ones that must be present.
 struct Type {
     std::string name;
@@ -208,6 +214,10 @@ struct Type {
     // The values the type's `type` property may have, where the schema lists them (a constant or an enumeration of
     // strings); empty when it does not. When not empty, `type` is one of the properties.
     std::vector<std::string> type_values;  // sorted
+    // The properties that are objects of a type of the profile: the schema names the type, or writes the object inline
+    // in the definition of this type and the profile names it after that definition and the property. Empty when the
+    // type has none. Use Profile::property_type to get the type.
+    std::vector<PropertyType> property_types;  // sorted by property
 
     bool has_property(std::string_view property) const;
     bool is_required(std::string_view property) const;
@@ -262,6 +272,9 @@ public:
     const Message* notification(std::string_view method) const;
     const InputRequest* input_request(std::string_view method) const;
     const Type* type(std::string_view name) const;
+    // The type of the property `property` of `owner`; null when the profile does not give the property a type (the
+    // revision does not have the property, or it is not an object of a type the profile lists).
+    const Type* property_type(const Type& owner, std::string_view property) const;
     const Union* union_type(std::string_view name) const;
 
     // Whether an error response of the revision may leave out `id`, as an answer to a message whose id could not be

@@ -121,6 +121,14 @@ const Type* Profile::type(std::string_view name) const {
     return &*it;
 }
 
+const Type* Profile::property_type(const Type& owner, std::string_view property) const {
+    const auto it = std::lower_bound(
+        owner.property_types.begin(), owner.property_types.end(), property,
+        [](const PropertyType& entry, std::string_view key) { return entry.property < key; });
+    if (it == owner.property_types.end() || it->property != property) return nullptr;
+    return type(it->type);
+}
+
 const Union* Profile::union_type(std::string_view name) const {
     const auto it = std::lower_bound(unions_.begin(), unions_.end(), name,
                                      [](const Union& entry, std::string_view key) { return entry.name < key; });
@@ -528,8 +536,12 @@ private:
         // values the schema gives it.
         static constexpr std::string_view type_property = "type";
         static constexpr std::string_view type_values_member = "type_values";
+        static constexpr std::string_view property_types_member = "property_types";
         for_each_entry(node, [&](const std::string& name, const Node& value) {
-            const Object object(value, {{"properties", true}, {"required", true}, {type_values_member, false}});
+            const Object object(value, {{"properties", true},
+                                        {"required", true},
+                                        {type_values_member, false},
+                                        {property_types_member, false}});
             Type type;
             type.name = name;
             type.properties = strings_of(object.at("properties"), true);
@@ -553,8 +565,24 @@ private:
                          "a list of values");
                 }
             }
+            if (const std::optional<Node> typed = object.find(property_types_member)) {
+                if (object_of(*typed).empty()) fail(typed->pointer(), "at least one property", "an empty object");
+                for_each_entry(*typed, [&](const std::string& property, const Node& target) {
+                    if (!std::binary_search(sorted_properties.begin(), sorted_properties.end(), property)) {
+                        fail(typed->member_pointer(property), "a property of " + name,
+                             "'" + property + "' is not a property of " + name);
+                    }
+                    const std::string& type_name = nonempty_string_of(target);
+                    if (object_of(node).find(type_name) == object_of(node).end()) {
+                        fail(target.pointer(), "a name of wire.types", "'" + type_name + "' is not one");
+                    }
+                    type.property_types.push_back({property, type_name});
+                });
+            }
             std::sort(type.required.begin(), type.required.end());
             std::sort(type.type_values.begin(), type.type_values.end());
+            std::sort(type.property_types.begin(), type.property_types.end(),
+                      [](const PropertyType& a, const PropertyType& b) { return a.property < b.property; });
             type.properties = std::move(sorted_properties);
             profile_.types_.push_back(std::move(type));
         });

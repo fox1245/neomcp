@@ -396,7 +396,10 @@
         ],
         "type_values": [
           "audio"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "BaseMetadata": {
         "properties": [
@@ -445,7 +448,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "CallToolRequestParams"
+        }
       },
       "CallToolRequestParams": {
         "properties": [
@@ -456,7 +462,17 @@
         ],
         "required": [
           "name"
-        ]
+        ],
+        "property_types": {
+          "_meta": "CallToolRequestParams._meta",
+          "task": "TaskMetadata"
+        }
+      },
+      "CallToolRequestParams._meta": {
+        "properties": [
+          "progressToken"
+        ],
+        "required": []
       },
       "CallToolResult": {
         "properties": [
@@ -481,6 +497,17 @@
           "jsonrpc",
           "method",
           "params"
+        ],
+        "property_types": {
+          "params": "CancelTaskRequest.params"
+        }
+      },
+      "CancelTaskRequest.params": {
+        "properties": [
+          "taskId"
+        ],
+        "required": [
+          "taskId"
         ]
       },
       "CancelTaskResult": {
@@ -512,7 +539,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "CancelledNotificationParams"
+        }
       },
       "CancelledNotificationParams": {
         "properties": [
@@ -530,6 +560,114 @@
           "sampling",
           "tasks"
         ],
+        "required": [],
+        "property_types": {
+          "elicitation": "ClientCapabilities.elicitation",
+          "roots": "ClientCapabilities.roots",
+          "sampling": "ClientCapabilities.sampling",
+          "tasks": "ClientCapabilities.tasks"
+        }
+      },
+      "ClientCapabilities.elicitation": {
+        "properties": [
+          "form",
+          "url"
+        ],
+        "required": [],
+        "property_types": {
+          "form": "ClientCapabilities.elicitation.form",
+          "url": "ClientCapabilities.elicitation.url"
+        }
+      },
+      "ClientCapabilities.elicitation.form": {
+        "properties": [],
+        "required": []
+      },
+      "ClientCapabilities.elicitation.url": {
+        "properties": [],
+        "required": []
+      },
+      "ClientCapabilities.roots": {
+        "properties": [
+          "listChanged"
+        ],
+        "required": []
+      },
+      "ClientCapabilities.sampling": {
+        "properties": [
+          "context",
+          "tools"
+        ],
+        "required": [],
+        "property_types": {
+          "context": "ClientCapabilities.sampling.context",
+          "tools": "ClientCapabilities.sampling.tools"
+        }
+      },
+      "ClientCapabilities.sampling.context": {
+        "properties": [],
+        "required": []
+      },
+      "ClientCapabilities.sampling.tools": {
+        "properties": [],
+        "required": []
+      },
+      "ClientCapabilities.tasks": {
+        "properties": [
+          "cancel",
+          "list",
+          "requests"
+        ],
+        "required": [],
+        "property_types": {
+          "cancel": "ClientCapabilities.tasks.cancel",
+          "list": "ClientCapabilities.tasks.list",
+          "requests": "ClientCapabilities.tasks.requests"
+        }
+      },
+      "ClientCapabilities.tasks.cancel": {
+        "properties": [],
+        "required": []
+      },
+      "ClientCapabilities.tasks.list": {
+        "properties": [],
+        "required": []
+      },
+      "ClientCapabilities.tasks.requests": {
+        "properties": [
+          "elicitation",
+          "sampling"
+        ],
+        "required": [],
+        "property_types": {
+          "elicitation": "ClientCapabilities.tasks.requests.elicitation",
+          "sampling": "ClientCapabilities.tasks.requests.sampling"
+        }
+      },
+      "ClientCapabilities.tasks.requests.elicitation": {
+        "properties": [
+          "create"
+        ],
+        "required": [],
+        "property_types": {
+          "create": "ClientCapabilities.tasks.requests.elicitation.create"
+        }
+      },
+      "ClientCapabilities.tasks.requests.elicitation.create": {
+        "properties": [],
+        "required": []
+      },
+      "ClientCapabilities.tasks.requests.sampling": {
+        "properties": [
+          "createMessage"
+        ],
+        "required": [],
+        "property_types": {
+          "createMessage": "ClientCapabilities.tasks.requests.sampling.createMessage"
+        }
+      },
+      "ClientCapabilities.tasks.requests.sampling.createMessage": {
+        "properties": [],
         "required": []
       },
       "CompleteRequest": {
@@ -544,7 +682,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "CompleteRequestParams"
+        }
       },
       "CompleteRequestParams": {
         "properties": [
@@ -556,7 +697,34 @@
         "required": [
           "argument",
           "ref"
+        ],
+        "property_types": {
+          "_meta": "CompleteRequestParams._meta",
+          "argument": "CompleteRequestParams.argument",
+          "context": "CompleteRequestParams.context"
+        }
+      },
+      "CompleteRequestParams._meta": {
+        "properties": [
+          "progressToken"
+        ],
+        "required": []
+      },
+      "CompleteRequestParams.argument": {
+        "properties": [
+          "name",
+          "value"
+        ],
+        "required": [
+          "name",
+          "value"
         ]
+      },
+      "CompleteRequestParams.context": {
+        "properties": [
+          "arguments"
+        ],
+        "required": []
       },
       "CompleteResult": {
         "properties": [
@@ -565,6 +733,19 @@
         ],
         "required": [
           "completion"
+        ],
+        "property_types": {
+          "completion": "CompleteResult.completion"
+        }
+      },
+      "CompleteResult.completion": {
+        "properties": [
+          "hasMore",
+          "total",
+          "values"
+        ],
+        "required": [
+          "values"
         ]
       },
       "CreateMessageRequest": {
@@ -579,7 +760,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "CreateMessageRequestParams"
+        }
       },
       "CreateMessageRequestParams": {
         "properties": [
@@ -599,7 +783,24 @@
         "required": [
           "maxTokens",
           "messages"
-        ]
+        ],
+        "property_types": {
+          "_meta": "CreateMessageRequestParams._meta",
+          "metadata": "CreateMessageRequestParams.metadata",
+          "modelPreferences": "ModelPreferences",
+          "task": "TaskMetadata",
+          "toolChoice": "ToolChoice"
+        }
+      },
+      "CreateMessageRequestParams._meta": {
+        "properties": [
+          "progressToken"
+        ],
+        "required": []
+      },
+      "CreateMessageRequestParams.metadata": {
+        "properties": [],
+        "required": []
       },
       "CreateMessageResult": {
         "properties": [
@@ -622,7 +823,10 @@
         ],
         "required": [
           "task"
-        ]
+        ],
+        "property_types": {
+          "task": "Task"
+        }
       },
       "ElicitRequest": {
         "properties": [
@@ -649,6 +853,32 @@
         "required": [
           "message",
           "requestedSchema"
+        ],
+        "property_types": {
+          "_meta": "ElicitRequestFormParams._meta",
+          "requestedSchema": "ElicitRequestFormParams.requestedSchema",
+          "task": "TaskMetadata"
+        }
+      },
+      "ElicitRequestFormParams._meta": {
+        "properties": [
+          "progressToken"
+        ],
+        "required": []
+      },
+      "ElicitRequestFormParams.requestedSchema": {
+        "properties": [
+          "$schema",
+          "properties",
+          "required",
+          "type"
+        ],
+        "required": [
+          "properties",
+          "type"
+        ],
+        "type_values": [
+          "object"
         ]
       },
       "ElicitRequestURLParams": {
@@ -665,7 +895,17 @@
           "message",
           "mode",
           "url"
-        ]
+        ],
+        "property_types": {
+          "_meta": "ElicitRequestURLParams._meta",
+          "task": "TaskMetadata"
+        }
+      },
+      "ElicitRequestURLParams._meta": {
+        "properties": [
+          "progressToken"
+        ],
+        "required": []
       },
       "ElicitResult": {
         "properties": [
@@ -687,6 +927,17 @@
           "jsonrpc",
           "method",
           "params"
+        ],
+        "property_types": {
+          "params": "ElicitationCompleteNotification.params"
+        }
+      },
+      "ElicitationCompleteNotification.params": {
+        "properties": [
+          "elicitationId"
+        ],
+        "required": [
+          "elicitationId"
         ]
       },
       "EmbeddedResource": {
@@ -702,7 +953,10 @@
         ],
         "type_values": [
           "resource"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "EmptyResult": {
         "properties": [
@@ -733,7 +987,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "GetPromptRequestParams"
+        }
       },
       "GetPromptRequestParams": {
         "properties": [
@@ -743,7 +1000,16 @@
         ],
         "required": [
           "name"
-        ]
+        ],
+        "property_types": {
+          "_meta": "GetPromptRequestParams._meta"
+        }
+      },
+      "GetPromptRequestParams._meta": {
+        "properties": [
+          "progressToken"
+        ],
+        "required": []
       },
       "GetPromptResult": {
         "properties": [
@@ -767,6 +1033,17 @@
           "jsonrpc",
           "method",
           "params"
+        ],
+        "property_types": {
+          "params": "GetTaskPayloadRequest.params"
+        }
+      },
+      "GetTaskPayloadRequest.params": {
+        "properties": [
+          "taskId"
+        ],
+        "required": [
+          "taskId"
         ]
       },
       "GetTaskPayloadResult": {
@@ -787,6 +1064,17 @@
           "jsonrpc",
           "method",
           "params"
+        ],
+        "property_types": {
+          "params": "GetTaskRequest.params"
+        }
+      },
+      "GetTaskRequest.params": {
+        "properties": [
+          "taskId"
+        ],
+        "required": [
+          "taskId"
         ]
       },
       "GetTaskResult": {
@@ -840,7 +1128,10 @@
         ],
         "type_values": [
           "image"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "Implementation": {
         "properties": [
@@ -868,7 +1159,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "InitializeRequestParams"
+        }
       },
       "InitializeRequestParams": {
         "properties": [
@@ -881,7 +1175,18 @@
           "capabilities",
           "clientInfo",
           "protocolVersion"
-        ]
+        ],
+        "property_types": {
+          "_meta": "InitializeRequestParams._meta",
+          "capabilities": "ClientCapabilities",
+          "clientInfo": "Implementation"
+        }
+      },
+      "InitializeRequestParams._meta": {
+        "properties": [
+          "progressToken"
+        ],
+        "required": []
       },
       "InitializeResult": {
         "properties": [
@@ -895,7 +1200,11 @@
           "capabilities",
           "protocolVersion",
           "serverInfo"
-        ]
+        ],
+        "property_types": {
+          "capabilities": "ServerCapabilities",
+          "serverInfo": "Implementation"
+        }
       },
       "InitializedNotification": {
         "properties": [
@@ -906,7 +1215,10 @@
         "required": [
           "jsonrpc",
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "NotificationParams"
+        }
       },
       "JSONRPCErrorResponse": {
         "properties": [
@@ -917,7 +1229,10 @@
         "required": [
           "error",
           "jsonrpc"
-        ]
+        ],
+        "property_types": {
+          "error": "Error"
+        }
       },
       "JSONRPCNotification": {
         "properties": [
@@ -953,7 +1268,10 @@
           "id",
           "jsonrpc",
           "result"
-        ]
+        ],
+        "property_types": {
+          "result": "Result"
+        }
       },
       "LegacyTitledEnumSchema": {
         "properties": [
@@ -983,7 +1301,10 @@
           "id",
           "jsonrpc",
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "PaginatedRequestParams"
+        }
       },
       "ListPromptsResult": {
         "properties": [
@@ -1006,7 +1327,10 @@
           "id",
           "jsonrpc",
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "PaginatedRequestParams"
+        }
       },
       "ListResourceTemplatesResult": {
         "properties": [
@@ -1029,7 +1353,10 @@
           "id",
           "jsonrpc",
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "PaginatedRequestParams"
+        }
       },
       "ListResourcesResult": {
         "properties": [
@@ -1052,7 +1379,10 @@
           "id",
           "jsonrpc",
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "RequestParams"
+        }
       },
       "ListRootsResult": {
         "properties": [
@@ -1074,7 +1404,10 @@
           "id",
           "jsonrpc",
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "PaginatedRequestParams"
+        }
       },
       "ListTasksResult": {
         "properties": [
@@ -1097,7 +1430,10 @@
           "id",
           "jsonrpc",
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "PaginatedRequestParams"
+        }
       },
       "ListToolsResult": {
         "properties": [
@@ -1119,7 +1455,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "LoggingMessageNotificationParams"
+        }
       },
       "LoggingMessageNotificationParams": {
         "properties": [
@@ -1191,12 +1530,24 @@
           "id",
           "jsonrpc",
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "PaginatedRequestParams"
+        }
       },
       "PaginatedRequestParams": {
         "properties": [
           "_meta",
           "cursor"
+        ],
+        "required": [],
+        "property_types": {
+          "_meta": "PaginatedRequestParams._meta"
+        }
+      },
+      "PaginatedRequestParams._meta": {
+        "properties": [
+          "progressToken"
         ],
         "required": []
       },
@@ -1218,7 +1569,10 @@
           "id",
           "jsonrpc",
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "RequestParams"
+        }
       },
       "ProgressNotification": {
         "properties": [
@@ -1230,7 +1584,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "ProgressNotificationParams"
+        }
       },
       "ProgressNotificationParams": {
         "properties": [
@@ -1278,7 +1635,10 @@
         "required": [
           "jsonrpc",
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "NotificationParams"
+        }
       },
       "PromptMessage": {
         "properties": [
@@ -1316,7 +1676,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "ReadResourceRequestParams"
+        }
       },
       "ReadResourceRequestParams": {
         "properties": [
@@ -1325,7 +1688,16 @@
         ],
         "required": [
           "uri"
-        ]
+        ],
+        "property_types": {
+          "_meta": "ReadResourceRequestParams._meta"
+        }
+      },
+      "ReadResourceRequestParams._meta": {
+        "properties": [
+          "progressToken"
+        ],
+        "required": []
       },
       "ReadResourceResult": {
         "properties": [
@@ -1357,6 +1729,15 @@
         "properties": [
           "_meta"
         ],
+        "required": [],
+        "property_types": {
+          "_meta": "RequestParams._meta"
+        }
+      },
+      "RequestParams._meta": {
+        "properties": [
+          "progressToken"
+        ],
         "required": []
       },
       "Resource": {
@@ -1374,7 +1755,10 @@
         "required": [
           "name",
           "uri"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "ResourceContents": {
         "properties": [
@@ -1406,7 +1790,10 @@
         ],
         "type_values": [
           "resource_link"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "ResourceListChangedNotification": {
         "properties": [
@@ -1417,7 +1804,10 @@
         "required": [
           "jsonrpc",
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "NotificationParams"
+        }
       },
       "ResourceRequestParams": {
         "properties": [
@@ -1426,7 +1816,16 @@
         ],
         "required": [
           "uri"
-        ]
+        ],
+        "property_types": {
+          "_meta": "ResourceRequestParams._meta"
+        }
+      },
+      "ResourceRequestParams._meta": {
+        "properties": [
+          "progressToken"
+        ],
+        "required": []
       },
       "ResourceTemplate": {
         "properties": [
@@ -1442,7 +1841,10 @@
         "required": [
           "name",
           "uriTemplate"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "ResourceTemplateReference": {
         "properties": [
@@ -1467,7 +1869,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "ResourceUpdatedNotificationParams"
+        }
       },
       "ResourceUpdatedNotificationParams": {
         "properties": [
@@ -1503,7 +1908,10 @@
         "required": [
           "jsonrpc",
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "NotificationParams"
+        }
       },
       "SamplingMessage": {
         "properties": [
@@ -1526,6 +1934,84 @@
           "tasks",
           "tools"
         ],
+        "required": [],
+        "property_types": {
+          "completions": "ServerCapabilities.completions",
+          "logging": "ServerCapabilities.logging",
+          "prompts": "ServerCapabilities.prompts",
+          "resources": "ServerCapabilities.resources",
+          "tasks": "ServerCapabilities.tasks",
+          "tools": "ServerCapabilities.tools"
+        }
+      },
+      "ServerCapabilities.completions": {
+        "properties": [],
+        "required": []
+      },
+      "ServerCapabilities.logging": {
+        "properties": [],
+        "required": []
+      },
+      "ServerCapabilities.prompts": {
+        "properties": [
+          "listChanged"
+        ],
+        "required": []
+      },
+      "ServerCapabilities.resources": {
+        "properties": [
+          "listChanged",
+          "subscribe"
+        ],
+        "required": []
+      },
+      "ServerCapabilities.tasks": {
+        "properties": [
+          "cancel",
+          "list",
+          "requests"
+        ],
+        "required": [],
+        "property_types": {
+          "cancel": "ServerCapabilities.tasks.cancel",
+          "list": "ServerCapabilities.tasks.list",
+          "requests": "ServerCapabilities.tasks.requests"
+        }
+      },
+      "ServerCapabilities.tasks.cancel": {
+        "properties": [],
+        "required": []
+      },
+      "ServerCapabilities.tasks.list": {
+        "properties": [],
+        "required": []
+      },
+      "ServerCapabilities.tasks.requests": {
+        "properties": [
+          "tools"
+        ],
+        "required": [],
+        "property_types": {
+          "tools": "ServerCapabilities.tasks.requests.tools"
+        }
+      },
+      "ServerCapabilities.tasks.requests.tools": {
+        "properties": [
+          "call"
+        ],
+        "required": [],
+        "property_types": {
+          "call": "ServerCapabilities.tasks.requests.tools.call"
+        }
+      },
+      "ServerCapabilities.tasks.requests.tools.call": {
+        "properties": [],
+        "required": []
+      },
+      "ServerCapabilities.tools": {
+        "properties": [
+          "listChanged"
+        ],
         "required": []
       },
       "SetLevelRequest": {
@@ -1540,7 +2026,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "SetLevelRequestParams"
+        }
       },
       "SetLevelRequestParams": {
         "properties": [
@@ -1549,7 +2038,16 @@
         ],
         "required": [
           "level"
-        ]
+        ],
+        "property_types": {
+          "_meta": "SetLevelRequestParams._meta"
+        }
+      },
+      "SetLevelRequestParams._meta": {
+        "properties": [
+          "progressToken"
+        ],
+        "required": []
       },
       "StringSchema": {
         "properties": [
@@ -1580,7 +2078,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "SubscribeRequestParams"
+        }
       },
       "SubscribeRequestParams": {
         "properties": [
@@ -1589,7 +2090,16 @@
         ],
         "required": [
           "uri"
-        ]
+        ],
+        "property_types": {
+          "_meta": "SubscribeRequestParams._meta"
+        }
+      },
+      "SubscribeRequestParams._meta": {
+        "properties": [
+          "progressToken"
+        ],
+        "required": []
       },
       "Task": {
         "properties": [
@@ -1614,6 +2124,16 @@
           "_meta",
           "task"
         ],
+        "required": [],
+        "property_types": {
+          "_meta": "TaskAugmentedRequestParams._meta",
+          "task": "TaskMetadata"
+        }
+      },
+      "TaskAugmentedRequestParams._meta": {
+        "properties": [
+          "progressToken"
+        ],
         "required": []
       },
       "TaskMetadata": {
@@ -1632,7 +2152,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "TaskStatusNotificationParams"
+        }
       },
       "TaskStatusNotificationParams": {
         "properties": [
@@ -1666,7 +2189,10 @@
         ],
         "type_values": [
           "text"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "TextResourceContents": {
         "properties": [
@@ -1696,6 +2222,17 @@
         ],
         "type_values": [
           "array"
+        ],
+        "property_types": {
+          "items": "TitledMultiSelectEnumSchema.items"
+        }
+      },
+      "TitledMultiSelectEnumSchema.items": {
+        "properties": [
+          "anyOf"
+        ],
+        "required": [
+          "anyOf"
         ]
       },
       "TitledSingleSelectEnumSchema": {
@@ -1729,6 +2266,40 @@
         "required": [
           "inputSchema",
           "name"
+        ],
+        "property_types": {
+          "annotations": "ToolAnnotations",
+          "execution": "ToolExecution",
+          "inputSchema": "Tool.inputSchema",
+          "outputSchema": "Tool.outputSchema"
+        }
+      },
+      "Tool.inputSchema": {
+        "properties": [
+          "$schema",
+          "properties",
+          "required",
+          "type"
+        ],
+        "required": [
+          "type"
+        ],
+        "type_values": [
+          "object"
+        ]
+      },
+      "Tool.outputSchema": {
+        "properties": [
+          "$schema",
+          "properties",
+          "required",
+          "type"
+        ],
+        "required": [
+          "type"
+        ],
+        "type_values": [
+          "object"
         ]
       },
       "ToolAnnotations": {
@@ -1762,7 +2333,10 @@
         "required": [
           "jsonrpc",
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "NotificationParams"
+        }
       },
       "ToolResultContent": {
         "properties": [
@@ -1823,7 +2397,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "UnsubscribeRequestParams"
+        }
       },
       "UnsubscribeRequestParams": {
         "properties": [
@@ -1832,7 +2409,16 @@
         ],
         "required": [
           "uri"
-        ]
+        ],
+        "property_types": {
+          "_meta": "UnsubscribeRequestParams._meta"
+        }
+      },
+      "UnsubscribeRequestParams._meta": {
+        "properties": [
+          "progressToken"
+        ],
+        "required": []
       },
       "UntitledMultiSelectEnumSchema": {
         "properties": [
@@ -1850,6 +2436,22 @@
         ],
         "type_values": [
           "array"
+        ],
+        "property_types": {
+          "items": "UntitledMultiSelectEnumSchema.items"
+        }
+      },
+      "UntitledMultiSelectEnumSchema.items": {
+        "properties": [
+          "enum",
+          "type"
+        ],
+        "required": [
+          "enum",
+          "type"
+        ],
+        "type_values": [
+          "string"
         ]
       },
       "UntitledSingleSelectEnumSchema": {

@@ -4,7 +4,9 @@
 The `wire` member holds what the published schema states about a revision: its
 requests and notifications with their senders, the requests a server may ask of
 a client inside a result, the properties of every object type (with the values of
-its `type` property where the schema lists them), and the unions of types. A profile's
+its `type` property where the schema lists them, and the type of each property that
+is an object), and the unions of types. An object written inline as a property is a
+type of its own, named after the type that writes it and the property. A profile's
 other members are written by hand from the specification's prose.
 
     profile_wire.py SCHEMA                  print the wire member
@@ -29,6 +31,10 @@ SENDER_UNIONS = (
 INPUT_REQUEST_UNION = "InputRequest"
 # The property that says which of the types of a union an object is: its values are recorded per type.
 DISCRIMINATOR = "type"
+# An object written inline as a property of a type has no name in the schema. It is recorded as a type of its own,
+# named after the type that writes it and the property, joined by this separator ("Resource.annotations"). A name in
+# the schema never holds it, so the derived name cannot be one the schema defines.
+INLINE_SEPARATOR = "."
 
 
 def ref_name(node):
@@ -117,6 +123,24 @@ def property_schema(definitions, node, name, seen=()):
     return None
 
 
+def member_schemas(definitions, node, owner, seen=()):
+    """The properties of an object type with their schemas, as {name: (schema, writer)}: `writer` is the name of the
+    type whose definition writes the property, which is where an object written inline gets its derived name.
+    The type is written with `properties`, as a reference or as an allOf of object types."""
+    properties = node.get("properties")
+    if isinstance(properties, dict):
+        return {name: (schema, owner) for name, schema in properties.items()}
+    target = ref_name(node)
+    if target:
+        if target in seen:
+            raise SystemExit(f"{target} refers to itself")
+        return member_schemas(definitions, definitions[target], target, (*seen, target))
+    found = {}
+    for part in node.get("allOf", []):
+        found.update(member_schemas(definitions, part, owner, seen))
+    return found
+
+
 def fixed_strings(node):
     """The strings a property schema allows when it lists them (a const or an
     enum of strings), sorted; None for any other schema."""
@@ -176,6 +200,34 @@ def params_of(definitions, name):
     return entry
 
 
+def add_object_type(definitions, types, name, node, writer):
+    """Record the object type `name` of `node`, and the object types its properties are. A property whose schema is
+    a reference to an object type is of that type; a property written inline as an object with `properties` is of a
+    type of its own, named after `writer` (the type whose definition writes it) and the property, and recorded in
+    the same way. `property_types` lists those properties and their types; it is left out when there are none."""
+    shape = object_shape(definitions, node)
+    entry = {"properties": sorted(shape[0]), "required": sorted(shape[1])}
+    values = fixed_strings(property_schema(definitions, node, DISCRIMINATOR))
+    if values is not None:
+        entry["type_values"] = values
+    types[name] = entry
+    property_types = {}
+    for member, (schema, written_by) in member_schemas(definitions, node, writer).items():
+        target = ref_name(schema)
+        if target:
+            if object_shape(definitions, definitions[target]) is not None:
+                property_types[member] = target
+        elif isinstance(schema.get("properties"), dict):
+            derived = f"{written_by}{INLINE_SEPARATOR}{member}"
+            if derived in definitions:
+                raise SystemExit(f"{derived} is derived for an inline object and is also defined by the schema")
+            if derived not in types:
+                add_object_type(definitions, types, derived, schema, derived)
+            property_types[member] = derived
+    if property_types:
+        entry["property_types"] = dict(sorted(property_types.items()))
+
+
 def derive(schema_path):
     raw = Path(schema_path).read_bytes()
     document = json.loads(raw)
@@ -215,12 +267,8 @@ def derive(schema_path):
     types = {}
     unions = {}
     for name, definition in definitions.items():
-        shape = object_shape(definitions, definition)
-        if shape is not None:
-            types[name] = {"properties": sorted(shape[0]), "required": sorted(shape[1])}
-            values = fixed_strings(property_schema(definitions, definition, DISCRIMINATOR))
-            if values is not None:
-                types[name]["type_values"] = values
+        if object_shape(definitions, definition) is not None:
+            add_object_type(definitions, types, name, definition, name)
             continue
         members = union_of_types(definition)
         if members is not None:

@@ -335,7 +335,10 @@
         ],
         "type_values": [
           "audio"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "BaseMetadata": {
         "properties": [
@@ -383,7 +386,10 @@
           "cacheScope",
           "resultType",
           "ttlMs"
-        ]
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject"
+        }
       },
       "CallToolRequest": {
         "properties": [
@@ -397,7 +403,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "CallToolRequestParams"
+        }
       },
       "CallToolRequestParams": {
         "properties": [
@@ -410,7 +419,10 @@
         "required": [
           "_meta",
           "name"
-        ]
+        ],
+        "property_types": {
+          "_meta": "RequestMetaObject"
+        }
       },
       "CallToolResult": {
         "properties": [
@@ -423,7 +435,10 @@
         "required": [
           "content",
           "resultType"
-        ]
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject"
+        }
       },
       "CallToolResultResponse": {
         "properties": [
@@ -447,7 +462,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "CancelledNotificationParams"
+        }
       },
       "CancelledNotificationParams": {
         "properties": [
@@ -457,7 +475,10 @@
         ],
         "required": [
           "requestId"
-        ]
+        ],
+        "property_types": {
+          "_meta": "NotificationMetaObject"
+        }
       },
       "ClientCapabilities": {
         "properties": [
@@ -466,6 +487,29 @@
           "extensions",
           "roots",
           "sampling"
+        ],
+        "required": [],
+        "property_types": {
+          "elicitation": "ClientCapabilities.elicitation",
+          "roots": "ClientCapabilities.roots",
+          "sampling": "ClientCapabilities.sampling"
+        }
+      },
+      "ClientCapabilities.elicitation": {
+        "properties": [
+          "form",
+          "url"
+        ],
+        "required": []
+      },
+      "ClientCapabilities.roots": {
+        "properties": [],
+        "required": []
+      },
+      "ClientCapabilities.sampling": {
+        "properties": [
+          "context",
+          "tools"
         ],
         "required": []
       },
@@ -479,7 +523,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "CancelledNotificationParams"
+        }
       },
       "ClientResult": {
         "properties": [
@@ -488,7 +535,10 @@
         ],
         "required": [
           "resultType"
-        ]
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject"
+        }
       },
       "CompleteRequest": {
         "properties": [
@@ -502,7 +552,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "CompleteRequestParams"
+        }
       },
       "CompleteRequestParams": {
         "properties": [
@@ -515,7 +568,28 @@
           "_meta",
           "argument",
           "ref"
+        ],
+        "property_types": {
+          "_meta": "RequestMetaObject",
+          "argument": "CompleteRequestParams.argument",
+          "context": "CompleteRequestParams.context"
+        }
+      },
+      "CompleteRequestParams.argument": {
+        "properties": [
+          "name",
+          "value"
+        ],
+        "required": [
+          "name",
+          "value"
         ]
+      },
+      "CompleteRequestParams.context": {
+        "properties": [
+          "arguments"
+        ],
+        "required": []
       },
       "CompleteResult": {
         "properties": [
@@ -526,6 +600,20 @@
         "required": [
           "completion",
           "resultType"
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject",
+          "completion": "CompleteResult.completion"
+        }
+      },
+      "CompleteResult.completion": {
+        "properties": [
+          "hasMore",
+          "total",
+          "values"
+        ],
+        "required": [
+          "values"
         ]
       },
       "CompleteResultResponse": {
@@ -538,7 +626,10 @@
           "id",
           "jsonrpc",
           "result"
-        ]
+        ],
+        "property_types": {
+          "result": "CompleteResult"
+        }
       },
       "CreateMessageRequest": {
         "properties": [
@@ -548,7 +639,10 @@
         "required": [
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "CreateMessageRequestParams"
+        }
       },
       "CreateMessageRequestParams": {
         "properties": [
@@ -566,7 +660,11 @@
         "required": [
           "maxTokens",
           "messages"
-        ]
+        ],
+        "property_types": {
+          "modelPreferences": "ModelPreferences",
+          "toolChoice": "ToolChoice"
+        }
       },
       "CreateMessageResult": {
         "properties": [
@@ -594,7 +692,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "RequestParams"
+        }
       },
       "DiscoverResult": {
         "properties": [
@@ -612,7 +713,11 @@
           "resultType",
           "supportedVersions",
           "ttlMs"
-        ]
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject",
+          "capabilities": "ServerCapabilities"
+        }
       },
       "DiscoverResultResponse": {
         "properties": [
@@ -624,7 +729,10 @@
           "id",
           "jsonrpc",
           "result"
-        ]
+        ],
+        "property_types": {
+          "result": "DiscoverResult"
+        }
       },
       "ElicitRequest": {
         "properties": [
@@ -645,6 +753,24 @@
         "required": [
           "message",
           "requestedSchema"
+        ],
+        "property_types": {
+          "requestedSchema": "ElicitRequestFormParams.requestedSchema"
+        }
+      },
+      "ElicitRequestFormParams.requestedSchema": {
+        "properties": [
+          "$schema",
+          "properties",
+          "required",
+          "type"
+        ],
+        "required": [
+          "properties",
+          "type"
+        ],
+        "type_values": [
+          "object"
         ]
       },
       "ElicitRequestURLParams": {
@@ -681,7 +807,10 @@
         ],
         "type_values": [
           "resource"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "EmptyResult": {
         "properties": [
@@ -690,7 +819,10 @@
         ],
         "required": [
           "resultType"
-        ]
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject"
+        }
       },
       "Error": {
         "properties": [
@@ -715,7 +847,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "GetPromptRequestParams"
+        }
       },
       "GetPromptRequestParams": {
         "properties": [
@@ -728,7 +863,10 @@
         "required": [
           "_meta",
           "name"
-        ]
+        ],
+        "property_types": {
+          "_meta": "RequestMetaObject"
+        }
       },
       "GetPromptResult": {
         "properties": [
@@ -740,7 +878,10 @@
         "required": [
           "messages",
           "resultType"
-        ]
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject"
+        }
       },
       "GetPromptResultResponse": {
         "properties": [
@@ -797,7 +938,10 @@
         ],
         "type_values": [
           "image"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "Implementation": {
         "properties": [
@@ -822,7 +966,10 @@
         ],
         "required": [
           "resultType"
-        ]
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject"
+        }
       },
       "InputResponseRequestParams": {
         "properties": [
@@ -832,7 +979,10 @@
         ],
         "required": [
           "_meta"
-        ]
+        ],
+        "property_types": {
+          "_meta": "RequestMetaObject"
+        }
       },
       "InternalError": {
         "properties": [
@@ -876,7 +1026,10 @@
         "required": [
           "error",
           "jsonrpc"
-        ]
+        ],
+        "property_types": {
+          "error": "Error"
+        }
       },
       "JSONRPCNotification": {
         "properties": [
@@ -912,7 +1065,10 @@
           "id",
           "jsonrpc",
           "result"
-        ]
+        ],
+        "property_types": {
+          "result": "Result"
+        }
       },
       "LegacyTitledEnumSchema": {
         "properties": [
@@ -943,7 +1099,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "PaginatedRequestParams"
+        }
       },
       "ListPromptsResult": {
         "properties": [
@@ -959,7 +1118,10 @@
           "prompts",
           "resultType",
           "ttlMs"
-        ]
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject"
+        }
       },
       "ListPromptsResultResponse": {
         "properties": [
@@ -971,7 +1133,10 @@
           "id",
           "jsonrpc",
           "result"
-        ]
+        ],
+        "property_types": {
+          "result": "ListPromptsResult"
+        }
       },
       "ListResourceTemplatesRequest": {
         "properties": [
@@ -985,7 +1150,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "PaginatedRequestParams"
+        }
       },
       "ListResourceTemplatesResult": {
         "properties": [
@@ -1001,7 +1169,10 @@
           "resourceTemplates",
           "resultType",
           "ttlMs"
-        ]
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject"
+        }
       },
       "ListResourceTemplatesResultResponse": {
         "properties": [
@@ -1013,7 +1184,10 @@
           "id",
           "jsonrpc",
           "result"
-        ]
+        ],
+        "property_types": {
+          "result": "ListResourceTemplatesResult"
+        }
       },
       "ListResourcesRequest": {
         "properties": [
@@ -1027,7 +1201,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "PaginatedRequestParams"
+        }
       },
       "ListResourcesResult": {
         "properties": [
@@ -1043,7 +1220,10 @@
           "resources",
           "resultType",
           "ttlMs"
-        ]
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject"
+        }
       },
       "ListResourcesResultResponse": {
         "properties": [
@@ -1055,7 +1235,10 @@
           "id",
           "jsonrpc",
           "result"
-        ]
+        ],
+        "property_types": {
+          "result": "ListResourcesResult"
+        }
       },
       "ListRootsRequest": {
         "properties": [
@@ -1064,7 +1247,16 @@
         ],
         "required": [
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "ListRootsRequest.params"
+        }
+      },
+      "ListRootsRequest.params": {
+        "properties": [
+          "_meta"
+        ],
+        "required": []
       },
       "ListRootsResult": {
         "properties": [
@@ -1086,7 +1278,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "PaginatedRequestParams"
+        }
       },
       "ListToolsResult": {
         "properties": [
@@ -1102,7 +1297,10 @@
           "resultType",
           "tools",
           "ttlMs"
-        ]
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject"
+        }
       },
       "ListToolsResultResponse": {
         "properties": [
@@ -1114,7 +1312,10 @@
           "id",
           "jsonrpc",
           "result"
-        ]
+        ],
+        "property_types": {
+          "result": "ListToolsResult"
+        }
       },
       "LoggingMessageNotification": {
         "properties": [
@@ -1126,7 +1327,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "LoggingMessageNotificationParams"
+        }
       },
       "LoggingMessageNotificationParams": {
         "properties": [
@@ -1138,7 +1342,10 @@
         "required": [
           "data",
           "level"
-        ]
+        ],
+        "property_types": {
+          "_meta": "NotificationMetaObject"
+        }
       },
       "MethodNotFoundError": {
         "properties": [
@@ -1196,7 +1403,10 @@
         "properties": [
           "_meta"
         ],
-        "required": []
+        "required": [],
+        "property_types": {
+          "_meta": "NotificationMetaObject"
+        }
       },
       "NumberSchema": {
         "properties": [
@@ -1227,7 +1437,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "PaginatedRequestParams"
+        }
       },
       "PaginatedRequestParams": {
         "properties": [
@@ -1236,7 +1449,10 @@
         ],
         "required": [
           "_meta"
-        ]
+        ],
+        "property_types": {
+          "_meta": "RequestMetaObject"
+        }
       },
       "PaginatedResult": {
         "properties": [
@@ -1246,7 +1462,10 @@
         ],
         "required": [
           "resultType"
-        ]
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject"
+        }
       },
       "ParseError": {
         "properties": [
@@ -1269,7 +1488,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "ProgressNotificationParams"
+        }
       },
       "ProgressNotificationParams": {
         "properties": [
@@ -1282,7 +1504,10 @@
         "required": [
           "progress",
           "progressToken"
-        ]
+        ],
+        "property_types": {
+          "_meta": "NotificationMetaObject"
+        }
       },
       "Prompt": {
         "properties": [
@@ -1317,7 +1542,10 @@
         "required": [
           "jsonrpc",
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "NotificationParams"
+        }
       },
       "PromptMessage": {
         "properties": [
@@ -1355,7 +1583,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "ReadResourceRequestParams"
+        }
       },
       "ReadResourceRequestParams": {
         "properties": [
@@ -1367,7 +1598,10 @@
         "required": [
           "_meta",
           "uri"
-        ]
+        ],
+        "property_types": {
+          "_meta": "RequestMetaObject"
+        }
       },
       "ReadResourceResult": {
         "properties": [
@@ -1382,7 +1616,10 @@
           "contents",
           "resultType",
           "ttlMs"
-        ]
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject"
+        }
       },
       "ReadResourceResultResponse": {
         "properties": [
@@ -1416,7 +1653,11 @@
         "required": [
           "io.modelcontextprotocol/clientCapabilities",
           "io.modelcontextprotocol/protocolVersion"
-        ]
+        ],
+        "property_types": {
+          "io.modelcontextprotocol/clientCapabilities": "ClientCapabilities",
+          "io.modelcontextprotocol/clientInfo": "Implementation"
+        }
       },
       "RequestParams": {
         "properties": [
@@ -1424,7 +1665,10 @@
         ],
         "required": [
           "_meta"
-        ]
+        ],
+        "property_types": {
+          "_meta": "RequestMetaObject"
+        }
       },
       "Resource": {
         "properties": [
@@ -1441,7 +1685,10 @@
         "required": [
           "name",
           "uri"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "ResourceContents": {
         "properties": [
@@ -1473,7 +1720,10 @@
         ],
         "type_values": [
           "resource_link"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "ResourceListChangedNotification": {
         "properties": [
@@ -1484,7 +1734,10 @@
         "required": [
           "jsonrpc",
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "NotificationParams"
+        }
       },
       "ResourceRequestParams": {
         "properties": [
@@ -1494,7 +1747,10 @@
         "required": [
           "_meta",
           "uri"
-        ]
+        ],
+        "property_types": {
+          "_meta": "RequestMetaObject"
+        }
       },
       "ResourceTemplate": {
         "properties": [
@@ -1510,7 +1766,10 @@
         "required": [
           "name",
           "uriTemplate"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "ResourceTemplateReference": {
         "properties": [
@@ -1535,7 +1794,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "ResourceUpdatedNotificationParams"
+        }
       },
       "ResourceUpdatedNotificationParams": {
         "properties": [
@@ -1544,7 +1806,10 @@
         ],
         "required": [
           "uri"
-        ]
+        ],
+        "property_types": {
+          "_meta": "NotificationMetaObject"
+        }
       },
       "Result": {
         "properties": [
@@ -1553,13 +1818,19 @@
         ],
         "required": [
           "resultType"
-        ]
+        ],
+        "property_types": {
+          "_meta": "ResultMetaObject"
+        }
       },
       "ResultMetaObject": {
         "properties": [
           "io.modelcontextprotocol/serverInfo"
         ],
-        "required": []
+        "required": [],
+        "property_types": {
+          "io.modelcontextprotocol/serverInfo": "Implementation"
+        }
       },
       "Root": {
         "properties": [
@@ -1591,6 +1862,30 @@
           "prompts",
           "resources",
           "tools"
+        ],
+        "required": [],
+        "property_types": {
+          "prompts": "ServerCapabilities.prompts",
+          "resources": "ServerCapabilities.resources",
+          "tools": "ServerCapabilities.tools"
+        }
+      },
+      "ServerCapabilities.prompts": {
+        "properties": [
+          "listChanged"
+        ],
+        "required": []
+      },
+      "ServerCapabilities.resources": {
+        "properties": [
+          "listChanged",
+          "subscribe"
+        ],
+        "required": []
+      },
+      "ServerCapabilities.tools": {
+        "properties": [
+          "listChanged"
         ],
         "required": []
       },
@@ -1630,7 +1925,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "SubscriptionsAcknowledgedNotificationParams"
+        }
       },
       "SubscriptionsAcknowledgedNotificationParams": {
         "properties": [
@@ -1639,7 +1937,11 @@
         ],
         "required": [
           "notifications"
-        ]
+        ],
+        "property_types": {
+          "_meta": "NotificationMetaObject",
+          "notifications": "SubscriptionFilter"
+        }
       },
       "SubscriptionsListenRequest": {
         "properties": [
@@ -1653,7 +1955,10 @@
           "jsonrpc",
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "SubscriptionsListenRequestParams"
+        }
       },
       "SubscriptionsListenRequestParams": {
         "properties": [
@@ -1663,7 +1968,11 @@
         "required": [
           "_meta",
           "notifications"
-        ]
+        ],
+        "property_types": {
+          "_meta": "RequestMetaObject",
+          "notifications": "SubscriptionFilter"
+        }
       },
       "SubscriptionsListenResult": {
         "properties": [
@@ -1673,7 +1982,10 @@
         "required": [
           "_meta",
           "resultType"
-        ]
+        ],
+        "property_types": {
+          "_meta": "SubscriptionsListenResultMetaObject"
+        }
       },
       "SubscriptionsListenResultMetaObject": {
         "properties": [
@@ -1682,7 +1994,10 @@
         ],
         "required": [
           "io.modelcontextprotocol/subscriptionId"
-        ]
+        ],
+        "property_types": {
+          "io.modelcontextprotocol/serverInfo": "Implementation"
+        }
       },
       "SubscriptionsListenResultResponse": {
         "properties": [
@@ -1694,7 +2009,10 @@
           "id",
           "jsonrpc",
           "result"
-        ]
+        ],
+        "property_types": {
+          "result": "SubscriptionsListenResult"
+        }
       },
       "TextContent": {
         "properties": [
@@ -1709,7 +2027,10 @@
         ],
         "type_values": [
           "text"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "TextResourceContents": {
         "properties": [
@@ -1739,6 +2060,17 @@
         ],
         "type_values": [
           "array"
+        ],
+        "property_types": {
+          "items": "TitledMultiSelectEnumSchema.items"
+        }
+      },
+      "TitledMultiSelectEnumSchema.items": {
+        "properties": [
+          "anyOf"
+        ],
+        "required": [
+          "anyOf"
         ]
       },
       "TitledSingleSelectEnumSchema": {
@@ -1771,7 +2103,30 @@
         "required": [
           "inputSchema",
           "name"
+        ],
+        "property_types": {
+          "annotations": "ToolAnnotations",
+          "inputSchema": "Tool.inputSchema",
+          "outputSchema": "Tool.outputSchema"
+        }
+      },
+      "Tool.inputSchema": {
+        "properties": [
+          "$schema",
+          "type"
+        ],
+        "required": [
+          "type"
+        ],
+        "type_values": [
+          "object"
         ]
+      },
+      "Tool.outputSchema": {
+        "properties": [
+          "$schema"
+        ],
+        "required": []
       },
       "ToolAnnotations": {
         "properties": [
@@ -1798,7 +2153,10 @@
         "required": [
           "jsonrpc",
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "NotificationParams"
+        }
       },
       "ToolResultContent": {
         "properties": [
@@ -1863,6 +2221,22 @@
         ],
         "type_values": [
           "array"
+        ],
+        "property_types": {
+          "items": "UntitledMultiSelectEnumSchema.items"
+        }
+      },
+      "UntitledMultiSelectEnumSchema.items": {
+        "properties": [
+          "enum",
+          "type"
+        ],
+        "required": [
+          "enum",
+          "type"
+        ],
+        "type_values": [
+          "string"
         ]
       },
       "UntitledSingleSelectEnumSchema": {

@@ -330,7 +330,10 @@
         ],
         "type_values": [
           "audio"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "BaseMetadata": {
         "properties": [
@@ -375,6 +378,18 @@
         "required": [
           "method",
           "params"
+        ],
+        "property_types": {
+          "params": "CallToolRequest.params"
+        }
+      },
+      "CallToolRequest.params": {
+        "properties": [
+          "arguments",
+          "name"
+        ],
+        "required": [
+          "name"
         ]
       },
       "CallToolResult": {
@@ -396,6 +411,18 @@
         "required": [
           "method",
           "params"
+        ],
+        "property_types": {
+          "params": "CancelledNotification.params"
+        }
+      },
+      "CancelledNotification.params": {
+        "properties": [
+          "reason",
+          "requestId"
+        ],
+        "required": [
+          "requestId"
         ]
       },
       "ClientCapabilities": {
@@ -405,6 +432,25 @@
           "roots",
           "sampling"
         ],
+        "required": [],
+        "property_types": {
+          "elicitation": "ClientCapabilities.elicitation",
+          "roots": "ClientCapabilities.roots",
+          "sampling": "ClientCapabilities.sampling"
+        }
+      },
+      "ClientCapabilities.elicitation": {
+        "properties": [],
+        "required": []
+      },
+      "ClientCapabilities.roots": {
+        "properties": [
+          "listChanged"
+        ],
+        "required": []
+      },
+      "ClientCapabilities.sampling": {
+        "properties": [],
         "required": []
       },
       "CompleteRequest": {
@@ -415,7 +461,41 @@
         "required": [
           "method",
           "params"
+        ],
+        "property_types": {
+          "params": "CompleteRequest.params"
+        }
+      },
+      "CompleteRequest.params": {
+        "properties": [
+          "argument",
+          "context",
+          "ref"
+        ],
+        "required": [
+          "argument",
+          "ref"
+        ],
+        "property_types": {
+          "argument": "CompleteRequest.params.argument",
+          "context": "CompleteRequest.params.context"
+        }
+      },
+      "CompleteRequest.params.argument": {
+        "properties": [
+          "name",
+          "value"
+        ],
+        "required": [
+          "name",
+          "value"
         ]
+      },
+      "CompleteRequest.params.context": {
+        "properties": [
+          "arguments"
+        ],
+        "required": []
       },
       "CompleteResult": {
         "properties": [
@@ -424,6 +504,19 @@
         ],
         "required": [
           "completion"
+        ],
+        "property_types": {
+          "completion": "CompleteResult.completion"
+        }
+      },
+      "CompleteResult.completion": {
+        "properties": [
+          "hasMore",
+          "total",
+          "values"
+        ],
+        "required": [
+          "values"
         ]
       },
       "CreateMessageRequest": {
@@ -434,7 +527,34 @@
         "required": [
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "CreateMessageRequest.params"
+        }
+      },
+      "CreateMessageRequest.params": {
+        "properties": [
+          "includeContext",
+          "maxTokens",
+          "messages",
+          "metadata",
+          "modelPreferences",
+          "stopSequences",
+          "systemPrompt",
+          "temperature"
+        ],
+        "required": [
+          "maxTokens",
+          "messages"
+        ],
+        "property_types": {
+          "metadata": "CreateMessageRequest.params.metadata",
+          "modelPreferences": "ModelPreferences"
+        }
+      },
+      "CreateMessageRequest.params.metadata": {
+        "properties": [],
+        "required": []
       },
       "CreateMessageResult": {
         "properties": [
@@ -458,6 +578,36 @@
         "required": [
           "method",
           "params"
+        ],
+        "property_types": {
+          "params": "ElicitRequest.params"
+        }
+      },
+      "ElicitRequest.params": {
+        "properties": [
+          "message",
+          "requestedSchema"
+        ],
+        "required": [
+          "message",
+          "requestedSchema"
+        ],
+        "property_types": {
+          "requestedSchema": "ElicitRequest.params.requestedSchema"
+        }
+      },
+      "ElicitRequest.params.requestedSchema": {
+        "properties": [
+          "properties",
+          "required",
+          "type"
+        ],
+        "required": [
+          "properties",
+          "type"
+        ],
+        "type_values": [
+          "object"
         ]
       },
       "ElicitResult": {
@@ -483,7 +633,10 @@
         ],
         "type_values": [
           "resource"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "EmptyResult": {
         "properties": [
@@ -515,6 +668,18 @@
         "required": [
           "method",
           "params"
+        ],
+        "property_types": {
+          "params": "GetPromptRequest.params"
+        }
+      },
+      "GetPromptRequest.params": {
+        "properties": [
+          "arguments",
+          "name"
+        ],
+        "required": [
+          "name"
         ]
       },
       "GetPromptResult": {
@@ -542,7 +707,10 @@
         ],
         "type_values": [
           "image"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "Implementation": {
         "properties": [
@@ -563,7 +731,26 @@
         "required": [
           "method",
           "params"
-        ]
+        ],
+        "property_types": {
+          "params": "InitializeRequest.params"
+        }
+      },
+      "InitializeRequest.params": {
+        "properties": [
+          "capabilities",
+          "clientInfo",
+          "protocolVersion"
+        ],
+        "required": [
+          "capabilities",
+          "clientInfo",
+          "protocolVersion"
+        ],
+        "property_types": {
+          "capabilities": "ClientCapabilities",
+          "clientInfo": "Implementation"
+        }
       },
       "InitializeResult": {
         "properties": [
@@ -577,7 +764,11 @@
           "capabilities",
           "protocolVersion",
           "serverInfo"
-        ]
+        ],
+        "property_types": {
+          "capabilities": "ServerCapabilities",
+          "serverInfo": "Implementation"
+        }
       },
       "InitializedNotification": {
         "properties": [
@@ -586,7 +777,16 @@
         ],
         "required": [
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "InitializedNotification.params"
+        }
+      },
+      "InitializedNotification.params": {
+        "properties": [
+          "_meta"
+        ],
+        "required": []
       },
       "JSONRPCError": {
         "properties": [
@@ -598,6 +798,20 @@
           "error",
           "id",
           "jsonrpc"
+        ],
+        "property_types": {
+          "error": "JSONRPCError.error"
+        }
+      },
+      "JSONRPCError.error": {
+        "properties": [
+          "code",
+          "data",
+          "message"
+        ],
+        "required": [
+          "code",
+          "message"
         ]
       },
       "JSONRPCNotification": {
@@ -609,7 +823,16 @@
         "required": [
           "jsonrpc",
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "JSONRPCNotification.params"
+        }
+      },
+      "JSONRPCNotification.params": {
+        "properties": [
+          "_meta"
+        ],
+        "required": []
       },
       "JSONRPCRequest": {
         "properties": [
@@ -622,7 +845,25 @@
           "id",
           "jsonrpc",
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "JSONRPCRequest.params"
+        }
+      },
+      "JSONRPCRequest.params": {
+        "properties": [
+          "_meta"
+        ],
+        "required": [],
+        "property_types": {
+          "_meta": "JSONRPCRequest.params._meta"
+        }
+      },
+      "JSONRPCRequest.params._meta": {
+        "properties": [
+          "progressToken"
+        ],
+        "required": []
       },
       "JSONRPCResponse": {
         "properties": [
@@ -634,7 +875,10 @@
           "id",
           "jsonrpc",
           "result"
-        ]
+        ],
+        "property_types": {
+          "result": "Result"
+        }
       },
       "ListPromptsRequest": {
         "properties": [
@@ -643,7 +887,16 @@
         ],
         "required": [
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "ListPromptsRequest.params"
+        }
+      },
+      "ListPromptsRequest.params": {
+        "properties": [
+          "cursor"
+        ],
+        "required": []
       },
       "ListPromptsResult": {
         "properties": [
@@ -662,7 +915,16 @@
         ],
         "required": [
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "ListResourceTemplatesRequest.params"
+        }
+      },
+      "ListResourceTemplatesRequest.params": {
+        "properties": [
+          "cursor"
+        ],
+        "required": []
       },
       "ListResourceTemplatesResult": {
         "properties": [
@@ -681,7 +943,16 @@
         ],
         "required": [
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "ListResourcesRequest.params"
+        }
+      },
+      "ListResourcesRequest.params": {
+        "properties": [
+          "cursor"
+        ],
+        "required": []
       },
       "ListResourcesResult": {
         "properties": [
@@ -700,7 +971,25 @@
         ],
         "required": [
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "ListRootsRequest.params"
+        }
+      },
+      "ListRootsRequest.params": {
+        "properties": [
+          "_meta"
+        ],
+        "required": [],
+        "property_types": {
+          "_meta": "ListRootsRequest.params._meta"
+        }
+      },
+      "ListRootsRequest.params._meta": {
+        "properties": [
+          "progressToken"
+        ],
+        "required": []
       },
       "ListRootsResult": {
         "properties": [
@@ -718,7 +1007,16 @@
         ],
         "required": [
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "ListToolsRequest.params"
+        }
+      },
+      "ListToolsRequest.params": {
+        "properties": [
+          "cursor"
+        ],
+        "required": []
       },
       "ListToolsResult": {
         "properties": [
@@ -738,6 +1036,20 @@
         "required": [
           "method",
           "params"
+        ],
+        "property_types": {
+          "params": "LoggingMessageNotification.params"
+        }
+      },
+      "LoggingMessageNotification.params": {
+        "properties": [
+          "data",
+          "level",
+          "logger"
+        ],
+        "required": [
+          "data",
+          "level"
         ]
       },
       "ModelHint": {
@@ -762,7 +1074,16 @@
         ],
         "required": [
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "Notification.params"
+        }
+      },
+      "Notification.params": {
+        "properties": [
+          "_meta"
+        ],
+        "required": []
       },
       "NumberSchema": {
         "properties": [
@@ -787,7 +1108,16 @@
         ],
         "required": [
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "PaginatedRequest.params"
+        }
+      },
+      "PaginatedRequest.params": {
+        "properties": [
+          "cursor"
+        ],
+        "required": []
       },
       "PaginatedResult": {
         "properties": [
@@ -803,7 +1133,25 @@
         ],
         "required": [
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "PingRequest.params"
+        }
+      },
+      "PingRequest.params": {
+        "properties": [
+          "_meta"
+        ],
+        "required": [],
+        "property_types": {
+          "_meta": "PingRequest.params._meta"
+        }
+      },
+      "PingRequest.params._meta": {
+        "properties": [
+          "progressToken"
+        ],
+        "required": []
       },
       "ProgressNotification": {
         "properties": [
@@ -813,6 +1161,21 @@
         "required": [
           "method",
           "params"
+        ],
+        "property_types": {
+          "params": "ProgressNotification.params"
+        }
+      },
+      "ProgressNotification.params": {
+        "properties": [
+          "message",
+          "progress",
+          "progressToken",
+          "total"
+        ],
+        "required": [
+          "progress",
+          "progressToken"
         ]
       },
       "Prompt": {
@@ -845,7 +1208,16 @@
         ],
         "required": [
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "PromptListChangedNotification.params"
+        }
+      },
+      "PromptListChangedNotification.params": {
+        "properties": [
+          "_meta"
+        ],
+        "required": []
       },
       "PromptMessage": {
         "properties": [
@@ -879,6 +1251,17 @@
         "required": [
           "method",
           "params"
+        ],
+        "property_types": {
+          "params": "ReadResourceRequest.params"
+        }
+      },
+      "ReadResourceRequest.params": {
+        "properties": [
+          "uri"
+        ],
+        "required": [
+          "uri"
         ]
       },
       "ReadResourceResult": {
@@ -897,7 +1280,25 @@
         ],
         "required": [
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "Request.params"
+        }
+      },
+      "Request.params": {
+        "properties": [
+          "_meta"
+        ],
+        "required": [],
+        "property_types": {
+          "_meta": "Request.params._meta"
+        }
+      },
+      "Request.params._meta": {
+        "properties": [
+          "progressToken"
+        ],
+        "required": []
       },
       "Resource": {
         "properties": [
@@ -913,7 +1314,10 @@
         "required": [
           "name",
           "uri"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "ResourceContents": {
         "properties": [
@@ -944,7 +1348,10 @@
         ],
         "type_values": [
           "resource_link"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "ResourceListChangedNotification": {
         "properties": [
@@ -953,7 +1360,16 @@
         ],
         "required": [
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "ResourceListChangedNotification.params"
+        }
+      },
+      "ResourceListChangedNotification.params": {
+        "properties": [
+          "_meta"
+        ],
+        "required": []
       },
       "ResourceTemplate": {
         "properties": [
@@ -968,7 +1384,10 @@
         "required": [
           "name",
           "uriTemplate"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "ResourceTemplateReference": {
         "properties": [
@@ -991,6 +1410,17 @@
         "required": [
           "method",
           "params"
+        ],
+        "property_types": {
+          "params": "ResourceUpdatedNotification.params"
+        }
+      },
+      "ResourceUpdatedNotification.params": {
+        "properties": [
+          "uri"
+        ],
+        "required": [
+          "uri"
         ]
       },
       "Result": {
@@ -1016,7 +1446,16 @@
         ],
         "required": [
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "RootsListChangedNotification.params"
+        }
+      },
+      "RootsListChangedNotification.params": {
+        "properties": [
+          "_meta"
+        ],
+        "required": []
       },
       "SamplingMessage": {
         "properties": [
@@ -1037,6 +1476,40 @@
           "resources",
           "tools"
         ],
+        "required": [],
+        "property_types": {
+          "completions": "ServerCapabilities.completions",
+          "logging": "ServerCapabilities.logging",
+          "prompts": "ServerCapabilities.prompts",
+          "resources": "ServerCapabilities.resources",
+          "tools": "ServerCapabilities.tools"
+        }
+      },
+      "ServerCapabilities.completions": {
+        "properties": [],
+        "required": []
+      },
+      "ServerCapabilities.logging": {
+        "properties": [],
+        "required": []
+      },
+      "ServerCapabilities.prompts": {
+        "properties": [
+          "listChanged"
+        ],
+        "required": []
+      },
+      "ServerCapabilities.resources": {
+        "properties": [
+          "listChanged",
+          "subscribe"
+        ],
+        "required": []
+      },
+      "ServerCapabilities.tools": {
+        "properties": [
+          "listChanged"
+        ],
         "required": []
       },
       "SetLevelRequest": {
@@ -1047,6 +1520,17 @@
         "required": [
           "method",
           "params"
+        ],
+        "property_types": {
+          "params": "SetLevelRequest.params"
+        }
+      },
+      "SetLevelRequest.params": {
+        "properties": [
+          "level"
+        ],
+        "required": [
+          "level"
         ]
       },
       "StringSchema": {
@@ -1073,6 +1557,17 @@
         "required": [
           "method",
           "params"
+        ],
+        "property_types": {
+          "params": "SubscribeRequest.params"
+        }
+      },
+      "SubscribeRequest.params": {
+        "properties": [
+          "uri"
+        ],
+        "required": [
+          "uri"
         ]
       },
       "TextContent": {
@@ -1088,7 +1583,10 @@
         ],
         "type_values": [
           "text"
-        ]
+        ],
+        "property_types": {
+          "annotations": "Annotations"
+        }
       },
       "TextResourceContents": {
         "properties": [
@@ -1115,6 +1613,37 @@
         "required": [
           "inputSchema",
           "name"
+        ],
+        "property_types": {
+          "annotations": "ToolAnnotations",
+          "inputSchema": "Tool.inputSchema",
+          "outputSchema": "Tool.outputSchema"
+        }
+      },
+      "Tool.inputSchema": {
+        "properties": [
+          "properties",
+          "required",
+          "type"
+        ],
+        "required": [
+          "type"
+        ],
+        "type_values": [
+          "object"
+        ]
+      },
+      "Tool.outputSchema": {
+        "properties": [
+          "properties",
+          "required",
+          "type"
+        ],
+        "required": [
+          "type"
+        ],
+        "type_values": [
+          "object"
         ]
       },
       "ToolAnnotations": {
@@ -1134,7 +1663,16 @@
         ],
         "required": [
           "method"
-        ]
+        ],
+        "property_types": {
+          "params": "ToolListChangedNotification.params"
+        }
+      },
+      "ToolListChangedNotification.params": {
+        "properties": [
+          "_meta"
+        ],
+        "required": []
       },
       "UnsubscribeRequest": {
         "properties": [
@@ -1144,6 +1682,17 @@
         "required": [
           "method",
           "params"
+        ],
+        "property_types": {
+          "params": "UnsubscribeRequest.params"
+        }
+      },
+      "UnsubscribeRequest.params": {
+        "properties": [
+          "uri"
+        ],
+        "required": [
+          "uri"
         ]
       }
     },

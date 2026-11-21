@@ -803,6 +803,65 @@ TEST(Rejects, TypeValuesOfATypeWithoutATypeProperty) {
     EXPECT_EQ(rejected(document).pointer, "/wire/types/Implementation/type_values");
 }
 
+TEST(Wire, TheTypeOfAnObjectPropertyIsRecorded) {
+    // An object written inline in a definition is a type of its own, named after the definition and the property;
+    // a property that refers to an object type has that type.
+    const auto legacy = builtin("2024-11-05");
+    const Type* resource = legacy->type("Resource");
+    ASSERT_NE(resource, nullptr);
+    ASSERT_EQ(resource->property_types.size(), 1u);
+    EXPECT_EQ(resource->property_types[0].property, "annotations");
+    EXPECT_EQ(resource->property_types[0].type, "Resource.annotations");
+    const Type* inline_annotations = legacy->property_type(*resource, "annotations");
+    ASSERT_NE(inline_annotations, nullptr);
+    EXPECT_EQ(inline_annotations->name, "Resource.annotations");
+    EXPECT_EQ(inline_annotations->properties, (std::vector<std::string>{"audience", "priority"}));
+    EXPECT_TRUE(inline_annotations->required.empty());
+    // An object inside an inline object is recorded in the same way.
+    const Type* completion = legacy->type("CompleteRequest.params");
+    ASSERT_NE(completion, nullptr);
+    EXPECT_EQ(legacy->property_type(*completion, "argument"), legacy->type("CompleteRequest.params.argument"));
+
+    const std::string_view named_revisions[] = {"2025-03-26", "2025-06-18", last_legacy_revision, modern_revision};
+    for (const std::string_view revision : named_revisions) {
+        SCOPED_TRACE(std::string(revision));
+        const auto profile = builtin(revision);
+        const Type* owner = profile->type("Resource");
+        ASSERT_NE(owner, nullptr);
+        const Type* named = profile->type("Annotations");
+        ASSERT_NE(named, nullptr);
+        EXPECT_EQ(profile->property_type(*owner, "annotations"), named);
+        EXPECT_EQ(profile->property_type(*owner, "uri"), nullptr);
+    }
+    // A type without such properties records none.
+    EXPECT_TRUE(legacy->type("Annotations") == nullptr);
+    EXPECT_TRUE(builtin("2025-06-18")->type("Annotations")->property_types.empty());
+}
+
+TEST(Rejects, PropertyTypeThatNamesNoType) {
+    json document = builtin_document(last_legacy_revision);
+    document["wire"]["types"]["Resource"]["property_types"]["annotations"] = "Missing.annotations";
+    EXPECT_EQ(rejected(document).pointer, "/wire/types/Resource/property_types/annotations");
+}
+
+TEST(Rejects, PropertyTypeOfAnUnknownProperty) {
+    json document = builtin_document(last_legacy_revision);
+    document["wire"]["types"]["Resource"]["property_types"]["bogus"] = "Resource.annotations";
+    EXPECT_EQ(rejected(document).pointer, "/wire/types/Resource/property_types/bogus");
+}
+
+TEST(Rejects, PropertyTypesThatAreEmpty) {
+    json document = builtin_document(last_legacy_revision);
+    document["wire"]["types"]["Resource"]["property_types"] = json::object();
+    EXPECT_EQ(rejected(document).pointer, "/wire/types/Resource/property_types");
+}
+
+TEST(Rejects, PropertyTypeThatIsNotAString) {
+    json document = builtin_document(last_legacy_revision);
+    document["wire"]["types"]["Resource"]["property_types"]["annotations"] = 1;
+    EXPECT_EQ(rejected(document).pointer, "/wire/types/Resource/property_types/annotations");
+}
+
 TEST(Rejects, SenderThatRepeats) {
     json document = builtin_document(last_legacy_revision);
     document["wire"]["requests"]["ping"]["from"] = json::array({"client", "client"});
