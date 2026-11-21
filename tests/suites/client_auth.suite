@@ -1,0 +1,1 @@
+The OAuth flow of the client without I/O: discovery, the identity of the resource and the issuer, registration, scopes, PKCE, the callback, the token requests and the bounds on repeated authorization.
