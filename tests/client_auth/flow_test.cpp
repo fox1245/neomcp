@@ -2,6 +2,10 @@
 // time bound, inputs that do not belong, and what never leaves in a failure.
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <string>
+#include <vector>
+
 #include "neomcp/client/transport.h"
 #include "support.h"
 
@@ -477,6 +481,44 @@ TEST(OAuthFlowRun, NoFailureOrDiagnosticCarriesASecret) {
             }
         }
     }
+}
+
+// A refresh token is held to the same bound as the access token. One over it is a token answer that cannot be used:
+// the sign-in ends with token_request_failed and nothing of the answer is kept, so that no stored token is replaced by
+// a half of an answer. On a refresh the stored refresh token stays what it was.
+TEST(OAuthFlowRefresh, ARefreshTokenAtTheTokenBoundIsKeptAndOneByteLongerRefusesTheAnswer) {
+    for (const std::ptrdiff_t shift : {-1, 0, 1}) {
+        SCOPED_TRACE(shift);
+        Rig rig;
+        rig.config.bounds.max_token_bytes = 64;
+        const std::string refresh(static_cast<std::size_t>(64 + shift), 'r');
+        rig.world.token_answers = {
+            json_answer(json{{"access_token", "AccessOne"}, {"token_type", "Bearer"}, {"refresh_token", refresh}})};
+        const FlowStep step = rig.run(unauthorized());
+        if (shift <= 0) {
+            ASSERT_TRUE(done_of(step));
+            EXPECT_EQ(rig.lookup.tokens_by_key.begin()->second.refresh_token, refresh);
+        } else {
+            EXPECT_EQ(problem_of(step), AuthorizationProblem::token_request_failed);
+            EXPECT_TRUE(rig.lookup.tokens_by_key.empty());
+        }
+    }
+}
+
+TEST(OAuthFlowRefresh, ANewRefreshTokenOverTheBoundOnARefreshLeavesTheStoredOneAlone) {
+    Rig rig;
+    rig.config.bounds.max_token_bytes = 64;
+    rig.world.token_answers = {
+        json_answer(json{{"access_token", "AccessOne"}, {"token_type", "Bearer"}, {"refresh_token", "RefreshOne"}}),
+        json_answer(json{{"access_token", "AccessTwo"},
+                         {"token_type", "Bearer"},
+                         {"refresh_token", std::string(65, 'r')}})};
+    ASSERT_TRUE(done_of(rig.run(unauthorized())));
+    const FlowStep step = rig.run(unauthorized({}, true));
+    EXPECT_EQ(problem_of(step), AuthorizationProblem::token_request_failed);
+    ASSERT_EQ(rig.lookup.tokens_by_key.size(), 1u);
+    EXPECT_EQ(rig.lookup.tokens_by_key.begin()->second.access_token, "AccessOne");
+    EXPECT_EQ(rig.lookup.tokens_by_key.begin()->second.refresh_token, "RefreshOne");
 }
 
 }  // namespace

@@ -172,7 +172,10 @@ std::variant<StoredTokens, FlowFailure> read_token_answer(const FetchResult& res
         tokens.granted_scopes = bounded_scopes(split_scopes(*scope), bounds, diagnostics);
     }
     if (const std::string* refresh = string_member(*document, member_refresh_token);
-        refresh != nullptr && !refresh->empty() && refresh->size() <= bounds.max_token_bytes) {
+        refresh != nullptr && !refresh->empty()) {
+        if (refresh->size() > bounds.max_token_bytes) {
+            return failed(AuthorizationProblem::token_request_failed, issuer, token_endpoint);
+        }
         tokens.refresh_token = *refresh;
     }
     return tokens;

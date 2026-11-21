@@ -448,4 +448,31 @@ TEST(OAuthSecurity, AnErrorCodeAtItsBoundReachesTheApplicationAndOneByteMoreDoes
     }
 }
 
+// A refresh token is held to the bound of the access token: one byte over refuses the whole answer.
+TEST(OAuthSecurity, ARefreshTokenAtTheTokenBoundIsKeptAndOneByteLongerRefusesTheAnswer) {
+    constexpr std::size_t bound = 256;
+    for (const std::size_t size : {bound - 1, bound, bound + 1}) {
+        SCOPED_TRACE(size);
+        World world;
+        const std::string refresh(size, 'r');
+        answer_tokens_with(world, [refresh] {
+            json body = token_answer("refreshing-access");
+            body["refresh_token"] = refresh;
+            return body;
+        });
+        neomcp::OAuthOptions options = world.options();
+        options.bounds.max_token_bytes = bound;
+        auto client = world.open(world.authorizer(std::move(options)));
+        const auto stored = world.store->tokens({world.resource.url(), world.as.issuer()});
+        if (size <= bound) {
+            expect_outcome(world, client, std::nullopt);
+            ASSERT_TRUE(stored);
+            EXPECT_EQ(stored->refresh_token, refresh);
+        } else {
+            expect_outcome(world, client, AuthorizationProblem::token_request_failed);
+            EXPECT_FALSE(stored);
+        }
+    }
+}
+
 }  // namespace

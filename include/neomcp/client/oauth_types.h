@@ -72,7 +72,8 @@ struct OAuthDefaults {
     static constexpr std::size_t max_metadata_bytes = std::size_t{64} * 1024;
     // A registration or token response; room for large self-contained tokens.
     static constexpr std::size_t max_token_response_bytes = std::size_t{64} * 1024;
-    // An access token or a refresh token. The access token rides in a request header field.
+    // An access token or a refresh token. The access token rides in a request header field. A token answer with a
+    // token longer than this is refused (token_request_failed).
     static constexpr std::size_t max_token_bytes = std::size_t{16} * 1024;
     // The callback URL the application hands back after the person's browser returned to it.
     static constexpr std::size_t max_callback_bytes = std::size_t{16} * 1024;
