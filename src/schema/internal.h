@@ -52,7 +52,7 @@ struct Node {
     // Validation keywords for any value.
     std::uint8_t types = 0;  // 0: no `type` keyword
     std::optional<json> const_value;
-    std::optional<std::vector<json>> enum_values;
+    std::optional<json::array_t> enum_values;
 
     // Numbers.
     std::optional<json> minimum;
