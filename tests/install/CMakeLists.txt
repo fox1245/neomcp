@@ -55,6 +55,16 @@ if(neomcp_client_http_FOUND)
     add_test(NAME Installed.Http COMMAND installed_http)
 endif()
 
+# A host that serves and calls over every transport links the servers' and the clients' components into one program;
+# two of them that defined one name with external linkage would fail to link here, or in a shared build would bind one
+# definition for both.
+if(neomcp_client_stdio_FOUND AND neomcp_client_http_FOUND)
+    neomcp_installed_program(installed_host http.cpp)
+    target_link_libraries(installed_host PRIVATE neomcp::server neomcp::stdio neomcp::http neomcp::client
+        neomcp::client_stdio neomcp::client_http)
+    add_test(NAME Installed.Host COMMAND installed_host)
+endif()
+
 # Each case configures refusals/ against the same package; the project there fails when find_package does not decide
 # as the case expects. The control case asks for the version found here and must succeed.
 # The generator and compiler of this project go to each case (a generator for several configurations chooses its
