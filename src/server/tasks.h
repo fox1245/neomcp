@@ -107,6 +107,9 @@ public:
 
     TaskCancelResult cancel(std::string_view id, const TaskOwner& owner);
     std::optional<TaskRecord> read(std::string_view id, const TaskOwner& owner);
+    // The task from the store, never from the cache of reads.
+    std::optional<TaskRecord> read_now(std::string_view id, const TaskOwner& owner) const;
+    std::optional<TaskPage> list(const TaskOwner& owner, std::optional<std::string_view> cursor) const;
     TaskWatchStart watch(std::string_view id, const TaskOwner& owner, std::weak_ptr<TaskListener> listener);
     // Sets the status message of a running task.
     void status(const TaskRun& run, std::string message);
@@ -133,6 +136,9 @@ private:
     void end(const std::shared_ptr<TaskRun>& run, TaskUpdate update);
     std::optional<TaskResume> ask(const std::shared_ptr<TaskRun>& run, InputRequired asked);
     void forget(const std::string& id);  // with mutex_ held
+    // Tells the run's TaskStart::on_change of a change that was applied; with no lock held.
+    static void told(const TaskRun& run, const Transition& change);
+    static void told(const TaskRun& run, const std::optional<TaskRecord>& record);
     TaskUpdate failure(int code, std::string_view message, json data = nullptr) const;
     TaskUpdate host_failure(const HostFailure& failure) const;
 

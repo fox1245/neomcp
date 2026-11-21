@@ -49,6 +49,10 @@ struct TaskStart {
     // ("2.confirm"), so that no key is used twice over the task's life although a handler that is entered again from
     // its start may ask by a key it used before. The answers come back by those keys and reach the handler by its own.
     bool round_keys = false;
+    // Told of every change of the task's status, or of its status message, that the server makes after the task
+    // started, with the task as it is after the change, on the thread that made it; not of its removal at the end of
+    // its lifetime. Empty: nothing is told. It must not block for long; what it throws is dropped.
+    std::function<void(const TaskRecord&)> on_change{};
 };
 
 // Why a task was not started. No record exists for a task that was refused, except one whose start the server's
@@ -100,8 +104,14 @@ public:
     // Starts the call as a task, for the owner that `origin`'s authorization gives (task_owner_of). The record exists
     // when this returns. The handler's first entry gets the answers and the state `request` carries.
     virtual TaskStartResult start_task(const CallRequest& request, CallControl origin, TaskStart start) = 0;
-    // The task, when it exists for `owner`.
+    // The task, when it exists for `owner`. A host may answer a read that comes soon after another one of the same task
+    // with what it read then.
     virtual std::optional<TaskRecord> task(std::string_view id, const TaskOwner& owner) = 0;
+    // The task as it is at this moment, never an earlier read: for a waiter that a change of the task woke.
+    virtual std::optional<TaskRecord> current_task(std::string_view id, const TaskOwner& owner) = 0;
+    // The tasks of `owner`, oldest first, a page at a time from `cursor` (empty: from the first), as many as the store
+    // gives in a page (TaskStore::list). Empty when the cursor is not one the store gave.
+    virtual std::optional<TaskPage> list_tasks(const TaskOwner& owner, std::optional<std::string_view> cursor) = 0;
     // Cancels the task: cancelled before this returns, and its handler asked to stop. A task that ended stays as it
     // ended.
     virtual TaskCancelResult cancel_task(std::string_view id, const TaskOwner& owner) = 0;

@@ -382,6 +382,8 @@ public:
     TaskPreparation prepare_task(const CallRequest& request, const CallControl& origin) override;
     TaskStartResult start_task(const CallRequest& request, CallControl origin, TaskStart start) override;
     std::optional<TaskRecord> task(std::string_view id, const TaskOwner& owner) override;
+    std::optional<TaskRecord> current_task(std::string_view id, const TaskOwner& owner) override;
+    std::optional<TaskPage> list_tasks(const TaskOwner& owner, std::optional<std::string_view> cursor) override;
     TaskCancelResult cancel_task(std::string_view id, const TaskOwner& owner) override;
     AnswersResult answer_task(std::string_view id, const TaskOwner& owner, json answers,
                               InputResponses responses) override;
@@ -1399,6 +1401,16 @@ std::optional<TaskRecord> ServerCore::task(std::string_view id, const TaskOwner&
     return tasks_->read(id, owner);
 }
 
+std::optional<TaskRecord> ServerCore::current_task(std::string_view id, const TaskOwner& owner) {
+    if (!tasks_) return std::nullopt;
+    return tasks_->read_now(id, owner);
+}
+
+std::optional<TaskPage> ServerCore::list_tasks(const TaskOwner& owner, std::optional<std::string_view> cursor) {
+    if (!tasks_) return std::nullopt;
+    return tasks_->list(owner, cursor);
+}
+
 TaskCancelResult ServerCore::cancel_task(std::string_view id, const TaskOwner& owner) {
     if (!tasks_) return {};
     return tasks_->cancel(id, owner);
@@ -2152,6 +2164,14 @@ TaskStartResult Server::start_task(const CallRequest& request, CallControl origi
 }
 
 std::optional<TaskRecord> Server::task(std::string_view id, const TaskOwner& owner) { return core_->task(id, owner); }
+
+std::optional<TaskRecord> Server::current_task(std::string_view id, const TaskOwner& owner) {
+    return core_->current_task(id, owner);
+}
+
+std::optional<TaskPage> Server::list_tasks(const TaskOwner& owner, std::optional<std::string_view> cursor) {
+    return core_->list_tasks(owner, cursor);
+}
 
 TaskCancelResult Server::cancel_task(std::string_view id, const TaskOwner& owner) {
     return core_->cancel_task(id, owner);

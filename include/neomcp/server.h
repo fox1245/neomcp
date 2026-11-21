@@ -600,6 +600,10 @@ public:
     TaskStartResult start_task(const CallRequest& request, CallControl origin, TaskStart start);
     // The task, when it exists for `owner`; see TaskOptions::min_poll_interval.
     std::optional<TaskRecord> task(std::string_view id, const TaskOwner& owner);
+    // The task as the store has it at this moment, never from the copy of an earlier read.
+    std::optional<TaskRecord> current_task(std::string_view id, const TaskOwner& owner);
+    // The tasks of `owner`, oldest first, a page of at most the store's page size from `cursor` (see TaskStore::list).
+    std::optional<TaskPage> list_tasks(const TaskOwner& owner, std::optional<std::string_view> cursor);
     // Cancels the task: it is cancelled before this returns, its handler is asked to stop, and what the handler
     // returns after that is dropped. A handler that does not look at its stop token keeps its place in the bounds
     // until it returns.

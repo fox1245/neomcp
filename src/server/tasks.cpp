@@ -115,6 +115,19 @@ void TaskRunner::forget(const std::string& id) {
     cache_.erase(id);
 }
 
+void TaskRunner::told(const TaskRun& run, const Transition& change) {
+    if (change.outcome == TransitionOutcome::applied) told(run, change.record);
+}
+
+void TaskRunner::told(const TaskRun& run, const std::optional<TaskRecord>& record) {
+    if (!run.start.on_change || !record) return;
+    try {
+        run.start.on_change(*record);
+    } catch (...) {
+        // Telling of a change is a courtesy; the change stands.
+    }
+}
+
 std::variant<TaskRunner::Created, TaskRefusal> TaskRunner::create(std::size_t tool, const CallRequest& request,
                                                                   CallControl origin, TaskStart start) {
     TaskDraft draft;
@@ -147,13 +160,16 @@ std::variant<TaskRunner::Created, TaskRefusal> TaskRunner::create(std::size_t to
 }
 
 void TaskRunner::end(const std::shared_ptr<TaskRun>& run, TaskUpdate update) {
-    const Transition ended = options_.store->transition(run->id, unfinished, std::move(update));
+    Transition ended = options_.store->transition(run->id, unfinished, std::move(update));
     if (ended.outcome == TransitionOutcome::too_large || ended.outcome == TransitionOutcome::over_budget) {
         // Small enough to fit the reserve the store keeps for a running task.
-        static_cast<void>(options_.store->transition(run->id, unfinished, failure(error_code::internal_error, too_large_text)));
+        ended = options_.store->transition(run->id, unfinished, failure(error_code::internal_error, too_large_text));
     }
-    const std::lock_guard<std::mutex> lock(mutex_);
-    forget(run->id);
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        forget(run->id);
+    }
+    told(*run, ended);
 }
 
 std::optional<TaskResume> TaskRunner::settle(const std::shared_ptr<TaskRun>& run, TaskOutcome outcome, bool stopping) {
@@ -169,13 +185,15 @@ std::optional<TaskResume> TaskRunner::settle(const std::shared_ptr<TaskRun>& run
         update.result =
             run->start.write_result ? run->start.write_result(*result) : to_wire(*result, run->origin.profile());
         // Only a running task takes its outcome: one that was cancelled, or whose lifetime ended, stays as it is.
-        const Transition ended = options_.store->transition(run->id, working_only, std::move(update));
+        Transition ended = options_.store->transition(run->id, working_only, std::move(update));
         if (ended.outcome == TransitionOutcome::too_large || ended.outcome == TransitionOutcome::over_budget) {
-            static_cast<void>(
-                options_.store->transition(run->id, working_only, failure(error_code::internal_error, too_large_text)));
+            ended = options_.store->transition(run->id, working_only, failure(error_code::internal_error, too_large_text));
         }
-        const std::lock_guard<std::mutex> lock(mutex_);
-        forget(run->id);
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            forget(run->id);
+        }
+        told(*run, ended);
         return std::nullopt;
     }
     TaskUpdate failed;
@@ -188,9 +206,11 @@ std::optional<TaskResume> TaskRunner::settle(const std::shared_ptr<TaskRun>& run
                          std::string(invalid_params_prefix) + std::get<InvalidRequest>(outcome).message);
     }
     const Transition ended = options_.store->transition(run->id, working_only, std::move(failed));
-    static_cast<void>(ended);
-    const std::lock_guard<std::mutex> lock(mutex_);
-    forget(run->id);
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        forget(run->id);
+    }
+    told(*run, ended);
     return std::nullopt;
 }
 
@@ -241,6 +261,8 @@ std::optional<TaskResume> TaskRunner::ask(const std::shared_ptr<TaskRun>& run, I
         // Cancelled, or its lifetime ended, meanwhile.
         const std::lock_guard<std::mutex> lock(mutex_);
         forget(run->id);
+    } else {
+        told(*run, moved);
     }
     return std::nullopt;
 }
@@ -295,6 +317,7 @@ TaskRunner::Answered TaskRunner::answer(std::string_view id, const TaskOwner& ow
         run->keys.clear();
         run->running = true;
     }
+    if (run->start.on_change) told(*run, options_.store->get(id, owner));
     answered.run = std::move(run);
     return answered;
 }
@@ -328,7 +351,10 @@ TaskCancelResult TaskRunner::cancel(std::string_view id, const TaskOwner& owner)
         }
     }
     // Without a lock: stop callbacks run inline.
-    if (run) run->stop.request_stop();
+    if (run) {
+        run->stop.request_stop();
+        told(*run, result.record);
+    }
     return result;
 }
 
@@ -346,6 +372,15 @@ std::optional<TaskRecord> TaskRunner::read(std::string_view id, const TaskOwner&
     const std::lock_guard<std::mutex> lock(mutex_);
     cache_.insert_or_assign(std::string(id), Cached{owner, *record, at});
     return record;
+}
+
+std::optional<TaskRecord> TaskRunner::read_now(std::string_view id, const TaskOwner& owner) const {
+    return options_.store->get(id, owner);
+}
+
+std::optional<TaskPage> TaskRunner::list(const TaskOwner& owner, std::optional<std::string_view> cursor) const {
+    // Zero: as many as the store puts in a page.
+    return options_.store->list(owner, cursor, 0);
 }
 
 TaskWatchStart TaskRunner::watch(std::string_view id, const TaskOwner& owner, std::weak_ptr<TaskListener> listener) {
@@ -373,9 +408,12 @@ void TaskRunner::status(const TaskRun& run, std::string message) {
     TaskUpdate update;
     update.status = TaskStatus::working;
     update.message = std::move(message);
-    static_cast<void>(options_.store->transition(run.id, working_only, std::move(update)));
-    const std::lock_guard<std::mutex> lock(mutex_);
-    cache_.erase(run.id);
+    const Transition changed = options_.store->transition(run.id, working_only, std::move(update));
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        cache_.erase(run.id);
+    }
+    told(run, changed);
 }
 
 void TaskRunner::sweep() {
@@ -407,10 +445,13 @@ void TaskRunner::sweep() {
             overdue = !run->running && run->asked && !(at < run->deadline);
         }
         if (!overdue) continue;
-        static_cast<void>(
-            options_.store->transition(run->id, waiting_only, failure(error_code::internal_error, unanswered_text)));
-        const std::lock_guard<std::mutex> lock(mutex_);
-        forget(run->id);
+        const Transition failed =
+            options_.store->transition(run->id, waiting_only, failure(error_code::internal_error, unanswered_text));
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            forget(run->id);
+        }
+        told(*run, failed);
     }
 }
 
