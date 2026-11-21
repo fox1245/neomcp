@@ -28,6 +28,25 @@ std::string document_of_size(json document, std::size_t size) {
     return document.dump();
 }
 
+std::string challenge_with_scopes(const std::vector<std::string>& values) {
+    return "Bearer scope=\"" + join_scopes(values) + "\"";
+}
+
+// The values "s0000", "s0001", ... one after the other.
+std::vector<std::string> scope_list(std::size_t count) {
+    std::vector<std::string> out;
+    for (std::size_t i = 0; i < count; ++i) {
+        const std::string number = std::to_string(i);
+        out.push_back("s" + std::string(4 - std::min<std::size_t>(4, number.size()), '0') + number);
+    }
+    return out;
+}
+
+bool reported(const std::vector<FlowDiagnostic>& diagnostics, FlowDiagnostic::Kind kind) {
+    return std::any_of(diagnostics.begin(), diagnostics.end(),
+                       [kind](const FlowDiagnostic& one) { return one.kind == kind; });
+}
+
 // A metadata request follows as many redirects as the transport's own requests do by default.
 static_assert(OAuthDefaults::max_redirects == neomcp::HttpClientDefaults::max_redirects);
 
@@ -546,6 +565,51 @@ TEST(OAuthFlowRefresh, ANewRefreshTokenOverTheBoundOnARefreshLeavesTheStoredOneA
     ASSERT_EQ(rig.lookup.tokens_by_key.size(), 1u);
     EXPECT_EQ(rig.lookup.tokens_by_key.begin()->second.access_token, "AccessOne");
     EXPECT_EQ(rig.lookup.tokens_by_key.begin()->second.refresh_token, "RefreshOne");
+}
+
+// A step-up asks for the scopes of the last authorization and the challenge's together; that union is bound like any
+// list, so that repeated step-ups cannot grow what is asked past the bounds. A union that the bound cuts back to the
+// last request asks for nothing more, and no sign-in is made.
+TEST(OAuthFlowStepUp, AStepUpNeverAsksForMoreThanTheBoundsAllow) {
+    {
+        Rig rig;
+        rig.config.bounds.max_scopes = 4;
+        ASSERT_TRUE(done_of(rig.run(unauthorized({challenge_with_scopes({"a", "b", "c"})}))));
+        ASSERT_TRUE(done_of(rig.run(insufficient_scope("d"))));  // four: at the bound
+        EXPECT_EQ(rig.world.prompts.back().scopes, (std::vector<std::string>{"a", "b", "c", "d"}));
+        const std::size_t prompts = rig.world.prompts.size();
+        EXPECT_EQ(problem_of(rig.run(insufficient_scope("e"))), AuthorizationProblem::insufficient_scope);
+        EXPECT_EQ(rig.world.prompts.size(), prompts);
+    }
+    {
+        // By bytes.
+        Rig rig;
+        rig.config.bounds.max_scope_bytes = 5;
+        ASSERT_TRUE(done_of(rig.run(unauthorized({challenge_with_scopes({"a", "b"})}))));
+        ASSERT_TRUE(done_of(rig.run(insufficient_scope("c"))));  // "a b c" is five bytes
+        EXPECT_EQ(rig.world.prompts.back().scopes, (std::vector<std::string>{"a", "b", "c"}));
+        const std::size_t prompts = rig.world.prompts.size();
+        EXPECT_EQ(problem_of(rig.run(insufficient_scope("d"))), AuthorizationProblem::insufficient_scope);
+        EXPECT_EQ(rig.world.prompts.size(), prompts);
+    }
+}
+
+// The scope the library adds itself is inside the bounds too: the values the servers named give way to it.
+TEST(OAuthFlowStepUp, TheOfflineAccessScopeIsInsideTheBoundsToo) {
+    for (const std::size_t count : {std::size_t{2}, std::size_t{3}, std::size_t{4}}) {
+        SCOPED_TRACE(count);
+        Rig rig;
+        rig.config.bounds.max_scopes = 3;
+        rig.config.request_offline_access = true;
+        json server = rig.world.server_document();
+        server["scopes_supported"] = json::array({"offline_access"});
+        rig.world.documents[rig.world.server_metadata_url()] = json_answer(server);
+        ASSERT_TRUE(done_of(rig.run(unauthorized({challenge_with_scopes(scope_list(count))}))));
+        std::vector<std::string> expected = scope_list(std::min<std::size_t>(count, 2));
+        expected.emplace_back("offline_access");
+        EXPECT_EQ(rig.world.prompts.front().scopes, expected);
+        EXPECT_EQ(reported(rig.diagnostics, FlowDiagnostic::Kind::scopes_truncated), count > 2);
+    }
 }
 
 }  // namespace

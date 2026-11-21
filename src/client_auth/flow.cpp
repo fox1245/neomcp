@@ -17,6 +17,22 @@ namespace {
 
 constexpr std::string_view error_invalid_client = "invalid_client";
 
+// The scopes of two lists together, within the bounds like any list of scopes.
+std::vector<std::string> bounded_union(std::span<const std::string> first, std::span<const std::string> second,
+                                       const OAuthBounds& bounds) {
+    std::vector<FlowDiagnostic> ignored;
+    return bounded_scopes(scope_union(first, second), bounds, ignored);
+}
+
+// The bounds less the room for one more scope of `extra`, joined to a list that is not empty.
+OAuthBounds leaving_room_for(const OAuthBounds& bounds, std::string_view extra) {
+    OAuthBounds room = bounds;
+    room.max_scopes = bounds.max_scopes > 0 ? bounds.max_scopes - 1 : 0;
+    const std::size_t needed = extra.size() + 1;
+    room.max_scope_bytes = bounds.max_scope_bytes > needed ? bounds.max_scope_bytes - needed : 0;
+    return room;
+}
+
 }  // namespace
 
 std::optional<profile::OriginMetadataDiscovery> origin_metadata_of(std::span<const profile::ProfilePtr> profiles) {
@@ -144,7 +160,7 @@ FlowStep OAuthFlow::start(const Trigger& trigger, FlowClock::time_point now) {
         if (memory_.active) {
             const auto tokens = lookup_.tokens(*memory_.active);
             const std::vector<std::string> last = tokens ? tokens->requested_scopes : std::vector<std::string>{};
-            if (!is_strict_superset(scope_union(last, challenge_scopes_), last)) {
+            if (!is_strict_superset(bounded_union(last, challenge_scopes_, bounds), last)) {
                 return fail(AuthorizationProblem::insufficient_scope, config_.endpoint_url);
             }
         }
@@ -383,21 +399,33 @@ FlowStep OAuthFlow::on_registration(const FetchResult& result) {
 // ---- Authorization
 
 FlowStep OAuthFlow::authorize() {
+    // What the servers asked for, within the bounds: a step-up's union of two lists is a list of its own, and the
+    // scope the library adds itself (offline_access) has room beside the others.
+    std::vector<std::string> wanted;
+    std::vector<std::string> last;
     if (step_up_) {
         const auto tokens = changed_ ? std::optional<StoredTokens>{} : stored_tokens(key_);
-        const std::vector<std::string> last = tokens ? tokens->requested_scopes : std::vector<std::string>{};
-        scopes_ = scope_union(last, challenge_scopes_);
-        if (!last.empty() && !is_strict_superset(scopes_, last)) {
-            return fail(AuthorizationProblem::insufficient_scope, config_.endpoint_url);
-        }
+        if (tokens) last = tokens->requested_scopes;
+        wanted = scope_union(last, challenge_scopes_);
     } else if (challenge_named_scope_ && !challenge_scopes_.empty()) {
-        scopes_ = challenge_scopes_;
+        wanted = challenge_scopes_;
     } else {
-        scopes_ = resource_.scopes_supported;
+        wanted = resource_.scopes_supported;
     }
-    if (config_.request_offline_access && contains_scope(server_.scopes_supported, offline_access_scope) &&
-        !contains_scope(scopes_, offline_access_scope)) {
-        scopes_.emplace_back(offline_access_scope);
+    const bool add_offline = config_.request_offline_access &&
+                             contains_scope(server_.scopes_supported, offline_access_scope) &&
+                             !contains_scope(wanted, offline_access_scope);
+    const OAuthBounds room =
+        add_offline ? leaving_room_for(config_.bounds, offline_access_scope) : config_.bounds;
+    scopes_ = bounded_scopes(wanted, room, diagnostics_);
+    if (step_up_ && !last.empty() && !is_strict_superset(scopes_, last)) {
+        return fail(AuthorizationProblem::insufficient_scope, config_.endpoint_url);
+    }
+    if (add_offline) {
+        // Room was left for it, except where the bounds are smaller than the scope itself.
+        std::vector<std::string> with = scopes_;
+        with.emplace_back(offline_access_scope);
+        if (bounded_scopes(with, config_.bounds, diagnostics_).size() == with.size()) scopes_ = std::move(with);
     }
 
     auto pkce = make_pkce(random_);

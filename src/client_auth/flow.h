@@ -21,7 +21,8 @@
 //   5. the client registration (registration.h), and a dynamic registration when that is the one that applies;
 //   6. the scopes: on a 401 those of the challenge, else the resource's `scopes_supported`, else none; on a 403 for
 //      scope the union of the last request's and the challenge's, which must be strictly larger than the last
-//      request's; `offline_access` added when the option is on and the authorization server lists it;
+//      request's; `offline_access` added when the option is on and the authorization server lists it; the list
+//      stays within max_scopes and max_scope_bytes, offline_access included;
 //   7. PKCE, state and the authorization URL (callback.h), and the prompt;
 //   8. the callback check, then the token request (tokens.h).
 //
