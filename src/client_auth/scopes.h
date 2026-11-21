@@ -11,12 +11,14 @@
 
 #include "client_auth/bounds.h"
 #include "client_auth/types.h"
+#include "neomcp/authorization.h"
 
 namespace neomcp::detail::oauth {
 
 inline constexpr std::string_view offline_access_scope = "offline_access";
 
-bool is_scope_token(std::string_view value) noexcept;
+// The one check of the library (neomcp/authorization.h).
+using neomcp::is_scope_token;
 
 // The values that are scope-tokens, each once, in first-seen order, within `max_scopes` values and `max_scope_bytes`
 // bytes when joined with spaces. What is left out is reported.

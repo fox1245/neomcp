@@ -21,6 +21,7 @@
 #include <variant>
 #include <vector>
 
+#include "neomcp/authorization.h"
 #include "neomcp/http/headers.h"
 
 namespace neomcp::http {
@@ -70,8 +71,9 @@ std::variant<BearerCredentials, CredentialsProblem> read_bearer_credentials(cons
 // ---- Scope values
 
 // A scope value: scope-token = 1*( %x21 / %x23-5B / %x5D-7E ) (RFC 6749, appendix A.4). The text is opaque: no
-// meaning is read from it. A space, a quote, a backslash, a control byte and a byte over 0x7E are not allowed.
-bool is_scope_token(std::string_view value) noexcept;
+// meaning is read from it. A space, a quote, a backslash, a control byte and a byte over 0x7E are not allowed. The one
+// check of the library (neomcp/authorization.h), named here too.
+using neomcp::is_scope_token;
 
 // ---- Writing a Bearer challenge
 

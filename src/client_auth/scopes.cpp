@@ -5,16 +5,6 @@
 
 namespace neomcp::detail::oauth {
 
-bool is_scope_token(std::string_view value) noexcept {
-    if (value.empty()) return false;
-    for (const char c : value) {
-        const auto code = static_cast<unsigned char>(c);
-        const bool allowed = code == 0x21 || (code >= 0x23 && code <= 0x5B) || (code >= 0x5D && code <= 0x7E);
-        if (!allowed) return false;
-    }
-    return true;
-}
-
 bool contains_scope(std::span<const std::string> values, std::string_view value) {
     return std::find(values.begin(), values.end(), value) != values.end();
 }

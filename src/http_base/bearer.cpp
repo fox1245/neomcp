@@ -141,8 +141,6 @@ std::variant<BearerCredentials, CredentialsProblem> read_bearer_credentials(cons
     return read_bearer_credentials(std::span<const std::string_view>(fields), limits);
 }
 
-bool is_scope_token(std::string_view value) noexcept { return !value.empty() && all_of_text(value, is_plain_visible); }
-
 std::variant<std::string, ChallengeWriteProblem> write_bearer_challenge(const BearerChallengeParts& parts) {
     if (parts.error && (parts.error->empty() || !all_of_text(*parts.error, is_plain_visible_or_space))) {
         return ChallengeWriteProblem::invalid_error;
