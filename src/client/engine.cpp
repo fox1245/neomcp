@@ -197,6 +197,7 @@ struct Call {
     std::optional<InputAsking> asking;
     std::map<std::string, json_schema::Validator> forms;  // the round's forms by key, their schemas compiled
     std::size_t pausers = 0;            // server requests whose answers its clocks wait for
+    bool authorizing = false;           // HTTP: the transport holds it while its authorizer works (AuthorizationHold)
     // A subscription (listen): its request is written by the feed half from `filter` each time it goes out, and its
     // wait clock runs only until the acknowledgement.
     bool subscription = false;
@@ -778,7 +779,7 @@ private:
         clock_pause(call.ref, DeadlineKind::total, call.total);
     }
     void resume_call(Call& call) {
-        if (call.in_round || call.pausers > 0) return;
+        if (call.in_round || call.pausers > 0 || call.authorizing) return;
         clock_resume(call.ref, DeadlineKind::wait, call.wait);
         clock_resume(call.ref, DeadlineKind::total, call.total);
     }
@@ -1092,6 +1093,9 @@ private:
         }
         if (failure.kind == CallFailureKind::authorization_required) {
             fail_contact(ContactFailureKind::authorization_required, failure.message);
+        } else if (failure.kind == CallFailureKind::authorization_failed) {
+            fail_contact(ContactFailureKind::authorization_failed, failure.message, {}, std::nullopt,
+                         failure.authorization);
         } else if (status && !is_success(*status)) {
             fail_contact(ContactFailureKind::http_status, failure.message);
         } else {
@@ -1292,9 +1296,11 @@ private:
     }
 
     void fail_contact(ContactFailureKind kind, std::string message, std::vector<std::string> revisions = {},
-                      std::optional<profile::Transport> next_transport = std::nullopt) {
+                      std::optional<profile::Transport> next_transport = std::nullopt,
+                      std::optional<AuthorizationFailure> authorization = std::nullopt) {
         if (contact_.phase == ContactPhase::failed || contact_.phase == ContactPhase::closed) return;
-        contact_.failure = ContactFailure{kind, std::move(message), std::move(revisions), next_transport};
+        contact_.failure =
+            ContactFailure{kind, std::move(message), std::move(revisions), next_transport, std::move(authorization)};
         opening_ = nullptr;
         set_phase(ContactPhase::failed);
         std::vector<RequestRef> refs;
@@ -2031,6 +2037,53 @@ private:
             return;
         }
         if (contact_.phase == ContactPhase::open) release_held();
+    }
+
+    // The calls a unit's exchange carries: those whose answer counts on it, and where answers come on the connection,
+    // those it carried out.
+    std::vector<RequestRef> calls_on(UnitId unit) const {
+        std::vector<RequestRef> refs;
+        if (unit == connection_unit) return refs;
+        for (const auto& [id, entry] : wires_) {
+            if (entry.unit == unit) {
+                refs.push_back(entry.ref);
+                continue;
+            }
+            if (!answers_on_connection()) continue;
+            const auto call = calls_.find(entry.ref);
+            if (call != calls_.end() && call->second.sent_unit == unit) refs.push_back(entry.ref);
+        }
+        return refs;
+    }
+
+    // The transport holds the unit's request while its authorizer works, or sent it again: the clocks of every call
+    // it carries (the probe and the handshake among them) wait meanwhile, as for an input handler.
+    void on_stream(UnitId unit, const AuthorizationHold& hold) {
+        for (const RequestRef ref : calls_on(unit)) {
+            const auto found = calls_.find(ref);
+            if (found == calls_.end()) continue;
+            Call& call = found->second;
+            call.authorizing = hold.begin;
+            if (hold.begin) {
+                pause_call(call);
+            } else {
+                resume_call(call);
+            }
+        }
+    }
+
+    // The authorizer gave up on the unit's request: its calls end with the authorizer's failure, and the probe or the
+    // handshake fail contact so.
+    void on_stream(UnitId unit, const AuthorizationDenied& denied) {
+        if (unit == connection_unit) return;
+        const auto found = exchanges_.find(unit);
+        if (found != exchanges_.end()) found->second.status = denied.status;
+        for (const RequestRef ref : calls_on(unit)) {
+            const auto call = calls_.find(ref);
+            if (call != calls_.end()) call->second.authorizing = false;
+        }
+        lose_unit(unit, denied.failure, denied.status);
+        end_exchange(unit);
     }
 
     void on_stream(UnitId unit, const ProcessExited&) {

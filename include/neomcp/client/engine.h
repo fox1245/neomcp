@@ -136,6 +136,86 @@ struct Outgoing {
 // Receives each output. See the threading rules above: it must not call into the engine.
 using OutgoingSink = std::function<void(Outgoing outgoing)>;
 
+// ---- Why a call failed
+
+// Why an authorizer could not give a refused request the authorization the server asks for (HTTP; ClientError carries
+// it as `authorization`).
+enum class AuthorizationProblem {
+    discovery_failed,          // the documents that name the authorization server could not be found or read
+    resource_mismatch,         // the resource a document names is not the endpoint
+    metadata_issuer_mismatch,  // the authorization server's document names another issuer than its address
+    pkce_unsupported,          // the authorization server does not offer the code challenge method the client sends
+    refused_url,               // a URL a server named is one the client does not reach (UrlPurpose::authorization)
+    insecure_endpoint,         // the endpoint is plain HTTP on a host that is not this machine: no token goes there
+    no_client_registration,    // no way to register the client with the authorization server is configured or offered
+    registration_rejected,     // the authorization server refused to register the client
+    prompt_cancelled,          // the person did not finish signing in
+    prompt_timed_out,          // the person did not finish signing in in time
+    state_mismatch,            // the answer of the sign-in does not belong to the request the client made
+    issuer_mismatch,           // the answer of the sign-in names another issuer than the one asked
+    authorization_denied,      // the authorization server refused the authorization
+    token_request_failed,      // the request for a token was refused or its answer cannot be used
+    unsupported_token_type,    // the authorization server issued a token of a type the client does not send
+    insufficient_scope,        // the server asks again for a scope that was asked for and not granted
+    forbidden,                 // the server refused the request for a reason no new token changes
+    attempts_exceeded,         // the request was refused more often than the bounds allow
+    document_too_large,        // a document or an answer exceeded its bound
+    timed_out,                 // an exchange with an authorization server or the whole sign-in took too long
+    no_answer                  // the authorizer dropped the request without answering it
+};
+
+std::string_view to_string(AuthorizationProblem problem) noexcept;
+
+// What an authorizer met, without any secret: never a token, a code, a verifier, a state or a client secret, and
+// never a text the server or the authorization server sent.
+struct AuthorizationFailure {
+    AuthorizationProblem problem = AuthorizationProblem::forbidden;
+    std::string issuer;  // the authorization server it concerns, when one is known
+    std::string url;     // the URL involved, without its query, when one
+};
+
+// Why a call ended without an answer from the server, or was refused before it went out.
+enum class CallFailureKind {
+    timed_out,           // its wait (or its total) lapsed; it was cancelled as its transport prescribes
+    cancelled,           // the application cancelled it
+    server_exited,       // stdio: the process ended while it was pending
+    stream_lost,         // HTTP: the exchange that carried it ended or broke before its answer
+    send_failed,         // the transport could not deliver it
+    http_status,         // HTTP: its exchange was answered with a status that carries no answer of the protocol
+    bad_content_type,    // HTTP: its exchange was answered with content of a type the protocol does not use
+    authorization_required,  // HTTP: the server asks for authorization the client cannot give
+    authorization_failed,    // HTTP: the authorizer tried to obtain the authorization and could not (`authorization`)
+    message_too_large,   // its answer was longer than max_message_bytes or nested deeper than max_nesting_depth
+    malformed_answer,    // its answer is no result of its kind (such as a result that asks for input on a request
+                         // that cannot ask, or of a kind the client does not know)
+    version_refused,     // the server refused its revision a second time after the corrective retry
+    no_common_revision,  // the server's refusal names no revision this client can speak without a handshake
+    contact_failed,      // contact could not be made (ContactState::failure)
+    too_many_pending,    // max_pending_requests calls are pending already
+    unsupported_method,  // the governing revision has no such client request, or the message is malformed
+    header_value,        // an argument cannot be mirrored into a header (an integer out of range)
+    input_timed_out,     // a round of input was not answered within input_handler_timeout
+    input_rounds_exceeded,  // the server asked for input more than max_input_rounds times
+    input_requests_exceeded,  // one round asked for more than max_input_requests_per_round inputs
+    server_asked_undeclared,  // a round asked for input of a kind the client did not declare (InputSupport); no
+                              // retry is sent, since a server must not ask so
+    form_not_restricted,  // a round asked for a form whose schema is outside the restricted form, or cannot be
+                          // compiled within the peer limits; no handler saw it
+    answer_invalid,      // an accepted form's content fails the form's schema; it was not sent
+    input_refused,       // the user refused a sampling request of a round; no retry is sent
+    handler_failed,      // a handler of a round failed (it threw); no retry is sent
+    state_not_echoable,  // the state of a round cannot be sent back exactly as it was received
+    answer_not_writable,  // an answer of a round cannot be written for the revision
+    closed               // the engine was closed
+};
+
+struct CallFailure {
+    CallFailureKind kind = CallFailureKind::closed;
+    std::string message;
+    // authorization_failed: what the authorizer met.
+    std::optional<AuthorizationFailure> authorization = std::nullopt;
+};
+
 // ---- What a transport tells the engine besides messages
 
 // HTTP: the head of a response arrived; its body follows as messages (received) and the unit ends with StreamEnded.
@@ -182,8 +262,23 @@ struct SessionExpired {
     bool current = true;
 };
 
+// HTTP: the server refused the unit's request for want of authorization, and the transport holds the request while
+// the authorizer works for it (`begin`), or the hold ended and the request went out again, the same bytes with the
+// same id and new credentials (not `begin`). While a request is held its call's clocks wait, as they wait while an
+// input handler answers the server: what takes the time is the client's own sign-in, not the server.
+struct AuthorizationHold {
+    bool begin = true;
+};
+
+// HTTP: the authorizer gave up on the unit's refused request: nothing more comes for the unit, and the calls it
+// carried end with `failure` (authorization_required or authorization_failed). `status` is that of the refusal.
+struct AuthorizationDenied {
+    CallFailure failure;
+    int status = 0;
+};
+
 using StreamEvent = std::variant<ResponseHead, StreamEventId, StreamRetryAdvice, StreamEnded, StreamLost, SendFailed,
-                                 ProcessExited, SessionExpired>;
+                                 ProcessExited, SessionExpired, AuthorizationHold, AuthorizationDenied>;
 
 // What received() made of one message, so that a transport can count what it must bound (stdio counts the lines that
 // are not MCP messages).
@@ -271,6 +366,7 @@ enum class ContactFailureKind {
     handshake_timed_out,  // the handshake was not answered in time (it is never cancelled: the transport ends)
     malformed_answer,     // the answer that opens contact cannot be read
     authorization_required,  // HTTP: the server asks for authorization the client cannot give
+    authorization_failed,    // HTTP: the authorizer tried to obtain the authorization and could not
     http_status,          // HTTP: a status after which no step of opening goes on (a server error, an unknown 4xx)
     transport,            // the transport failed while contact was being made
     too_many_restarts     // the server lost the client's state (stdio: the process ended; HTTP: the session ended)
@@ -285,6 +381,8 @@ struct ContactFailure {
     // the handshake was refused with 400, 404 or 405 and no body only a server that names revisions per request sends,
     // and an enabled profile defines the older transport of events over HTTP; empty otherwise.
     std::optional<profile::Transport> next_transport;
+    // authorization_failed: what the authorizer met.
+    std::optional<AuthorizationFailure> authorization = std::nullopt;
 };
 
 // What one step of opening contact met, in order, so that a failure can name every answer.
@@ -319,45 +417,6 @@ struct OutgoingCall {
     // tools/call on a transport whose profile mirrors tool arguments into headers: the tool's input schema, from which
     // the marked arguments are mirrored. Null: no argument is mirrored.
     json input_schema = nullptr;
-};
-
-// Why a call ended without an answer from the server, or was refused before it went out.
-enum class CallFailureKind {
-    timed_out,           // its wait (or its total) lapsed; it was cancelled as its transport prescribes
-    cancelled,           // the application cancelled it
-    server_exited,       // stdio: the process ended while it was pending
-    stream_lost,         // HTTP: the exchange that carried it ended or broke before its answer
-    send_failed,         // the transport could not deliver it
-    http_status,         // HTTP: its exchange was answered with a status that carries no answer of the protocol
-    bad_content_type,    // HTTP: its exchange was answered with content of a type the protocol does not use
-    authorization_required,  // HTTP: the server asks for authorization the client cannot give
-    message_too_large,   // its answer was longer than max_message_bytes or nested deeper than max_nesting_depth
-    malformed_answer,    // its answer is no result of its kind (such as a result that asks for input on a request
-                         // that cannot ask, or of a kind the client does not know)
-    version_refused,     // the server refused its revision a second time after the corrective retry
-    no_common_revision,  // the server's refusal names no revision this client can speak without a handshake
-    contact_failed,      // contact could not be made (ContactState::failure)
-    too_many_pending,    // max_pending_requests calls are pending already
-    unsupported_method,  // the governing revision has no such client request, or the message is malformed
-    header_value,        // an argument cannot be mirrored into a header (an integer out of range)
-    input_timed_out,     // a round of input was not answered within input_handler_timeout
-    input_rounds_exceeded,  // the server asked for input more than max_input_rounds times
-    input_requests_exceeded,  // one round asked for more than max_input_requests_per_round inputs
-    server_asked_undeclared,  // a round asked for input of a kind the client did not declare (InputSupport); no
-                              // retry is sent, since a server must not ask so
-    form_not_restricted,  // a round asked for a form whose schema is outside the restricted form, or cannot be
-                          // compiled within the peer limits; no handler saw it
-    answer_invalid,      // an accepted form's content fails the form's schema; it was not sent
-    input_refused,       // the user refused a sampling request of a round; no retry is sent
-    handler_failed,      // a handler of a round failed (it threw); no retry is sent
-    state_not_echoable,  // the state of a round cannot be sent back exactly as it was received
-    answer_not_writable,  // an answer of a round cannot be written for the revision
-    closed               // the engine was closed
-};
-
-struct CallFailure {
-    CallFailureKind kind = CallFailureKind::closed;
-    std::string message;
 };
 
 // How a call ended.
@@ -490,8 +549,10 @@ enum class DiagnosticKind {
                          // was not sent, and the request was answered with an internal error
     schema_budget_spent,  // the budget of schema compiles of the server (max_peer_schema_compiles) is spent: every
                           // later schema of the server is refused without being compiled; reported once
-    session_renewed       // HTTP: the server no longer knew the session (SessionExpired), and a new handshake opens
+    session_renewed,      // HTTP: the server no longer knew the session (SessionExpired), and a new handshake opens
                           // another; whatever the server held for the old one is gone
+    authorization         // HTTP: what the authorizer reports while it works (AuthorizationHost::diagnostic); never a
+                          // secret
 };
 
 struct Diagnostic {

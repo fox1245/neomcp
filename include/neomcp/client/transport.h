@@ -64,6 +64,10 @@ public:
     // The connection was made again, after a `restart` output or on the transport's own account: stdio, a new server
     // process runs; the older transport of events over HTTP, a new event stream named where messages go.
     virtual void restarted() = 0;
+
+    // Something the transport reports that changes nothing of an exchange (HTTP: what an authorizer reports while it
+    // works). The client hands it to ClientOptions::on_diagnostic. Never carries a secret.
+    virtual void diagnostic(Diagnostic) {}
 };
 
 // Why a transport is closed.
@@ -192,13 +196,15 @@ struct HttpClientDefaults {
     static constexpr std::size_t max_redirects = 5;
     static constexpr std::chrono::milliseconds endpoint_timeout{10'000};
     static constexpr std::chrono::milliseconds delete_timeout{2'000};
+    static constexpr std::size_t max_authorizations_per_request = 3;
 };
 
 struct HttpEndpoint {
     // The endpoint's URL, used exactly as given.
     std::string url;
-    // Asked for the authorization of every request and told of every refusal for want of it; null: a request the
-    // server refuses so fails with authorization_required.
+    // Asked for the authorization of every request and told of every refusal for want of it, which the transport
+    // holds until the authorizer answers (neomcp/client/http.h); null: a request the server refuses so fails with
+    // authorization_required. An authorizer serves one transport at a time.
     std::shared_ptr<HttpAuthorizer> authorizer;
     HttpProxy proxy;
     // A file of certificate authorities to verify the server with, instead of the system's. Verification itself cannot
@@ -235,6 +241,10 @@ struct HttpEndpoint {
     // The request that ends a session when the client closes (where the revision ends sessions that way); the client
     // waits for its answer at most this long, and takes any answer. Default 2 s.
     std::chrono::milliseconds delete_timeout = HttpClientDefaults::delete_timeout;
+    // How often in a row one request may be refused for want of authorization and sent again, without an answer of
+    // another kind between; one more refusal ends it with authorization_failed (attempts_exceeded), whatever the
+    // authorizer would answer. Zero is an error. Default 3.
+    std::size_t max_authorizations_per_request = HttpClientDefaults::max_authorizations_per_request;
 };
 
 // ---- Making a transport

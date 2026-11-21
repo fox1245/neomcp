@@ -14,6 +14,7 @@ std::string_view to_string(ClientErrorKind kind) noexcept {
         case ClientErrorKind::http_status: return "http_status";
         case ClientErrorKind::bad_content_type: return "bad_content_type";
         case ClientErrorKind::authorization_required: return "authorization_required";
+        case ClientErrorKind::authorization_failed: return "authorization_failed";
         case ClientErrorKind::message_too_large: return "message_too_large";
         case ClientErrorKind::malformed_answer: return "malformed_answer";
         case ClientErrorKind::version_refused: return "version_refused";
@@ -63,6 +64,7 @@ std::optional<ClientErrorKind> error_kind(CallFailureKind kind) noexcept {
         case CallFailureKind::http_status: return ClientErrorKind::http_status;
         case CallFailureKind::bad_content_type: return ClientErrorKind::bad_content_type;
         case CallFailureKind::authorization_required: return ClientErrorKind::authorization_required;
+        case CallFailureKind::authorization_failed: return ClientErrorKind::authorization_failed;
         case CallFailureKind::message_too_large: return ClientErrorKind::message_too_large;
         case CallFailureKind::malformed_answer: return ClientErrorKind::malformed_answer;
         case CallFailureKind::version_refused: return ClientErrorKind::version_refused;
@@ -94,11 +96,39 @@ ClientErrorKind error_kind(ContactFailureKind kind) noexcept {
         case ContactFailureKind::handshake_timed_out: return ClientErrorKind::handshake_timed_out;
         case ContactFailureKind::malformed_answer: return ClientErrorKind::malformed_answer;
         case ContactFailureKind::authorization_required: return ClientErrorKind::authorization_required;
+        case ContactFailureKind::authorization_failed: return ClientErrorKind::authorization_failed;
         case ContactFailureKind::http_status: return ClientErrorKind::http_status;
         case ContactFailureKind::transport: return ClientErrorKind::transport;
         case ContactFailureKind::too_many_restarts: return ClientErrorKind::too_many_restarts;
     }
     return ClientErrorKind::transport;
+}
+
+std::string_view to_string(AuthorizationProblem problem) noexcept {
+    switch (problem) {
+        case AuthorizationProblem::discovery_failed: return "discovery_failed";
+        case AuthorizationProblem::resource_mismatch: return "resource_mismatch";
+        case AuthorizationProblem::metadata_issuer_mismatch: return "metadata_issuer_mismatch";
+        case AuthorizationProblem::pkce_unsupported: return "pkce_unsupported";
+        case AuthorizationProblem::refused_url: return "refused_url";
+        case AuthorizationProblem::insecure_endpoint: return "insecure_endpoint";
+        case AuthorizationProblem::no_client_registration: return "no_client_registration";
+        case AuthorizationProblem::registration_rejected: return "registration_rejected";
+        case AuthorizationProblem::prompt_cancelled: return "prompt_cancelled";
+        case AuthorizationProblem::prompt_timed_out: return "prompt_timed_out";
+        case AuthorizationProblem::state_mismatch: return "state_mismatch";
+        case AuthorizationProblem::issuer_mismatch: return "issuer_mismatch";
+        case AuthorizationProblem::authorization_denied: return "authorization_denied";
+        case AuthorizationProblem::token_request_failed: return "token_request_failed";
+        case AuthorizationProblem::unsupported_token_type: return "unsupported_token_type";
+        case AuthorizationProblem::insufficient_scope: return "insufficient_scope";
+        case AuthorizationProblem::forbidden: return "forbidden";
+        case AuthorizationProblem::attempts_exceeded: return "attempts_exceeded";
+        case AuthorizationProblem::document_too_large: return "document_too_large";
+        case AuthorizationProblem::timed_out: return "timed_out";
+        case AuthorizationProblem::no_answer: return "no_answer";
+    }
+    return "unknown";
 }
 
 }  // namespace neomcp

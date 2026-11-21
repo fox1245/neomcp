@@ -40,7 +40,10 @@ enum class ClientErrorKind {
     send_failed,             // the transport could not deliver it
     http_status,             // HTTP: answered with a status that carries no answer of the protocol
     bad_content_type,        // HTTP: answered with content of a type the protocol does not use
-    authorization_required,  // HTTP: the server asks for authorization the client cannot give
+    authorization_required,  // HTTP: the server asks for authorization the client cannot give (no authorizer, or one
+                             // that only has a fixed token)
+    authorization_failed,    // HTTP: the authorizer tried to obtain the authorization and could not (`authorization`
+                             // says what it met)
     message_too_large,       // its answer was longer or nested deeper than the client's bounds
     malformed_answer,        // its answer (or the answer that opens contact) is no result of its kind
     version_refused,         // the server refused its revision a second time after the corrective retry
@@ -121,6 +124,9 @@ struct ClientError {
     // server did is not known: a tool may have run. Set for timed_out, cancelled, server_exited and stream_lost when
     // the request had been sent; clear when the call failed before anything was sent, and for every other kind.
     bool may_have_run = false;
+    // authorization_failed: what the authorizer met (the problem, the authorization server, the URL without its
+    // query); never a secret.
+    std::optional<AuthorizationFailure> authorization;
 };
 
 // Thrown by the accessors of a Result that holds no value.

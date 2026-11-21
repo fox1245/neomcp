@@ -87,6 +87,7 @@ ClientError contact_error(const ContactFailure& failure) {
     ClientError error = error_of(error_kind(failure.kind), failure.message);
     error.server_revisions = failure.server_revisions;
     error.next_transport = failure.next_transport;
+    error.authorization = failure.authorization;
     return error;
 }
 
@@ -95,6 +96,7 @@ ClientError call_error(const CallFailure& failure, bool sent, const ContactState
     ClientError error;
     if (const auto kind = error_kind(failure.kind)) {
         error = error_of(*kind, failure.message);
+        error.authorization = failure.authorization;
     } else if (contact.failure) {
         error = contact_error(*contact.failure);
     } else {
@@ -897,6 +899,11 @@ public:
         if (closing_) return;
         engine_->stream_event(unit, std::move(event));
         pump();
+    }
+
+    void diagnostic(Diagnostic report) override {
+        if (closing_) return;
+        diagnose(ClientDiagnostic(std::move(report)));
     }
 
     void restarted() override {
