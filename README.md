@@ -14,8 +14,8 @@
 ---
 
 neomcp is a C++ library for writing [Model Context Protocol](https://modelcontextprotocol.io) (MCP) servers and
-clients. Work in progress: servers and clients over stdio and HTTP work today, authorization does not yet, and the
-interface may still change.
+clients. Work in progress: servers and clients over stdio and HTTP work today, the client signs in to servers that
+ask for OAuth authorization, the server does not ask for it yet, and the interface may still change.
 
 ## Status
 
@@ -64,9 +64,15 @@ What exists now:
   transport and revision, against servers that serve only one of the two eras, and against the official Python
   SDK's servers over stdio, Streamable HTTP and the older transport of events over HTTP.
 
+- A client that signs in where an HTTP server asks for OAuth authorization (`neomcp::OAuthAuthorizer`, in
+  `neomcp/client/oauth.h`): it finds the server's authorization server, registers the client there when it must,
+  hands the application the URL to open in a browser, and sends the tokens it obtains, refreshing them or asking for
+  more scope as the server requires.
+
 Still planned:
 
-- Authorization, for the server and the client.
+- Authorization for the server.
+- Running the client's sign-in in CI against the authorization scenarios of the official conformance suite.
 
 [ROADMAP.md](ROADMAP.md) lists the work that is in progress and the work that has not been started.
 
@@ -231,6 +237,40 @@ same arguments. The handler runs exactly once, when every declared input has its
 asks. Whether the client is asked by a result and a retried call or by requests sent while the call waits follows the
 revision it speaks, and the same code serves both. A handler that needs more control returns `neomcp::InputRequired`
 itself and is entered again with the answers, as `neomcp/server.h` describes.
+
+## A client that signs in
+
+An HTTP server may refuse a client until it holds an OAuth token. `neomcp::OAuthAuthorizer` obtains one when the
+server asks for it. The application supplies the one step the library leaves to it: showing the person the
+authorization server's sign-in page and handing back the URL the browser returned to.
+
+```cpp
+neomcp::OAuthOptions oauth;
+oauth.redirect_uri = "http://127.0.0.1:8765/callback";
+oauth.client_name = "My tool";
+oauth.prompt.handler([](const neomcp::AuthorizationPromptInfo& prompt,
+                         neomcp::AuthorizationPromptContext& context) {
+    open_in_browser(prompt.authorization_url);  // the application's own
+    // Wait at the redirect URI until the browser comes back, or until the sign-in is no longer waited for.
+    std::optional<std::string> back = wait_for_redirect(prompt.redirect_uri, context.stop_token());
+    return neomcp::AuthorizationPromptAnswer{back};
+});
+auto authorizer = neomcp::OAuthAuthorizer::create(std::move(oauth));
+
+neomcp::HttpEndpoint endpoint;
+endpoint.url = "https://mcp.example.com/mcp";
+endpoint.authorizer = *authorizer;
+auto client = neomcp::Client::open(options, std::move(endpoint));
+```
+
+The first request the server refuses starts the sign-in, and every request refused meanwhile waits for it. A plain
+handler like this one runs on a thread of its own and may block; a handler that returns `asio::awaitable` runs on the
+client's thread. Tokens live in memory for the authorizer's life unless `OAuthOptions::store` names a `TokenStore`
+that keeps them; the library never writes them anywhere itself. Credentials registered beforehand go in
+`OAuthOptions::pre_registered`, and a client ID metadata document the application hosts in
+`client_id_metadata_url`; otherwise the client registers itself where the authorization server offers it. A sign-in
+the person does not finish ends after `OAuthOptions::bounds.authorization_timeout`, and the calls it held fail with
+`ClientErrorKind::authorization_failed`.
 
 ## License
 

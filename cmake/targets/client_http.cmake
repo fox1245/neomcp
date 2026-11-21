@@ -1,5 +1,7 @@
 # The client's HTTP transports, on libcurl: the transfer thread, Streamable HTTP and the older transport of events over
-# HTTP, the guard of URLs a server supplies, and the forms of Client::open and make_transport that take an HttpEndpoint.
+# HTTP, the guard of URLs a server supplies, the forms of Client::open and make_transport that take an HttpEndpoint, and
+# the OAuth authorizer (neomcp/client/oauth.h), which drives the flow of neomcp::client_auth through a transport and
+# uses the transport's URL guard as the flow's rule for URLs, so it is built here.
 # Built only with NEOMCP_HTTP_CLIENT, which needs libcurl from the system (cmake/NeomcpCurl.cmake); a program that only
 # serves builds without it. libcurl is linked privately and appears in no public header, so a program that links this target does not
 # see it. The event stream reader it uses is in neomcp::http_base.
@@ -9,6 +11,7 @@ if(NEOMCP_HTTP_CLIENT)
     include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/NeomcpCurl.cmake")
 
     add_library(neomcp_client_http
+        src/client_auth/authorizer.cpp
         src/client_http/authorization_gate.cpp
         src/client_http/http_sse.cpp
         src/client_http/streamable.cpp
@@ -18,7 +21,8 @@ if(NEOMCP_HTTP_CLIENT)
     target_include_directories(neomcp_client_http
         PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(neomcp_client_http PUBLIC neomcp::client PRIVATE neomcp::http_base CURL::libcurl)
+    target_link_libraries(neomcp_client_http PUBLIC neomcp::client neomcp::http_base
+        PRIVATE neomcp::client_auth neomcp::crypto CURL::libcurl)
     target_compile_features(neomcp_client_http PUBLIC cxx_std_20)
     neomcp_configure_target(neomcp_client_http)
 endif()
