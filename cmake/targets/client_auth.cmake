@@ -17,6 +17,11 @@ add_library(neomcp_client_auth STATIC
     src/client_auth/types.cpp
     src/client_auth/url.cpp)
 add_library(neomcp::client_auth ALIAS neomcp_client_auth)
+# An archive even in a shared build, and linked into the shared HTTP client there: its code must then be
+# position-independent.
+if(BUILD_SHARED_LIBS)
+    set_target_properties(neomcp_client_auth PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 target_include_directories(neomcp_client_auth
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
