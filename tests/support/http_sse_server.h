@@ -9,7 +9,8 @@
 //
 // For a client that meets a server that does not keep to the transport, the options make it misbehave: a first event
 // of another type, an endpoint of another origin or with user information (any text as the endpoint event's data), no
-// endpoint event at all; drop_streams() ends every open stream, as a server that goes away does.
+// endpoint event at all; drop_streams() ends every open stream, as a server that goes away does. An intercept sees
+// every request before the transport does and may answer it instead.
 #pragma once
 
 #include <chrono>
@@ -17,9 +18,11 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "neomcp/http/message.h"
 #include "neomcp/server.h"
 
 namespace http_sse_test {
@@ -37,6 +40,9 @@ struct HttpSseServerOptions {
     std::string first_event;
     // Whether the stream begins with the endpoint event at all.
     bool send_endpoint = true;
+    // Sees every request first (on a thread of the listener); a response it returns is sent in place of the
+    // transport's, so that a test can refuse a request or serve another document at the path.
+    std::function<std::optional<neomcp::http::Response>(const neomcp::http::Request&)> intercept;
 };
 
 class HttpSseServer {

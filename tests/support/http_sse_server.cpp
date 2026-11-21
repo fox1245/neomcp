@@ -77,6 +77,12 @@ struct HttpSseServer::Impl {
     }
 
     void handle(neomcp::http::Request request, neomcp::http::Responder responder) {
+        if (options.intercept) {
+            if (auto replaced = options.intercept(request)) {
+                responder.complete(std::move(*replaced));
+                return;
+            }
+        }
         if (request.method == get_method) {
             open_stream(responder);
             return;

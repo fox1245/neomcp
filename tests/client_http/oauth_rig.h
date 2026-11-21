@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -104,14 +105,46 @@ inline std::vector<std::string> split_scopes(const std::string& text) {
     return out;
 }
 
+// A reply of the test's own for a request, in place of a peer's script; nothing: the script answers.
+using Override = std::function<std::optional<http_test::Reply>(const Request&)>;
+
 class AuthServer {
 public:
     // `name` makes its client ids and tokens its own.
     AuthServer(Ledger& ledger, std::string name)
-        : ledger_(ledger), name_(std::move(name)), server_([this](const Request& request) { return reply(request); }) {}
+        : ledger_(ledger), name_(std::move(name)), server_([this](const Request& request) { return serve(request); }) {}
 
     std::string issuer() const { return server_.url(""); }
     ScriptedHttpServer& server() { return server_; }
+    const ScriptedHttpServer& server() const { return server_; }
+
+    // The test answers the requests it chooses; called without the server's lock, so it may call back in.
+    void override_with(Override chosen) {
+        std::lock_guard lock(mutex_);
+        override_ = std::move(chosen);
+    }
+    // Changes the metadata document after it is made.
+    void edit_metadata(std::function<void(json&)> edit) {
+        std::lock_guard lock(mutex_);
+        edit_ = std::move(edit);
+    }
+    // The script's own answer to a request (for a peer of another origin that serves this server's endpoints).
+    http_test::Reply answer(const Request& request) { return reply(request); }
+    // The metadata document as served.
+    json metadata_document() const {
+        std::lock_guard lock(mutex_);
+        return metadata();
+    }
+    // Every code, access token and refresh token issued so far.
+    std::vector<std::string> issued() const {
+        std::lock_guard lock(mutex_);
+        return issued_;
+    }
+    // The access tokens issued so far.
+    std::vector<std::string> access_tokens() const {
+        std::lock_guard lock(mutex_);
+        return access_issued_;
+    }
 
     // Refresh tokens are issued with every token, and refresh requests answered with new tokens.
     void issue_refresh_tokens(bool on) {
@@ -134,6 +167,7 @@ public:
         std::lock_guard lock(mutex_);
         std::string code = name_ + "-code-" + std::to_string(++codes_issued_);
         codes_[code] = std::move(scopes);
+        issued_.push_back(code);
         return code;
     }
 
@@ -150,25 +184,42 @@ public:
 private:
     json metadata() const {
         const std::string base = issuer();
-        return json{{"issuer", base},
-                    {"authorization_endpoint", base + "/authorize"},
-                    {"token_endpoint", base + "/token"},
-                    {"registration_endpoint", base + "/register"},
-                    {"response_types_supported", json::array({"code"})},
-                    {"code_challenge_methods_supported", json::array({"S256"})},
-                    {"token_endpoint_auth_methods_supported", json::array({"none", "client_secret_post"})}};
+        json document{{"issuer", base},
+                      {"authorization_endpoint", base + "/authorize"},
+                      {"token_endpoint", base + "/token"},
+                      {"registration_endpoint", base + "/register"},
+                      {"response_types_supported", json::array({"code"})},
+                      {"code_challenge_methods_supported", json::array({"S256"})},
+                      {"token_endpoint_auth_methods_supported", json::array({"none", "client_secret_post"})}};
+        if (edit_) edit_(document);
+        return document;
     }
 
     http_test::Reply tokens_for(std::vector<std::string> scopes) {
         std::string access = name_ + "-access-" + std::to_string(++tokens_issued_);
         json body{{"access_token", access}, {"token_type", "Bearer"}, {"expires_in", 3600}};
+        issued_.push_back(access);
+        access_issued_.push_back(access);
         if (refresh_) {
             std::string refresh = name_ + "-refresh-" + std::to_string(tokens_issued_);
             body["refresh_token"] = refresh;
             refresh_tokens_[refresh] = scopes;
+            issued_.push_back(refresh);
         }
         ledger_.grant(access, std::move(scopes));
         return http_test::json_reply(200, body);
+    }
+
+    http_test::Reply serve(const Request& request) {
+        Override chosen;
+        {
+            std::lock_guard lock(mutex_);
+            chosen = override_;
+        }
+        if (chosen) {
+            if (auto given = chosen(request)) return std::move(*given);
+        }
+        return reply(request);
     }
 
     http_test::Reply reply(const Request& request) {
@@ -217,6 +268,10 @@ private:
     Ledger& ledger_;
     std::string name_;
     mutable std::mutex mutex_;
+    Override override_;
+    std::function<void(json&)> edit_;
+    std::vector<std::string> issued_;
+    std::vector<std::string> access_issued_;
     bool refresh_ = false;
     bool secret_ = false;
     std::optional<std::string> refuse_token_;
@@ -235,14 +290,46 @@ inline json discover_result() {
                 {"cacheScope", "private"}};
 }
 
+// The answer to a handshake: the revision the client asked for.
+inline json initialize_result(const Request& request) {
+    const json message = request.message();
+    json version = std::string(modern);
+    if (message.is_object() && message.contains("params") && message["params"].is_object() &&
+        message["params"].contains("protocolVersion")) {
+        version = message["params"]["protocolVersion"];
+    }
+    return json{{"protocolVersion", version},
+                {"capabilities", json::object()},
+                {"serverInfo", {{"name", "oauth-resource"}, {"version", "1.0.0"}}}};
+}
+
 class Resource {
 public:
     Resource(Ledger& ledger, const AuthServer& first)
-        : ledger_(ledger), issuer_(first.issuer()), server_([this](const Request& request) { return reply(request); }) {}
+        : ledger_(ledger), issuer_(first.issuer()), server_([this](const Request& request) { return serve(request); }) {}
 
     std::string url() const { return server_.url("/mcp"); }
+    std::string origin() const { return server_.url(""); }
     std::string metadata_url() const { return server_.url("/.well-known/oauth-protected-resource/mcp"); }
     ScriptedHttpServer& server() { return server_; }
+    const ScriptedHttpServer& server() const { return server_; }
+    std::vector<Request> requests() const { return server_.requests(); }
+
+    // The test answers the requests it chooses; called without the resource's lock.
+    void override_with(Override chosen) {
+        std::lock_guard lock(mutex_);
+        override_ = std::move(chosen);
+    }
+    // Changes the protected resource metadata document after it is made.
+    void edit_metadata(std::function<void(json&)> edit) {
+        std::lock_guard lock(mutex_);
+        edit_ = std::move(edit);
+    }
+    // The URL a challenge names as its resource_metadata; empty: the challenge names none.
+    void challenge_names(std::string metadata) {
+        std::lock_guard lock(mutex_);
+        named_metadata_ = std::move(metadata);
+    }
 
     // Its protected resource metadata names this authorization server from now on.
     void use(const AuthServer& named) {
@@ -295,11 +382,24 @@ private:
         return http_test::empty_reply(status, {{"WWW-Authenticate", std::move(challenge)}});
     }
 
+    http_test::Reply serve(const Request& request) {
+        Override chosen;
+        {
+            std::lock_guard lock(mutex_);
+            chosen = override_;
+        }
+        if (chosen) {
+            if (auto given = chosen(request)) return std::move(*given);
+        }
+        return reply(request);
+    }
+
     http_test::Reply reply(const Request& request) {
         std::lock_guard lock(mutex_);
         if (request.method == "GET" && request.target == "/.well-known/oauth-protected-resource/mcp") {
-            return http_test::json_reply(
-                200, json{{"resource", url()}, {"authorization_servers", json::array({issuer_})}});
+            json document{{"resource", url()}, {"authorization_servers", json::array({issuer_})}};
+            if (edit_) edit_(document);
+            return http_test::json_reply(200, document);
         }
         if (request.target != "/mcp") return http_test::empty_reply(404);
         if (request.method == "DELETE") return http_test::empty_reply(200);
@@ -309,8 +409,13 @@ private:
         const auto scopes =
             value.compare(0, prefix.size(), prefix) == 0 ? ledger_.scopes_of(value.substr(prefix.size())) : std::nullopt;
         if (!scopes) {
-            std::string challenge = "Bearer resource_metadata=\"" + metadata_url() + "\"";
-            if (!challenge_scope_.empty()) challenge += ", scope=\"" + challenge_scope_ + "\"";
+            const std::string named = named_metadata_ ? *named_metadata_ : metadata_url();
+            std::string challenge = "Bearer";
+            if (!named.empty()) challenge += " resource_metadata=\"" + named + "\"";
+            if (!challenge_scope_.empty()) {
+                challenge += named.empty() ? " " : ", ";
+                challenge += "scope=\"" + challenge_scope_ + "\"";
+            }
             return refuse(401, std::move(challenge));
         }
         std::string missing;
@@ -334,6 +439,9 @@ private:
         if (request.rpc_method() == "server/discover") {
             return http_test::json_reply(200, http_test::result_for(request, discover_result()));
         }
+        if (request.rpc_method() == "initialize") {
+            return http_test::json_reply(200, http_test::result_for(request, initialize_result(request)));
+        }
         if (request.rpc_id().is_null()) return http_test::empty_reply(202);
         return http_test::json_reply(200, http_test::result_for(request, json{{"tools", json::array()}}));
     }
@@ -341,6 +449,9 @@ private:
     Ledger& ledger_;
     std::string issuer_;
     mutable std::mutex mutex_;
+    Override override_;
+    std::function<void(json&)> edit_;
+    std::optional<std::string> named_metadata_;
     mutable std::condition_variable changed_;
     std::vector<std::string> required_;
     std::string challenge_scope_;
@@ -404,17 +515,25 @@ public:
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
         }
+        neomcp::AuthorizationPromptAnswer given;
         if (mode == Mode::wait_until_stopped) {
             const auto until = std::chrono::steady_clock::now() + http_rig::wait_bound;
             while (!context.cancelled() && std::chrono::steady_clock::now() < until) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
             note_stop(context.cancelled());
-            return {};
+        } else if (mode == Mode::sign_in) {
+            given.callback_url = callback ? callback(info) : callback_for(info, *server);
         }
-        if (mode == Mode::give_up) return {};
-        if (callback) return {callback(info)};
-        return {callback_for(info, *server)};
+        // Nothing of this object is touched after this point, so a test may end once it saw the count.
+        note_returned();
+        return given;
+    }
+
+    // Waits until `count` prompts have returned.
+    bool wait_returned(std::size_t count, std::chrono::milliseconds bound = http_rig::wait_bound) const {
+        std::unique_lock lock(mutex_);
+        return changed_.wait_for(lock, bound, [&] { return returned_ >= count; });
     }
 
     // The redirect URI with a fresh code for the scopes asked for, and the state of the request.
@@ -460,9 +579,15 @@ private:
         stop_seen_ = seen;
         changed_.notify_all();
     }
+    void note_returned() {
+        std::lock_guard lock(mutex_);
+        ++returned_;
+        changed_.notify_all();
+    }
 
     mutable std::mutex mutex_;
     mutable std::condition_variable changed_;
+    std::size_t returned_ = 0;
     AuthServer* server_;
     Mode mode_ = Mode::sign_in;
     std::function<bool()> hold_;
@@ -479,6 +604,8 @@ struct World {
     Resource resource{ledger, as};
     Person person{as};
     std::shared_ptr<neomcp::MemoryTokenStore> store = std::make_shared<neomcp::MemoryTokenStore>();
+    // The revisions the client enables; empty: every built-in one.
+    std::vector<std::string> revisions;
 
     std::mutex diagnostics_mutex;
     std::vector<std::string> diagnostics;
@@ -503,6 +630,7 @@ struct World {
         neomcp::ClientOptions made;
         made.client_info.name = "oauth-authorizer-test";
         made.client_info.version = "1.0.0";
+        for (const std::string& revision : revisions) made.profiles.push_back(neomcp::profile::builtin(revision));
         made.on_diagnostic = [this](const neomcp::ClientDiagnostic& reported) {
             if (const auto* plain = std::get_if<neomcp::Diagnostic>(&reported)) {
                 std::lock_guard lock(diagnostics_mutex);
@@ -526,6 +654,25 @@ struct World {
         std::lock_guard lock(diagnostics_mutex);
         return diagnostics;
     }
+
+    // Every secret of the sign-ins so far: what the authorization servers issued (codes, access and refresh tokens),
+    // the client secret and the description the rig plants, the state of every prompt, and the verifier of every
+    // token request.
+    std::vector<std::string> secrets(std::initializer_list<const AuthServer*> others = {}) const {
+        std::vector<std::string> out = {std::string(planted_secret), std::string(planted_description)};
+        std::vector<const AuthServer*> servers = {&as};
+        servers.insert(servers.end(), others.begin(), others.end());
+        for (const AuthServer* server : servers) {
+            for (const std::string& one : server->issued()) out.push_back(one);
+            for (const Request& one : server->requests_to("/token")) {
+                if (auto verifier = field_of(one.body, "code_verifier")) out.push_back(*verifier);
+            }
+        }
+        for (const neomcp::AuthorizationPromptInfo& prompt : person.prompts()) {
+            if (auto state = field_of(query_of(prompt.authorization_url), "state")) out.push_back(*state);
+        }
+        return out;
+    }
 };
 
 // Fails the test when `text` holds any of `secrets`.
@@ -544,6 +691,77 @@ inline void expect_clean(const neomcp::ClientError& error, const std::vector<std
         EXPECT_EQ(error.authorization->url.find('?'), std::string::npos);
         if (error.authorization->error_code) expect_none_of(*error.authorization->error_code, secrets, "the code");
     }
+}
+
+// No error the test saw and no diagnostic the client reported holds any of `secrets`.
+inline void expect_quiet(World& world, const std::vector<neomcp::ClientError>& errors,
+                         const std::vector<std::string>& secrets) {
+    for (const neomcp::ClientError& error : errors) expect_clean(error, secrets);
+    for (const std::string& seen : world.diagnostics_seen()) expect_none_of(seen, secrets, "a diagnostic");
+}
+
+// No request that reached `server` holds any of `secrets` in its target (path and query).
+inline void expect_no_secret_in_targets(const ScriptedHttpServer& server, const std::vector<std::string>& secrets) {
+    for (const Request& one : server.requests()) expect_none_of(one.target, secrets, "a request target");
+}
+
+inline bool holds_any(std::string_view text, const std::vector<std::string>& parts) {
+    for (const std::string& part : parts) {
+        if (!part.empty() && text.find(part) != std::string_view::npos) return true;
+    }
+    return false;
+}
+
+// Where the secrets of a sign-in went, for every server the test ran: no request to an authorization server carries
+// an access token or the protocol version of the resource; no request target anywhere carries a secret; the MCP
+// endpoint never receives a code, a verifier, a refresh token or a client secret.
+inline void expect_secrets_kept(World& world, std::initializer_list<const AuthServer*> others = {},
+                         const std::vector<std::string>& more = {}) {
+    std::vector<std::string> secrets = world.secrets(others);
+    secrets.insert(secrets.end(), more.begin(), more.end());
+    std::vector<const AuthServer*> servers = {&world.as};
+    servers.insert(servers.end(), others.begin(), others.end());
+    std::vector<std::string> access;
+    for (const AuthServer* server : servers) {
+        for (const std::string& one : server->access_tokens()) access.push_back(one);
+    }
+    for (const AuthServer* server : servers) {
+        for (const Request& one : server->server().requests()) {
+            EXPECT_FALSE(holds_any(one.head, access)) << "an access token reached " << one.target;
+            EXPECT_FALSE(holds_any(one.body, access)) << "an access token reached " << one.target;
+            EXPECT_FALSE(one.field("MCP-Protocol-Version")) << one.target;
+            const auto value = one.field("Authorization");
+            EXPECT_TRUE(!value || value->rfind("Bearer", 0) != 0) << one.target;
+        }
+        expect_no_secret_in_targets(server->server(), secrets);
+    }
+    std::vector<std::string> not_for_the_resource;
+    for (const std::string& one : secrets) {
+        if (std::find(access.begin(), access.end(), one) == access.end()) not_for_the_resource.push_back(one);
+    }
+    for (const Request& one : world.resource.requests()) {
+        if (one.target != "/mcp") continue;  // a document or an endpoint of the authorization server hosted there
+        EXPECT_FALSE(holds_any(one.head, not_for_the_resource)) << one.target;
+        EXPECT_FALSE(holds_any(one.body, not_for_the_resource)) << one.target;
+    }
+    expect_no_secret_in_targets(world.resource.server(), secrets);
+    // The URL the person opens carries its own state and nothing else secret: no verifier, token or client secret.
+    for (const neomcp::AuthorizationPromptInfo& prompt : world.person.prompts()) {
+        const auto own_state = field_of(query_of(prompt.authorization_url), "state");
+        for (const std::string& one : secrets) {
+            if (one.empty() || (own_state && one == *own_state)) continue;
+            EXPECT_EQ(prompt.authorization_url.find(one), std::string::npos) << "the authorization URL holds " << one;
+        }
+    }
+    expect_quiet(world, {}, secrets);
+}
+
+inline std::size_t grants_of(const AuthServer& server, std::string_view grant) {
+    std::size_t count = 0;
+    for (const Request& one : server.requests_to("/token")) {
+        if (field_of(one.body, "grant_type") == std::optional<std::string>(std::string(grant))) ++count;
+    }
+    return count;
 }
 
 }  // namespace oauth_rig
