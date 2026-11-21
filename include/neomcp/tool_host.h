@@ -63,9 +63,24 @@ struct HostFailure {
     std::string message;
 };
 
-// A tool's outcome, or what a call of any kind may end with: a refusal, a failure, or a request for input. Input may
-// be asked for by tools, prompts and resource reads; a completion that asks is answered with an internal error.
-using CallOutcome = std::variant<ToolResult, Refusal, HostFailure, InputRequired>;
+// An error the application chose to answer a call with, for a call of any kind. The call is answered with a JSON-RPC
+// error that carries exactly `code`, `message` and `data` (no `data` member when it is null), or, for a call that runs
+// as a task, the task fails with them. The session answers it only when the revision that governs the call lets an
+// application use the code: a code in the range JSON-RPC reserves for itself, other than those it leaves to
+// implementations, and a code the revision's profile names (its `errors`, with those of the extensions in force) are
+// refused, and so is an answer longer than SessionOptions::max_message_bytes. A refused answer is an internal error
+// whose message is fixed, as the one of a HostFailure is (SessionOptions::expose_error_details notes why it was
+// refused), and the application's message and data are dropped.
+struct ApplicationFailure {
+    int code = 0;
+    std::string message;
+    json data = nullptr;
+};
+
+// A tool's outcome, or what a call of any kind may end with: a refusal, a failure, an error of the application's own,
+// or a request for input. Input may be asked for by tools, prompts and resource reads; a completion that asks is
+// answered with an internal error.
+using CallOutcome = std::variant<ToolResult, Refusal, HostFailure, InputRequired, ApplicationFailure>;
 
 // The URI of a resources/read names nothing the host offers. It is answered with the error the revision prescribes
 // for a resource that does not exist.

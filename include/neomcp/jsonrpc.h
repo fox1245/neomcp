@@ -23,6 +23,14 @@ inline constexpr int invalid_request = -32600;
 inline constexpr int method_not_found = -32601;
 inline constexpr int invalid_params = -32602;
 inline constexpr int internal_error = -32603;
+
+// The ranges JSON-RPC 2.0 sets aside. Codes from -32768 to -32000 are reserved for the protocol; within them, -32099
+// to -32000 are left to implementations (a revision of MCP names some of those). A code outside the reserved range is
+// free for an application.
+inline constexpr int reserved_range_first = -32768;
+inline constexpr int reserved_range_last = -32000;
+inline constexpr int implementation_range_first = -32099;
+inline constexpr int implementation_range_last = -32000;
 }  // namespace error_code
 
 // A request id: a string or an integer. Two ids are equal when they are the same string or the same integer,

@@ -1,0 +1,1 @@
+Errors of the application's own: a handler answers its request with a JSON-RPC error whose code, message and data it chooses, on every handler kind, transport and revision, and the codes it may not use.

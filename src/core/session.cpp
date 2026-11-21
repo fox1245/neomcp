@@ -61,6 +61,7 @@
 #include <thread>
 #include <utility>
 
+#include "core/application_error.h"
 #include "core/headers.h"
 #include "core/input.h"
 #include "core/request_state.h"
@@ -479,6 +480,10 @@ public:
     profile::ProfilePtr connection_profile() const;
 
     void complete(const std::shared_ptr<CallState>& call, CallOutcome outcome);
+    // The answers to a failed call: an internal error that carries `note` when the options expose details, and the
+    // error an application chose, when its code may be used and the answer is not longer than the bound.
+    json host_failure_answer(const CallState& call, const std::string& note) const;
+    json application_answer(const CallState& call, const ApplicationFailure& failure) const;
     void complete(const std::shared_ptr<CallState>& call, FeatureOutcome outcome);
     void complete_dropped(const std::shared_ptr<CallState>& call);
     // Ends a wait as timed out (InputWait::expire).
@@ -3094,14 +3099,31 @@ void SessionCore::complete(const std::shared_ptr<CallState>& call, CallOutcome o
         json data = json::object();
         data["reason"] = "busy";
         response = make_error(call->id, error_code::internal_error, "Internal error: the server is busy", std::move(data));
+    } else if (const auto* application = std::get_if<ApplicationFailure>(&outcome)) {
+        response = application_answer(*call, *application);
     } else {
-        std::string message = call->kind == CallKind::tool ? "Internal error: the tool call failed"
-                                                           : "Internal error: the call failed";
-        const auto& failure = std::get<HostFailure>(outcome);
-        if (options_.expose_error_details && !failure.message.empty()) message += ": " + failure.message;
-        response = make_error(call->id, error_code::internal_error, std::move(message));
+        response = host_failure_answer(*call, std::get<HostFailure>(outcome).message);
     }
     finish_call(call, std::move(response));
+}
+
+json SessionCore::host_failure_answer(const CallState& call, const std::string& note) const {
+    std::string message = call.kind == CallKind::tool ? "Internal error: the tool call failed"
+                                                      : "Internal error: the call failed";
+    if (options_.expose_error_details && !note.empty()) message += ": " + note;
+    return make_error(call.id, error_code::internal_error, std::move(message));
+}
+
+json SessionCore::application_answer(const CallState& call, const ApplicationFailure& failure) const {
+    if (std::string refused = refused_application_code(*call.profile, failure.code); !refused.empty()) {
+        return host_failure_answer(call, refused);
+    }
+    json answer = make_error(call.id, failure.code, failure.message, failure.data);
+    const std::size_t size = serialize(answer).size();
+    if (size > options_.max_message_bytes) {
+        return host_failure_answer(call, oversized_application_error(failure, size, options_.max_message_bytes));
+    }
+    return answer;
 }
 
 void SessionCore::complete(const std::shared_ptr<CallState>& call, FeatureOutcome outcome) {

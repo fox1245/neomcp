@@ -244,7 +244,8 @@ struct SessionOptions {
     // Whether results carry the server's Implementation in `_meta`, when the revision defines that key.
     bool include_server_info = SessionDefaults::include_server_info;
 
-    // A longer input line is answered with Invalid Request and not parsed. Default 8 MiB.
+    // A longer input line is answered with Invalid Request and not parsed. An error answer of the application's own
+    // (ApplicationFailure) that is longer than this is answered with an internal error instead. Default 8 MiB.
     std::size_t max_message_bytes = SessionDefaults::max_message_bytes;
     // A line whose arrays and objects nest deeper is answered with Invalid Request and not parsed. Default 128.
     std::size_t max_nesting_depth = SessionDefaults::max_nesting_depth;
