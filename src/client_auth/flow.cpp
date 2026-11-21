@@ -247,6 +247,14 @@ FlowStep OAuthFlow::after_resource_metadata() {
         if (memory_.active->issuer != key_.issuer) drop_client(memory_.active->issuer);
         memory_.active.reset();
     }
+    // Tokens kept for this resource and authorization server (by an earlier run of the application, through its
+    // store) serve a request that went without one: they are sent, and only their refusal leads to a refresh or a new
+    // authorization.
+    if (!step_up_ && !trigger_.carried_token && stored_tokens(key_)) {
+        memory_.active = key_;
+        stage_ = Stage::finished;
+        return FlowDone{key_, std::move(updates_), false};
+    }
     if (const auto known = memory_.servers.find(key_.issuer); known != memory_.servers.end()) {
         server_ = known->second;
         return after_server_metadata();

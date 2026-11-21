@@ -51,13 +51,36 @@ TEST(OAuthFlowRefresh, WithoutANewRefreshTokenTheOldOneStays) {
     EXPECT_EQ(rig.lookup.tokens_by_key.begin()->second.refresh_token, "RefreshOne");
 }
 
-TEST(OAuthFlowRefresh, NoRefreshWhenTheRequestCarriedNoToken) {
+// A request that went without a token (the first one of an application that keeps its tokens in a store) is served by
+// the tokens stored for the resource and the authorization server: no refresh and no new authorization, only the
+// protected resource metadata that names the server.
+TEST(OAuthFlowRefresh, StoredTokensServeARequestThatCarriedNone) {
     Rig rig;
     rig.world.token_answers = {json_answer(tokens_with_refresh("AccessOne", "RefreshOne"))};
     ASSERT_TRUE(done_of(rig.run(unauthorized())));
+    rig.memory = FlowMemory{};  // a new authorizer with the same store
+    const std::size_t before = rig.world.requests.size();
     const FlowStep step = rig.run(unauthorized({}, false));
     ASSERT_TRUE(done_of(step));
     EXPECT_FALSE(done_of(step)->refreshed);
+    EXPECT_EQ(done_of(step)->key, (CredentialKey{rig.world.endpoint, rig.world.issuer}));
+    EXPECT_EQ(authorizations(rig), 1u);
+    ASSERT_EQ(rig.world.requests.size(), before + 1);
+    EXPECT_EQ(rig.world.requests.back().purpose, FetchPurpose::protected_resource_metadata);
+    EXPECT_EQ(rig.memory.active, (CredentialKey{rig.world.endpoint, rig.world.issuer}));
+    // Once those are refused too, the refresh follows.
+    const FlowStep refreshed = rig.run(unauthorized({}, true));
+    ASSERT_TRUE(done_of(refreshed));
+    EXPECT_TRUE(done_of(refreshed)->refreshed);
+}
+
+// A step-up is never served by the stored tokens: they are the ones the server found too narrow.
+TEST(OAuthFlowRefresh, AStepUpIsNotServedByStoredTokens) {
+    Rig rig;
+    ASSERT_TRUE(done_of(rig.run(unauthorized({"Bearer scope=\"a\""}))));
+    Trigger step_up = insufficient_scope("b");
+    step_up.carried_token = false;
+    ASSERT_TRUE(done_of(rig.run(step_up)));
     EXPECT_EQ(authorizations(rig), 2u);
 }
 

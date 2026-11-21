@@ -41,10 +41,7 @@ std::variant<std::vector<PrmCandidate>, FlowFailure> protected_resource_candidat
     std::string_view endpoint_url, const std::optional<std::string>& resource_metadata, const UrlAdmission& admission);
 
 // The resource identifier the flow expected and the one the metadata holds, for the application's hook.
-struct ResourceMismatch {
-    std::string expected;
-    std::string received;
-};
+using neomcp::ResourceMismatch;
 // True: use the metadata although its resource differs. Not set: refuse it.
 using AcceptResource = std::function<bool(const ResourceMismatch&)>;
 

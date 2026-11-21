@@ -12,7 +12,9 @@
 //   1. protected resource metadata (discovery.h), fetched again by every flow, which is how a changed
 //      authorization server is noticed;
 //   2. when the resource or the authorization server differs from the one whose tokens are in use, those tokens, and
-//      the dynamic registration at the old server, are dropped: they are never sent to or used at the new one;
+//      the dynamic registration at the old server, are dropped: they are never sent to or used at the new one; when
+//      the refused request carried no token and tokens are stored for this resource and server, the flow ends with
+//      them (FlowDone, nothing fetched);
 //   3. authorization server metadata (metadata.h), kept per issuer for the life of the FlowMemory;
 //   4. after a 401 to a request that carried a token, one refresh when a refresh token is stored for this resource and
 //      server; a refusal (4xx) erases it and the flow goes on;

@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include "neomcp/client/oauth_types.h"
+
 namespace neomcp::detail::oauth {
 
 using FlowClock = std::chrono::system_clock;
@@ -136,46 +138,18 @@ struct PromptAnswer {
 
 // ---- Credentials
 
-enum class TokenEndpointAuth { none, client_secret_basic, client_secret_post };
+// The values an application also sees (neomcp/client/oauth_types.h).
+using neomcp::ApplicationType;
+using neomcp::CredentialKey;
+using neomcp::PreRegisteredClient;
+using neomcp::StoredClient;
+using neomcp::StoredTokens;
+using neomcp::TokenEndpointAuth;
 
 std::string_view to_string(TokenEndpointAuth method) noexcept;
 std::optional<TokenEndpointAuth> token_endpoint_auth_from(std::string_view name) noexcept;
 
-enum class ApplicationType { native, web };
-
 std::string_view to_string(ApplicationType type) noexcept;
-
-struct PreRegisteredClient {
-    std::string issuer;  // compared exactly with the authorization server's issuer
-    std::string client_id;
-    std::optional<std::string> client_secret;
-    std::optional<TokenEndpointAuth> method;  // when set, used as it is
-};
-
-// A client registered dynamically at one authorization server.
-struct StoredClient {
-    std::string client_id;
-    std::optional<std::string> client_secret;
-    std::optional<TokenEndpointAuth> method;  // what the registration answered
-    friend bool operator==(const StoredClient&, const StoredClient&) = default;
-};
-
-// Credentials are kept per resource and per authorization server; those of one issuer are never read for another.
-struct CredentialKey {
-    std::string resource;  // the `resource` of the protected resource metadata, as received
-    std::string issuer;    // the validated issuer, as received
-    friend bool operator==(const CredentialKey&, const CredentialKey&) = default;
-    friend auto operator<=>(const CredentialKey&, const CredentialKey&) = default;
-};
-
-struct StoredTokens {
-    std::string access_token;
-    std::optional<std::string> refresh_token;
-    std::optional<FlowClock::time_point> expires_at;  // a hint; the server's refusal decides
-    std::vector<std::string> granted_scopes;          // as granted, or as requested when the answer named none
-    std::vector<std::string> requested_scopes;        // what the authorization that made them asked for
-    friend bool operator==(const StoredTokens&, const StoredTokens&) = default;
-};
 
 // Changes to the stored credentials a flow asks for, applied in this order: the erasures, then the puts. A flow that
 // fails may still ask for some (an erased refresh token, an erased registration the server no longer knows).
