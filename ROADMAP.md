@@ -84,7 +84,6 @@ times in a row at most; certificate verification cannot be switched off; libcurl
 
 ## Open items in what exists
 
-- `lastModified` of a resource is written under 2024-11-05, whose types have no annotations.
 - Sampling messages of 2025-11-25 and 2026-07-28 may hold tool use and tool result blocks (`ToolUseContent`,
   `ToolResultContent`); the content model has no such blocks, so a server cannot write them and the reader of a
   sampling request refuses a request that holds them.

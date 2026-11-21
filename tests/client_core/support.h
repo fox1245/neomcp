@@ -59,7 +59,7 @@ public:
     neomcp::Implementation implementation();
     neomcp::ToolAnnotations tool_annotations();
     neomcp::ToolDefinition tool();
-    neomcp::ContentAnnotations content_annotations();
+    neomcp::ContentAnnotations content_annotations(std::string_view owner_type);
     neomcp::ContentBlock block();
     neomcp::ContentBlock block(neomcp::ContentKind kind);
     neomcp::ResourceContents resource_contents();

@@ -16,6 +16,9 @@ namespace neomcp {
 // Keeps the members of `object` that the profile's type `type_name` has, in their order, and drops the others.
 // Returns false and leaves the value unchanged when the profile has no such type or the value is not an object.
 bool keep_members(json& object, std::string_view type_name, const profile::Profile& profile);
+// The same for a type already found, for example the type of a property (Profile::property_type). Returns false
+// and leaves the value unchanged when the value is not an object.
+bool keep_members(json& object, const profile::Type& type);
 
 // Whether the revision defines the content block kind: the profile has the kind's type (type_name(kind)).
 bool has_content_kind(ContentKind kind, const profile::Profile& profile);
@@ -28,11 +31,11 @@ json to_wire(const ToolAnnotations& annotations, const profile::Profile& profile
 json to_wire(const Implementation& implementation, const profile::Profile& profile);
 // Type `Icon`.
 json to_wire(const Icon& icon, const profile::Profile& profile);
-// The block's own type (type_name of its kind) with its annotations as `Annotations` and an embedded resource as
-// `TextResourceContents` or `BlobResourceContents`. A block of a kind the revision does not define is written as
-// a text block that names the kind.
+// The block's own type (type_name of its kind) with its annotations as the type its type has for them and an
+// embedded resource as `TextResourceContents` or `BlobResourceContents`. A block of a kind the revision does not
+// define is written as a text block that names the kind.
 json to_wire(const ContentBlock& block, const profile::Profile& profile);
-// Type `Resource`; its annotations as `Annotations` and its icons as `Icon`.
+// Type `Resource`; its annotations as the type it has for them, and its icons as `Icon`.
 json to_wire(const ResourceDefinition& resource, const profile::Profile& profile);
 // Type `ResourceTemplate`.
 json to_wire(const ResourceTemplateDefinition& resource_template, const profile::Profile& profile);

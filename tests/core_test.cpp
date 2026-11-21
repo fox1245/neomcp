@@ -1191,10 +1191,10 @@ const std::map<std::string, std::set<std::string>> text_resource_members{
     {"2025-11-25", {"_meta", "mimeType", "text", "uri"}},
     {"2026-07-28", {"_meta", "mimeType", "text", "uri"}},
 };
-// Content annotations: lastModified exists from 2025-06-18. 2024-11-05 defines the annotations inline, so the
-// tables do not name their members and they are written as the model has them.
+// Content annotations: lastModified exists from 2025-06-18. 2024-11-05 defines the annotations inline in each owner,
+// and its profile gives each owner's property a type of its own.
 const std::map<std::string, std::set<std::string>> content_annotation_members{
-    {"2024-11-05", {"audience", "lastModified", "priority"}},
+    {"2024-11-05", {"audience", "priority"}},
     {"2025-03-26", {"audience", "priority"}},
     {"2025-06-18", {"audience", "lastModified", "priority"}},
     {"2025-11-25", {"audience", "lastModified", "priority"}},

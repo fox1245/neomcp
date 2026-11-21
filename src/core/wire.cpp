@@ -11,17 +11,21 @@ namespace neomcp {
 
 namespace wire = detail::wire;
 
-bool keep_members(json& object, std::string_view type_name, const profile::Profile& profile) {
-    const profile::Type* type = profile.type(type_name);
+bool keep_members(json& object, const profile::Type& type) {
     auto* members = object.get_ptr<json::object_t*>();
-    if (type == nullptr || members == nullptr) return false;
+    if (members == nullptr) return false;
     json kept = json::object();
     auto* out = kept.get_ptr<json::object_t*>();
     for (auto& [name, value] : *members) {
-        if (type->has_property(name)) (*out)[name] = std::move(value);
+        if (type.has_property(name)) (*out)[name] = std::move(value);
     }
     object = std::move(kept);
     return true;
+}
+
+bool keep_members(json& object, std::string_view type_name, const profile::Profile& profile) {
+    const profile::Type* type = profile.type(type_name);
+    return type != nullptr && keep_members(object, *type);
 }
 
 bool has_content_kind(ContentKind kind, const profile::Profile& profile) {
@@ -63,7 +67,10 @@ json block_base(ContentKind kind, const json& extra) {
     return object;
 }
 
-json annotations_value(const ContentAnnotations& annotations, const profile::Profile& profile) {
+// The annotations of an object of the type `owner_type`, with the members the profile's type of the owner's
+// `annotations` property has. A revision that gives the property no type leaves the object as the model has it.
+json annotations_value(const ContentAnnotations& annotations, std::string_view owner_type,
+                       const profile::Profile& profile) {
     json value = json::object();
     if (!annotations.audience.empty()) {
         json audience = json::array();
@@ -72,13 +79,17 @@ json annotations_value(const ContentAnnotations& annotations, const profile::Pro
     }
     if (annotations.priority) at(value, wire::priority_member) = *annotations.priority;
     put(value, wire::last_modified_member, annotations.last_modified);
-    keep_members(value, wire::annotations_type, profile);
+    if (const profile::Type* owner = profile.type(owner_type)) {
+        if (const profile::Type* type = profile.property_type(*owner, wire::annotations_member)) {
+            keep_members(value, *type);
+        }
+    }
     return value;
 }
 
-void block_common(json& object, const std::optional<ContentAnnotations>& annotations, const std::optional<json>& meta,
-                  const profile::Profile& profile) {
-    if (annotations) at(object, wire::annotations_member) = annotations_value(*annotations, profile);
+void block_common(json& object, ContentKind kind, const std::optional<ContentAnnotations>& annotations,
+                  const std::optional<json>& meta, const profile::Profile& profile) {
+    if (annotations) at(object, wire::annotations_member) = annotations_value(*annotations, type_name(kind), profile);
     put(object, wire::meta_member, meta);
 }
 
@@ -105,7 +116,7 @@ json resource_contents(const BlobResourceContents& contents, const profile::Prof
 json block_value(const TextContent& block, const profile::Profile& profile) {
     json object = block_base(block.kind, block.extra);
     at(object, wire::text_member) = block.text;
-    block_common(object, block.annotations, block.meta, profile);
+    block_common(object, block.kind, block.annotations, block.meta, profile);
     return object;
 }
 
@@ -113,7 +124,7 @@ json block_value(const ImageContent& block, const profile::Profile& profile) {
     json object = block_base(block.kind, block.extra);
     at(object, wire::data_member) = block.data;
     at(object, wire::mime_type_member) = block.mime_type;
-    block_common(object, block.annotations, block.meta, profile);
+    block_common(object, block.kind, block.annotations, block.meta, profile);
     return object;
 }
 
@@ -121,7 +132,7 @@ json block_value(const AudioContent& block, const profile::Profile& profile) {
     json object = block_base(block.kind, block.extra);
     at(object, wire::data_member) = block.data;
     at(object, wire::mime_type_member) = block.mime_type;
-    block_common(object, block.annotations, block.meta, profile);
+    block_common(object, block.kind, block.annotations, block.meta, profile);
     return object;
 }
 
@@ -134,7 +145,7 @@ json block_value(const ResourceLink& block, const profile::Profile& profile) {
     put(object, wire::mime_type_member, block.mime_type);
     if (block.size) at(object, wire::size_member) = *block.size;
     if (!block.icons.empty()) at(object, wire::icons_member) = icons(block.icons, profile);
-    block_common(object, block.annotations, block.meta, profile);
+    block_common(object, block.kind, block.annotations, block.meta, profile);
     return object;
 }
 
@@ -142,7 +153,7 @@ json block_value(const EmbeddedResource& block, const profile::Profile& profile)
     json object = block_base(block.kind, block.extra);
     at(object, wire::resource_member) = std::visit([&](const auto& contents) { return resource_contents(contents, profile); },
                                     block.resource);
-    block_common(object, block.annotations, block.meta, profile);
+    block_common(object, block.kind, block.annotations, block.meta, profile);
     return object;
 }
 
@@ -222,7 +233,9 @@ json to_wire(const ResourceDefinition& resource, const profile::Profile& profile
     put(object, wire::description_member, resource.description);
     put(object, wire::mime_type_member, resource.mime_type);
     if (resource.size) at(object, wire::size_member) = *resource.size;
-    if (resource.annotations) at(object, wire::annotations_member) = annotations_value(*resource.annotations, profile);
+    if (resource.annotations) {
+        at(object, wire::annotations_member) = annotations_value(*resource.annotations, wire::resource_type, profile);
+    }
     if (!resource.icons.empty()) at(object, wire::icons_member) = icons(resource.icons, profile);
     put(object, wire::meta_member, resource.meta);
     keep_members(object, wire::resource_type, profile);
@@ -237,7 +250,8 @@ json to_wire(const ResourceTemplateDefinition& resource_template, const profile:
     put(object, wire::description_member, resource_template.description);
     put(object, wire::mime_type_member, resource_template.mime_type);
     if (resource_template.annotations) {
-        at(object, wire::annotations_member) = annotations_value(*resource_template.annotations, profile);
+        at(object, wire::annotations_member) =
+            annotations_value(*resource_template.annotations, wire::resource_template_type, profile);
     }
     if (!resource_template.icons.empty()) at(object, wire::icons_member) = icons(resource_template.icons, profile);
     put(object, wire::meta_member, resource_template.meta);

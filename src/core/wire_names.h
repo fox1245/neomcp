@@ -16,7 +16,6 @@ inline constexpr std::string_view tool_type = "Tool";
 inline constexpr std::string_view tool_annotations_type = "ToolAnnotations";
 inline constexpr std::string_view implementation_type = "Implementation";
 inline constexpr std::string_view icon_type = "Icon";
-inline constexpr std::string_view annotations_type = "Annotations";
 inline constexpr std::string_view resource_type = "Resource";
 inline constexpr std::string_view resource_template_type = "ResourceTemplate";
 inline constexpr std::string_view text_resource_contents_type = "TextResourceContents";

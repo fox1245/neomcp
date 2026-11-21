@@ -134,7 +134,7 @@ std::vector<Icon> Generator::icons(std::string_view type_name) {
 
 std::optional<ContentAnnotations> Generator::annotations(std::string_view type_name) {
     if (!on(type_name, "annotations")) return std::nullopt;
-    return content_annotations();
+    return content_annotations(type_name);
 }
 
 void Generator::fill_common(std::optional<ContentAnnotations>& annotation_slot, std::optional<json>& meta_slot,
@@ -189,13 +189,18 @@ ToolDefinition Generator::tool() {
     return out;
 }
 
-ContentAnnotations Generator::content_annotations() {
+ContentAnnotations Generator::content_annotations(std::string_view owner_type) {
+    // The members are those of the profile's type of the owner's `annotations` property; a revision that gives the
+    // property no type holds nothing back.
+    const profile::Type* owner = profile_.type(owner_type);
+    const profile::Type* type = owner == nullptr ? nullptr : profile_.property_type(*owner, "annotations");
+    const auto allowed = [&](std::string_view member) { return type == nullptr || type->has_property(member); };
     ContentAnnotations out;
-    if (has("Annotations", "audience")) {
+    if (allowed("audience")) {
         for (std::size_t i = 0, n = items(3); i < n; ++i) out.audience.push_back(role());
     }
-    if (on("Annotations", "priority")) out.priority = real();
-    out.last_modified = optional_text("Annotations", "lastModified");
+    if ((!project_ || allowed("priority")) && some()) out.priority = real();
+    if ((!project_ || allowed("lastModified")) && some()) out.last_modified = text();
     return out;
 }
 

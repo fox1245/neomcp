@@ -105,7 +105,10 @@ bool any_number(const json& wire, double& out) {
 class Fields {
 public:
     Fields(Reader& reader, const json& wire, const Step* place, std::string_view type_label)
-        : reader_(reader), place_(place), type_(reader.type(type_label)) {
+        : Fields(reader, wire, place, reader.type(type_label)) {}
+
+    Fields(Reader& reader, const json& wire, const Step* place, const profile::Type* type)
+        : reader_(reader), place_(place), type_(type) {
         members_ = wire.get_ptr<const json::object_t*>();
         if (members_ == nullptr) reader_.fail(place_, "must be an object");
     }
@@ -302,8 +305,14 @@ bool read_icons(Reader& reader, Fields& fields, std::vector<Icon>& out) {
     return true;
 }
 
-bool read_content_annotations(Reader& reader, const json& wire, const Step* at, ContentAnnotations& out) {
-    Fields fields(reader, wire, at, names::annotations_type);
+// The annotations of an object of the type `owner` (null when the profile has no such type): the members the
+// profile's type of the owner's `annotations` property has. A revision that gives the property no type holds nothing
+// back.
+bool read_content_annotations(Reader& reader, const profile::Type* owner, const json& wire, const Step* at,
+                              ContentAnnotations& out) {
+    const profile::Type* type =
+        owner == nullptr ? nullptr : reader.current().property_type(*owner, names::annotations_member);
+    Fields fields(reader, wire, at, type);
     if (!fields.valid()) return false;
     const json::array_t* audience = nullptr;
     if (!fields.array(names::audience_member, false, audience)) return false;
@@ -330,7 +339,7 @@ bool read_annotations_member(Reader& reader, Fields& fields, std::optional<Conte
     if (found == nullptr) return true;
     const Step step = member_step(fields.position(), names::annotations_member);
     ContentAnnotations annotations;
-    if (!read_content_annotations(reader, *found, &step, annotations)) return false;
+    if (!read_content_annotations(reader, fields.type(), *found, &step, annotations)) return false;
     out = std::move(annotations);
     return true;
 }
