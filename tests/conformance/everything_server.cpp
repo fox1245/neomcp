@@ -2,10 +2,11 @@
 // endpoint, with what the runner's scenarios call and read (everything.h): tools, resources, a resource template,
 // prompts and a completer.
 //
-//   neomcp_conformance_fixture [port]
+//   neomcp_conformance_fixture [--tasks] [port]
 //
 // The port defaults to 0, which picks a free one; the chosen port is then written to standard error on a line of its
-// own before anything else, so that a script can read it. The server runs until SIGINT or SIGTERM.
+// own before anything else, so that a script can read it. With --tasks the server also has a task store and the tools
+// that may run as tasks (register_task_tools). The server runs until SIGINT or SIGTERM.
 #include <charconv>
 #include <cstdint>
 #include <cstdio>
@@ -28,13 +29,20 @@ bool read_port(const char* argument, std::uint16_t& port) {
 
 int main(int argc, char** argv) {
     std::uint16_t port = 0;
-    if (argc > 2 || (argc == 2 && !read_port(argv[1], port))) {
-        std::fputs("usage: neomcp_conformance_fixture [port]\n", stderr);
+    bool tasks = false;
+    int next = 1;
+    if (next < argc && std::strcmp(argv[next], "--tasks") == 0) {
+        tasks = true;
+        ++next;
+    }
+    if (argc - next > 1 || (argc - next == 1 && !read_port(argv[next], port))) {
+        std::fputs("usage: neomcp_conformance_fixture [--tasks] [port]\n", stderr);
         return 2;
     }
 
-    neomcp::Server server(conformance::server_options());
+    neomcp::Server server(tasks ? conformance::task_options() : conformance::server_options());
     conformance::register_everything(server);
+    if (tasks) conformance::register_task_tools(server);
 
     neomcp::HttpServerOptions options;
     options.port = port;

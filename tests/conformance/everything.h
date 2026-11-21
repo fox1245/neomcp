@@ -7,8 +7,12 @@
 // each revision as that revision prescribes.
 #pragma once
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -536,6 +540,91 @@ inline void register_changes(neomcp::Server& server) {
                   [] { return std::string("The content of the resource that clients watch."); })
         .description("A resource clients subscribe to")
         .mime_type("text/plain");
+}
+
+// ---- Tasks ----------------------------------------------------------------------------------------------------------
+//
+// Served only by a fixture started with tasks on (task_options): tools that declare that they may run as tasks, for the
+// scenarios of the tasks extension. Under a revision with tasks, the server answers a call of them with a task when the
+// request declares the extension; the others stay ordinary calls.
+
+// The options of the server with tasks on: a store in memory, and room for the handlers of tasks beside the calls.
+inline neomcp::ServerOptions task_options() {
+    neomcp::ServerOptions options = server_options();
+    options.max_concurrent_calls = 16;
+    options.tasks.store = neomcp::make_memory_task_store();
+    return options;
+}
+
+// Waits for `duration`, or less when the call is stopped (the task is cancelled); returns whether it was stopped.
+inline bool work_for(const neomcp::Context& call, std::chrono::milliseconds duration) {
+    const auto until = std::chrono::steady_clock::now() + duration;
+    std::mutex mutex;
+    std::condition_variable woken;
+    const std::stop_callback wake(call.stop_token(), [&] {
+        const std::lock_guard<std::mutex> lock(mutex);
+        woken.notify_all();
+    });
+    std::unique_lock<std::mutex> lock(mutex);
+    return woken.wait_until(lock, until, [&] { return call.cancelled(); });
+}
+
+// How long the tools that work for a while take: long enough that a client sees the task working first.
+inline constexpr std::chrono::milliseconds task_work{500};
+// How long the tool that runs until it is cancelled runs at most.
+inline constexpr std::chrono::milliseconds task_long_work{std::chrono::seconds(60)};
+
+inline void register_task_tools(neomcp::Server& server) {
+    using neomcp::TaskSupport;
+    // A task, or an ordinary call for a request that does not declare the extension.
+    server.tool("test_task_tool", "Work for a while, then answer", [](neomcp::Context& call) {
+        if (work_for(call, task_work)) return std::string("The task was cancelled.");
+        return std::string("The task completed.");
+    }).task_support(TaskSupport::optional);
+    // Only as a task: a request that does not declare the extension is refused.
+    server.tool("test_task_required", "Work for a while as a task, then answer", [](neomcp::Context& call) {
+        if (work_for(call, task_work)) return std::string("The task was cancelled.");
+        return std::string("The required task completed.");
+    }).task_support(TaskSupport::required);
+    // Runs until it is cancelled (bounded).
+    server.tool("test_task_long_running", "Work until cancelled", [](neomcp::Context& call) {
+        if (work_for(call, task_long_work)) return std::string("The task was cancelled.");
+        return std::string("The task ran to its end.");
+    }).task_support(TaskSupport::optional);
+    // Asks the user for a name while it runs as a task, then greets.
+    server.tool("test_task_elicitation", "Ask the user for a name while running, then greet", [](neomcp::Context& call) -> Outcome {
+        const auto* answer = answer_to<neomcp::ElicitationAnswer>(call, name_key);
+        if (answer == nullptr) {
+            if (work_for(call, std::chrono::milliseconds(100))) return std::string("The task was cancelled.");
+            return asking(name_key, form_of_string("What is your name?", "name"));
+        }
+        std::string name = "stranger";
+        if (answer->action == neomcp::ElicitationAction::accept && answer->content.contains("name") &&
+            answer->content.at("name").is_string()) {
+            name = answer->content.at("name").get<std::string>();
+        }
+        return "Hello, " + name + "!";
+    }).task_support(TaskSupport::optional);
+    // Asks the user for a name before the task exists (the input is declared), then runs as a task.
+    server.tool(
+        "test_task_mrtr", "Ask the user for a name, then greet as a task",
+        [](const neomcp::Answer<UserName>& name, neomcp::Context& call) {
+            if (work_for(call, std::chrono::milliseconds(100))) return std::string("The task was cancelled.");
+            const std::string who = name.accepted() ? name->name : std::string("stranger");
+            return "Hello, " + who + "!";
+        },
+        neomcp::elicit<UserName>(name_key, [] { return std::string("What is your name?"); }))
+        .task_support(TaskSupport::optional);
+    // Completes with a tool execution error: the task completes, with the error in its result.
+    server.tool("test_task_tool_error", "Fail with a tool execution error", []() -> std::string {
+        throw neomcp::ToolError("This task intentionally returns a tool error");
+    }).task_support(TaskSupport::optional);
+    // Fails with an error of the call: its output schema demands what its result lacks.
+    neomcp::ToolDefinition failing;
+    failing.name = "test_task_failure";
+    failing.description = "Fail with an error of the call";
+    failing.output_schema = neomcp::json::parse(R"({"type":"object","properties":{"value":{"type":"string"}}})");
+    server.tool(failing, [](const neomcp::json&) { return neomcp::ToolResult{}; }).task_support(TaskSupport::optional);
 }
 
 inline void register_everything(neomcp::Server& server) {
