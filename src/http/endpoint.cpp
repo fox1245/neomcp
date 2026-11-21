@@ -107,6 +107,7 @@ constexpr std::array library_defaults{
     NamedDefault{"method_not_found", 200},  // where the revision prescribes nothing, an ordinary JSON-RPC error
     NamedDefault{"missing_connection", 400},
     NamedDefault{"missing_client_capability", 400},
+    NamedDefault{"insufficient_scope", 403},  // RFC 6750, section 3.1
     // Reasons of the transport.
     NamedDefault{reason::missing_session, 400},
     NamedDefault{reason::unknown_session, 404},

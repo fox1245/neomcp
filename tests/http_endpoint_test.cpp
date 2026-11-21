@@ -1318,6 +1318,18 @@ TEST(HttpEndpointHandler, CreateRefusesOptionsOutOfRange) {
     }
 }
 
+// Every reason a session refuses with, insufficient_scope included, has a status of the library, without which the
+// endpoint would not start; a server whose items declare scopes starts as any other.
+TEST(HttpEndpointHandler, StartsWithAStatusForEveryReasonOfASession) {
+    neomcp::Server server({.name = "s", .version = "1"});
+    server.tool("guarded", "A tool that declares a scope", [] { return std::string("g"); }).scopes({"files:write"});
+    auto policy = neomcp::http::HostPolicy::create({});
+    ASSERT_TRUE(policy);
+    auto endpoint = neomcp::http::Endpoint::create(server, std::move(*policy.value));
+    ASSERT_TRUE(endpoint) << endpoint.error;
+    (*endpoint.value)->stop();
+}
+
 // The defaults of the options come from constants, so that a named object initialized with braces keeps them (see
 // ServerOptionsDefaults in server_test.cpp).
 TEST(HttpServerOptionsDefaults, ANamedObjectBuiltWithDesignatedInitializersKeepsTheListenerDefaults) {

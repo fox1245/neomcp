@@ -32,7 +32,7 @@ constexpr std::array<std::string_view, 2> authorization_discovery_names{"origin_
 // The reasons a Streamable HTTP status map can name. The first group are the reasons a session gives when it refuses
 // an input before any method ran (neomcp::RefusalReason spells them the same way); the rest are decided by the HTTP
 // transport itself.
-constexpr std::array<std::string_view, 18> status_reason_names{
+constexpr std::array<std::string_view, 19> status_reason_names{
     "parse_error",
     "invalid_request",
     "too_long",
@@ -44,6 +44,7 @@ constexpr std::array<std::string_view, 18> status_reason_names{
     "method_not_found",
     "missing_connection",
     "missing_client_capability",  // a request needs a client capability the client did not declare
+    "insufficient_scope",         // the request's authorization lacks a scope its item declares
     "missing_session",            // a request without a session id where the revision requires one
     "unknown_session",            // a session id that names no live session
     "accepted",                   // a notification or a response was taken; nothing answers it

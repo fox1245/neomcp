@@ -62,6 +62,7 @@
 #include <variant>
 #include <vector>
 
+#include "neomcp/authorization.h"
 #include "neomcp/json.h"
 #include "neomcp/mechanism.h"
 #include "neomcp/model.h"
@@ -94,8 +95,9 @@ enum class OutputKind {
 };
 
 // Why an input was refused: before any method ran, or (missing_client_capability) because serving it needs something
-// the client did not declare. The name of each reason but `none` (to_string) is also a reason a revision's Streamable
-// HTTP status map can give a status for (profile::declared_status_reasons).
+// the client did not declare, or (insufficient_scope) before anything of the item it asks for ran. The name of each
+// reason but `none` (to_string) is also a reason a revision's Streamable HTTP status map can give a status for
+// (profile::declared_status_reasons).
 enum class RefusalReason {
     none,
     parse_error,                 // not JSON
@@ -108,7 +110,10 @@ enum class RefusalReason {
     unsupported_version_header,  // the version header names a revision the session does not serve
     method_not_found,            // the revision has no such client request, or the session does not serve it
     missing_connection,          // the request neither names its revision nor arrives on an opened connection
-    missing_client_capability    // the call asked for input the client did not declare a capability for
+    missing_client_capability,   // the call asked for input the client did not declare a capability for
+    // The unit's authorization lacks a scope the item asked for declares (neomcp/authorization.h); in a batch, the
+    // whole batch is refused and no request of it runs. Output::required_scopes names what is missing.
+    insufficient_scope
 };
 
 std::string_view to_string(RefusalReason reason) noexcept;
@@ -133,6 +138,10 @@ struct Output {
     // Set on every output of a subscription (see Session): its unit stays open until the subscription ends, so its
     // messages need a stream; a transport that cannot give the unit one refuses it and abandons the unit.
     bool long_lived = false;
+    // With RefusalReason::insufficient_scope: the scopes the refused request needs (for a batch, its requests need)
+    // that the unit's authorization does not hold with what its scopes imply, in the order first met, each once.
+    // Empty otherwise.
+    std::vector<std::string> required_scopes;
 };
 
 // Receives each output, with the same guarantees as a Sink: one thread at a time, never re-entrantly, never under a
@@ -297,7 +306,9 @@ struct SessionOptions {
     std::size_t max_input_rounds = SessionDefaults::max_input_rounds;
     // Under the mechanism whose result asks and whose retried call answers (input_required_result): the keys that seal
     // the state a call's result carries, each at least 32 bytes. The first seals; every one verifies, so a key can be
-    // replaced by putting the new one first and dropping the old one once its states have expired. Empty: one key of
+    // replaced by putting the new one first and dropping the old one once its states have expired. A state is bound to
+    // the principal of the call's authorization (neomcp/authorization.h), so a retry under another principal, or one
+    // with an authorization when the call had none or the other way round, is refused. Empty: one key of
     // 32 bytes from the operating system's random source, made once per process. Several processes that serve the
     // same clients (behind a load balancer, or one after another) must be given the same key here, or a retry that
     // reaches another process is refused.
@@ -314,6 +325,12 @@ struct SessionOptions {
     // state that a retry carries is verified either way. Answers that were dropped leave the request the first round
     // of its call.
     bool answers_need_state = SessionDefaults::answers_need_state;
+
+    // ---- Authorization (neomcp/authorization.h)
+
+    // The scopes each granted scope implies, for the check of the scopes an item declares. Empty: a scope is met only
+    // by itself.
+    ScopeImplications scope_implications;
 };
 
 // A mechanism a profile names that the registry has no implementation for.
@@ -359,10 +376,16 @@ public:
     // version header naming a revision the session does not serve, refuse the input (Output::refusal). On a
     // transport whose entries define no headers, such as stdio, headers change nothing.
     //
+    // `authorization` is what the transport found when it validated the request's credentials; null where it
+    // authorizes nothing (and then the scopes items declare are not checked, see neomcp/authorization.h). The session
+    // checks every request of the unit against the scopes its item declares and keeps it with every call the unit
+    // starts (CallControl::authorization). The transport must not pass the credentials themselves among the headers.
+    //
     // Returns whether the unit awaits an answer: true when it holds a request or was refused (the answer may have
     // been written already, and a request that is cancelled later ends the unit without one), false when it holds
     // only notifications and responses. After close() the input is ignored and false returned.
-    bool receive(UnitId unit, std::string_view input, std::span<const HeaderField> headers = {});
+    bool receive(UnitId unit, std::string_view input, std::span<const HeaderField> headers = {},
+                 std::shared_ptr<const Authorization> authorization = {});
 
     // The transport lost the stream that carried the unit's outputs. The cancellation mechanism of the profile each
     // of the unit's calls is served under decides what happens to the call: it is stopped when the mechanism says a

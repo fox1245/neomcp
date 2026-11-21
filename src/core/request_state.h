@@ -29,7 +29,7 @@ struct StateClaims {
     std::string subject;        // the tool or prompt name, or the resource URI
     std::string arguments;      // the digest of the request's arguments (arguments_digest)
     std::string server;         // the name of the server that issued it
-    std::string principal;      // who the client acts for; empty until requests carry an authenticated principal
+    std::string principal;      // who the client acts for (principal_digest); empty when the call had no authorization
     std::uint64_t round = 0;    // how many times the call asked before, counting this time
     std::map<std::string, std::string> asked;  // the keys of the requests asked, with each request's method
     std::optional<std::string> state;          // the host's own state
@@ -77,5 +77,10 @@ std::string canonical_json(const json& value);
 
 // The base64url text of the SHA-256 digest of canonical_json(arguments).
 std::string arguments_digest(const json& arguments);
+
+// What a sealed state binds the principal of a call by: the base64url text of the SHA-256 digest of the text of its
+// PrincipalKey, so that the state, which the client can read, does not carry who the principal is; empty for a call
+// without an authorization. Equal for two authorizations of one principal, and different for different principals.
+std::string principal_digest(const Authorization* granted);
 
 }  // namespace neomcp::detail

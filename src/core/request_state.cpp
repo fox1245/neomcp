@@ -210,4 +210,10 @@ std::string arguments_digest(const json& arguments) {
     return encode_base64url(std::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
 }
 
+std::string principal_digest(const Authorization* granted) {
+    if (granted == nullptr) return {};
+    const Sha256Digest digest = sha256(principal_of(*granted).text());
+    return encode_base64url(std::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
+}
+
 }  // namespace neomcp::detail

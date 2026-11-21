@@ -158,6 +158,10 @@ public:
     // What the thing is called in the failures the server reports, such as "tool 'add'".
     virtual const std::string& label() const noexcept = 0;
 
+    // The scopes a request for it needs (ToolHandle::scopes and the others); empty for a completer, whose prompt or
+    // template has them. Fixed once the server serves.
+    std::vector<std::string> scopes;
+
     JobOutcome run_plain(const CallRecord& record, Context& context);
     asio::awaitable<JobOutcome> run_async(const CallRecord& record, Context& context);
 
@@ -285,10 +289,20 @@ public:
                                                                        IdleCallback on_idle);
     std::span<const ToolDefinition> tools() const override;
     bool tool_enabled(std::size_t index) const override;
+    std::span<const std::string> tool_scopes(std::size_t index) const override;
     void call(const CallRequest& request, CallControl control, Completion done) override;
     ChangeSupport change_support() const override;
     ChangeRegistration watch(std::weak_ptr<ChangeListener> listener) override;
     ResourceHost* resource_host() noexcept override;
+    std::span<const std::string> read_scopes(std::string_view uri) const override;
+    std::span<const std::string> prompt_scopes(std::size_t index) const override;
+    std::span<const std::string> completion_scopes(const CompletionRequest& request) const override;
+    // The scopes of an item, set through its handle.
+    void set_tool_scopes(std::size_t index, std::vector<std::string> list);
+    void set_resource_scopes(std::size_t index, std::vector<std::string> list);
+    void set_template_scopes(std::size_t index, std::vector<std::string> list);
+    void set_prompt_scopes(std::size_t index, std::vector<std::string> list);
+    bool declares_scopes() const;
     std::span<const ResourceDefinition> resources() const override;
     std::span<const ResourceTemplateDefinition> resource_templates() const override;
     bool resource_enabled(std::size_t index) const override;
@@ -351,6 +365,12 @@ private:
     // Writes the keyword of each served revision on the property that each mark of a described struct names.
     void write_header_marks(const std::string& tool, json& schema, const std::vector<HeaderMark>& marks) const;
     void ensure_registering(const std::string& label, std::string_view action) const;
+    // Checks and stores the scopes of a registered thing.
+    void set_scopes(Callable& entry, std::vector<std::string> list) const;
+    // Whether the call's authorization meets `required`; true where the call came without one (nothing is checked
+    // there). The session checks before it calls the host; this check closes the gap in which an item is switched on
+    // or off between the session's look and the host's, so that the host never runs what the session would refuse.
+    bool permits(const CallControl& control, std::span<const std::string> required) const;
     bool admits() const;  // with mutex_ held
 
     // What a read of `uri` finds: a resource that is on at that URI, else the first template that is on, matches and
@@ -405,6 +425,13 @@ private:
     // In a deque: a vector that grows copies its elements when their move constructor may throw, as a map's may in
     // one standard library, and a map of unique pointers cannot be copied.
     using Completers = std::map<std::string, std::unique_ptr<FeatureEntry<CompletionResult>>, std::less<>>;
+    // What a completion refers to, as complete() resolves it: the completers of a prompt or template that is on, or a
+    // resource at a fixed URI that is on (which has none); `owner` is the thing whose scopes the completion needs.
+    struct CompletionTarget {
+        const Completers* completers = nullptr;
+        const Callable* owner = nullptr;
+    };
+    std::optional<CompletionTarget> completion_target(const CompletionRequest& request) const;
     std::deque<Completers> prompt_completers_;
     std::deque<Completers> template_completers_;
     std::size_t completer_count_ = 0;
@@ -575,6 +602,50 @@ void ServerCore::ensure_registering(const std::string& label, std::string_view a
         throw std::logic_error("neomcp: " + label + " cannot be " + std::string(action) +
                                ": the server serves already");
     }
+}
+
+void ServerCore::set_scopes(Callable& entry, std::vector<std::string> list) const {
+    ensure_registering(entry.label(), "given scopes");
+    for (const std::string& scope : list) {
+        if (!is_scope_token(scope)) {
+            throw std::invalid_argument("neomcp: " + entry.label() + ": the scope '" + scope +
+                                        "' is not a scope-token");
+        }
+    }
+    entry.scopes = std::move(list);
+}
+
+void ServerCore::set_tool_scopes(std::size_t index, std::vector<std::string> list) {
+    set_scopes(*entries_.at(index), std::move(list));
+}
+
+void ServerCore::set_resource_scopes(std::size_t index, std::vector<std::string> list) {
+    set_scopes(*resource_slots_.at(index).entry, std::move(list));
+}
+
+void ServerCore::set_template_scopes(std::size_t index, std::vector<std::string> list) {
+    set_scopes(*template_slots_.at(index).entry, std::move(list));
+}
+
+void ServerCore::set_prompt_scopes(std::size_t index, std::vector<std::string> list) {
+    set_scopes(*prompt_entries_.at(index), std::move(list));
+}
+
+bool ServerCore::declares_scopes() const {
+    const auto declares = [](const auto& entries) {
+        return std::any_of(entries.begin(), entries.end(), [](const auto& entry) { return !entry->scopes.empty(); });
+    };
+    const auto slot_declares = [](const auto& slots) {
+        return std::any_of(slots.begin(), slots.end(), [](const auto& slot) { return !slot.entry->scopes.empty(); });
+    };
+    return declares(entries_) || declares(prompt_entries_) || slot_declares(resource_slots_) ||
+           slot_declares(template_slots_);
+}
+
+bool ServerCore::permits(const CallControl& control, std::span<const std::string> required) const {
+    const Authorization* granted = control.authorization();
+    if (granted == nullptr) return true;
+    return missing_scopes(granted->scopes, required, options_.scope_implications).empty();
 }
 
 json_schema::Validator ServerCore::compile(const std::string& tool, std::string_view which, const json& schema) const {
@@ -871,6 +942,7 @@ SessionOptions ServerCore::session_options(profile::Transport transport, IdleCal
     session.max_watched_resources = options_.max_watched_resources;
     session.max_watched_uri_bytes = options_.max_watched_uri_bytes;
     session.max_watched_bytes = options_.max_watched_bytes;
+    session.scope_implications = options_.scope_implications;
     session.on_idle = std::move(on_idle);
     // The session keeps this, and with it the core: the core outlives every session it serves.
     session.check_arguments = [core = shared_from_this()](const ToolDefinition& tool, const json& arguments) {
@@ -885,6 +957,7 @@ std::span<const ToolDefinition> ServerCore::tools() const {
 }
 
 bool ServerCore::tool_enabled(std::size_t index) const { return tool_on_.at(index).load(); }
+std::span<const std::string> ServerCore::tool_scopes(std::size_t index) const { return entries_.at(index)->scopes; }
 bool ServerCore::resource_enabled(std::size_t index) const { return resource_on_.at(index).load(); }
 bool ServerCore::template_enabled(std::size_t index) const { return template_on_.at(index).load(); }
 bool ServerCore::prompt_enabled(std::size_t index) const { return prompt_on_.at(index).load(); }
@@ -1027,6 +1100,10 @@ void ServerCore::call(const CallRequest& request, CallControl control, Completio
 void ServerCore::admit(Callable& callable, json arguments, json meta, CallControl control, Completion done,
                        Answers answers, std::string subject, std::optional<std::string> mime,
                        std::optional<CacheHints> cache) {
+    if (!permits(control, callable.scopes)) {
+        done(HostFailure{"the authorization lacks a scope of " + callable.label()});
+        return;
+    }
     auto record = std::make_shared<CallRecord>(callable, std::move(control), std::move(done), std::move(arguments),
                                                std::move(meta));
     record->answers = std::move(answers);
@@ -1138,6 +1215,16 @@ bool ServerCore::offers(std::string_view uri) const {
     return find_resource(uri).has_value();
 }
 
+std::span<const std::string> ServerCore::read_scopes(std::string_view uri) const {
+    const auto found = find_resource(uri);
+    if (!found) return {};
+    return found->entry->scopes;
+}
+
+std::span<const std::string> ServerCore::prompt_scopes(std::size_t index) const {
+    return prompt_entries_.at(index)->scopes;
+}
+
 void ServerCore::read(const ReadRequest& request, CallControl control, Completion done) {
     serving_.store(true);
     auto found = find_resource(request.uri);
@@ -1184,33 +1271,50 @@ CompletionHost* ServerCore::completion_host() noexcept {
     return completer_count_ == 0 ? nullptr : this;
 }
 
-void ServerCore::complete(const CompletionRequest& request, CallControl control, Completion done) {
-    serving_.store(true);
-    const Completers* completers = nullptr;
+std::optional<ServerCore::CompletionTarget> ServerCore::completion_target(const CompletionRequest& request) const {
     if (request.kind == CompletionRefKind::prompt) {
         const auto found = prompt_by_name_.find(request.reference);
         // A prompt that is off is one the server lacks.
-        if (found == prompt_by_name_.end() || !prompt_on_[found->second].load()) {
-            done(FeatureOutcome(InvalidRequest{"unknown prompt: " + request.reference}));
-            return;
-        }
-        completers = &prompt_completers_[found->second];
-    } else {
-        // A resource template is named by its text; a resource at a fixed URI is a reference too, with nothing to
-        // complete.
-        const auto found =
-            std::find_if(template_defs_.begin(), template_defs_.end(),
-                         [&](const ResourceTemplateDefinition& candidate) { return candidate.uri_template == request.reference; });
-        const auto fixed = resource_by_uri_.find(request.reference);
-        const auto index = static_cast<std::size_t>(found - template_defs_.begin());
-        if (found != template_defs_.end() && template_on_[index].load()) {
-            completers = &template_completers_[index];
-        } else if (fixed == resource_by_uri_.end() || !resource_on_[fixed->second].load()) {
-            // A template or a resource that is off is one the server lacks.
-            done(FeatureOutcome(InvalidRequest{"unknown resource reference: " + request.reference}));
-            return;
-        }
+        if (found == prompt_by_name_.end() || !prompt_on_[found->second].load()) return std::nullopt;
+        return CompletionTarget{&prompt_completers_[found->second], prompt_entries_[found->second].get()};
     }
+    // A resource template is named by its text; a resource at a fixed URI is a reference too, with nothing to
+    // complete.
+    const auto found =
+        std::find_if(template_defs_.begin(), template_defs_.end(),
+                     [&](const ResourceTemplateDefinition& candidate) {
+                         return candidate.uri_template == request.reference;
+                     });
+    const auto fixed = resource_by_uri_.find(request.reference);
+    const auto index = static_cast<std::size_t>(found - template_defs_.begin());
+    if (found != template_defs_.end() && template_on_[index].load()) {
+        return CompletionTarget{&template_completers_[index], template_slots_[index].entry.get()};
+    }
+    // A template or a resource that is off is one the server lacks.
+    if (fixed == resource_by_uri_.end() || !resource_on_[fixed->second].load()) return std::nullopt;
+    return CompletionTarget{nullptr, resource_slots_[fixed->second].entry.get()};
+}
+
+std::span<const std::string> ServerCore::completion_scopes(const CompletionRequest& request) const {
+    const auto target = completion_target(request);
+    if (!target) return {};
+    return target->owner->scopes;
+}
+
+void ServerCore::complete(const CompletionRequest& request, CallControl control, Completion done) {
+    serving_.store(true);
+    const auto target = completion_target(request);
+    if (!target) {
+        done(FeatureOutcome(InvalidRequest{request.kind == CompletionRefKind::prompt
+                                               ? "unknown prompt: " + request.reference
+                                               : "unknown resource reference: " + request.reference}));
+        return;
+    }
+    if (!permits(control, target->owner->scopes)) {
+        done(HostFailure{"the authorization lacks a scope of " + target->owner->label()});
+        return;
+    }
+    const Completers* completers = target->completers;
     const auto completer = completers == nullptr ? std::nullopt : std::optional(completers->find(request.argument));
     if (!completer || *completer == completers->end()) {
         done(FeatureOutcome(CompletionResult{}));
@@ -1480,6 +1584,7 @@ const std::string& Context::revision() const noexcept { return control_.profile(
 profile::Era Context::era() const noexcept { return control_.profile().era(); }
 const json& Context::client_info() const noexcept { return control_.client_info(); }
 const json& Context::client_capabilities() const noexcept { return control_.client_capabilities(); }
+const Authorization* Context::authorization() const noexcept { return control_.authorization(); }
 bool Context::client_supports(const InputRequest& request) const { return control_.client_supports(request); }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1537,6 +1642,11 @@ ToolHandle ToolHandle::icons(std::vector<Icon> list) const {
     return *this;
 }
 
+ToolHandle ToolHandle::scopes(std::vector<std::string> list) const {
+    core_->set_tool_scopes(index_, std::move(list));
+    return *this;
+}
+
 ToolHandle ToolHandle::enable(bool on) const {
     core_->enable_tool(index_, on);
     return *this;
@@ -1573,6 +1683,11 @@ void PromptHandle::add_completer(std::string argument, detail::FeatureBody<Compl
 
 void ResourceTemplateHandle::add_completer(std::string variable, detail::FeatureBody<CompletionResult> body) const {
     core_->add_template_completer(index_, std::move(variable), std::move(body));
+}
+
+PromptHandle PromptHandle::scopes(std::vector<std::string> list) const {
+    core_->set_prompt_scopes(index_, std::move(list));
+    return *this;
 }
 
 PromptHandle PromptHandle::enable(bool on) const {
@@ -1638,6 +1753,11 @@ ResourceHandle ResourceHandle::cache(CacheHints hints) const {
     return *this;
 }
 
+ResourceHandle ResourceHandle::scopes(std::vector<std::string> list) const {
+    core_->set_resource_scopes(index_, std::move(list));
+    return *this;
+}
+
 ResourceHandle ResourceHandle::enable(bool on) const {
     core_->enable_resource(index_, on);
     return *this;
@@ -1687,6 +1807,11 @@ ResourceTemplateHandle ResourceTemplateHandle::cache(CacheHints hints) const {
     return *this;
 }
 
+ResourceTemplateHandle ResourceTemplateHandle::scopes(std::vector<std::string> list) const {
+    core_->set_template_scopes(index_, std::move(list));
+    return *this;
+}
+
 ResourceTemplateHandle ResourceTemplateHandle::enable(bool on) const {
     core_->enable_template(index_, on);
     return *this;
@@ -1720,6 +1845,10 @@ std::variant<std::unique_ptr<Session>, CreateError> Server::connect_tagged(profi
 std::span<const ToolDefinition> Server::tools() const { return core_->tools(); }
 
 bool Server::tool_enabled(std::size_t index) const { return core_->tool_enabled(index); }
+
+std::span<const std::string> Server::tool_scopes(std::size_t index) const { return core_->tool_scopes(index); }
+
+bool Server::declares_scopes() const { return core_->declares_scopes(); }
 
 ChangeSupport Server::change_support() const { return core_->change_support(); }
 

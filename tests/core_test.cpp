@@ -2397,7 +2397,8 @@ TEST(Units, RefusalNamesAreStatusReasons) {
          {RefusalReason::parse_error, RefusalReason::invalid_request, RefusalReason::too_long, RefusalReason::too_deep,
           RefusalReason::header_mismatch, RefusalReason::unsupported_version, RefusalReason::invalid_request_meta,
           RefusalReason::unsupported_version_header, RefusalReason::method_not_found,
-          RefusalReason::missing_connection, RefusalReason::missing_client_capability}) {
+          RefusalReason::missing_connection, RefusalReason::missing_client_capability,
+          RefusalReason::insufficient_scope}) {
         EXPECT_NE(std::find(declared.begin(), declared.end(), neomcp::to_string(reason)), declared.end())
             << neomcp::to_string(reason);
     }

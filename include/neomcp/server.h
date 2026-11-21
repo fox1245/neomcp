@@ -150,6 +150,20 @@
 // thread that reports a change never waits for a client; a session whose client reads slowly drops the notification
 // when its output queue is full. When the server shuts down, every open subscription ends gracefully.
 //
+// Authorization. A tool, resource, template or prompt may declare the scopes a request for it needs, all of them:
+//
+//   server.tool<DeleteArgs>("delete_folder", "Delete a folder", handler).scopes({"files:write"});
+//
+// A transport that authorizes its requests (an OAuth resource server) gives the session the identity it validated,
+// and a request whose authorization lacks a declared scope is refused before anything of the item runs
+// (neomcp/authorization.h says how). ServerOptions::scope_implications declares which scopes imply others ("admin"
+// implies "files:write"); nothing else does: scopes are opaque, so `files:*` implies nothing that is not declared. A
+// completion needs the scopes of the prompt or template it completes for, and asking to be told of a resource's
+// updates those of reading it. Lists are not filtered: every enabled item is listed whatever the scopes. A handler
+// reads who asked through Context::authorization; it never gets the token. Where nothing is authorized (stdio, in
+// process) there is no identity, and declared scopes are not checked: an item that must be protected is served only
+// over a transport that authorizes every request.
+//
 // Threads. Plain-function handlers run on a pool of worker threads the server owns, bounded by
 // ServerOptions::max_concurrent_calls and max_pending_calls. Coroutine handlers run on one thread the server owns,
 // which drives an asio::io_context, and are bounded by max_coroutine_calls; a coroutine handler must not block, or
@@ -168,6 +182,7 @@
 #include <variant>
 #include <vector>
 
+#include "neomcp/authorization.h"
 #include "neomcp/change.h"
 #include "neomcp/describe.h"
 #include "neomcp/feature_host.h"
@@ -290,6 +305,11 @@ struct ServerOptions {
     // Told, with no lock held, after the number of sessions registered for the server's changes changed; read
     // Server::change_watchers() for it. For tests and diagnostics; it must not block.
     std::function<void()> on_change_watchers{};
+
+    // ---- Authorization (see "Authorization" above)
+    // Which granted scopes imply which others, for the scopes items declare; closed when made. Empty: a scope is met
+    // only by itself.
+    ScopeImplications scope_implications{};
 };
 
 class Server;
@@ -308,6 +328,10 @@ public:
     // `_meta` of the tool; an object, else std::invalid_argument.
     ToolHandle meta(json value) const;
     ToolHandle icons(std::vector<Icon> list) const;
+    // The scopes a call of the tool needs, all of them (see "Authorization" in the Server's description); replaces what
+    // was set before. Not written to the wire. Throws std::invalid_argument, naming the tool, for one that is not a
+    // scope-token (neomcp/authorization.h).
+    ToolHandle scopes(std::vector<std::string> list) const;
     // Switches the tool on or off (see Server). Unlike the setters it may be called at any time, from any thread.
     ToolHandle enable(bool on = true) const;
     bool enabled() const;
@@ -338,6 +362,8 @@ public:
     // The caching hints of this resource's reads, where the revision has them, instead of
     // ServerOptions::resource_read_cache.
     ResourceHandle cache(CacheHints hints) const;
+    // The scopes a read of the resource needs, and asking to be told of its updates (see ToolHandle::scopes).
+    ResourceHandle scopes(std::vector<std::string> list) const;
     // Switches the resource on or off (see Server). May be called at any time, from any thread. A read of a URI whose
     // resource is off is served by a template that matches it, if one is on.
     ResourceHandle enable(bool on = true) const;
@@ -363,6 +389,9 @@ public:
     ResourceTemplateHandle icons(std::vector<Icon> list) const;
     ResourceTemplateHandle meta(json value) const;
     ResourceTemplateHandle cache(CacheHints hints) const;
+    // The scopes a read of a resource the template serves needs, and a completion of its variables (see
+    // ToolHandle::scopes).
+    ResourceTemplateHandle scopes(std::vector<std::string> list) const;
     // Switches the template on or off (see Server), which changes the list of templates; its completers are off with
     // it. May be called at any time, from any thread.
     ResourceTemplateHandle enable(bool on = true) const;
@@ -390,6 +419,8 @@ public:
     PromptHandle icons(std::vector<Icon> list) const;
     // `_meta` of the prompt; an object, else std::invalid_argument.
     PromptHandle meta(json value) const;
+    // The scopes a request for the prompt needs, and a completion of its arguments (see ToolHandle::scopes).
+    PromptHandle scopes(std::vector<std::string> list) const;
     // Switches the prompt on or off (see Server); its completers are off with it. May be called at any time, from any
     // thread.
     PromptHandle enable(bool on = true) const;
@@ -475,6 +506,7 @@ public:
     // ToolHost. The first use ends registration.
     std::span<const ToolDefinition> tools() const override;
     bool tool_enabled(std::size_t index) const override;
+    std::span<const std::string> tool_scopes(std::size_t index) const override;
     void call(const CallRequest& request, CallControl control, Completion done) override;
     ChangeSupport change_support() const override;
     ChangeRegistration watch(std::weak_ptr<ChangeListener> listener) override;
@@ -485,6 +517,10 @@ public:
     void notify_resource_updated(std::string uri);
     // The sessions registered for the server's changes now. For tests and diagnostics.
     std::size_t change_watchers() const;
+
+    // Whether any tool, resource, template or prompt declares scopes: a transport that serves without authorizing its
+    // requests can refuse to start then, so that a forgotten option cannot leave a protected item open.
+    bool declares_scopes() const;
 
     const ServerOptions& options() const noexcept;
 

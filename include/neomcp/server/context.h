@@ -6,6 +6,7 @@
 #include <stop_token>
 #include <string>
 
+#include "neomcp/authorization.h"
 #include "neomcp/input.h"
 #include "neomcp/json.h"
 #include "neomcp/model.h"
@@ -73,6 +74,9 @@ public:
     // From the handshake on a connection that has one, else from the request; null and {} when not given.
     const json& client_info() const noexcept;
     const json& client_capabilities() const noexcept;
+    // Who asked, as the transport validated it (see neomcp/authorization.h): read only, valid as long as this Context,
+    // never the token. Null where nothing is authorized (stdio, in process).
+    const Authorization* authorization() const noexcept;
 
     // When the handler asked for input before (it returned neomcp::InputRequired): the answers of the last round,
     // by the keys it chose, and the state it gave with its requests. Both empty on the first entry. Only the last

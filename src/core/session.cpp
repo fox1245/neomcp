@@ -84,6 +84,7 @@ std::string_view to_string(RefusalReason reason) noexcept {
         case RefusalReason::method_not_found: return "method_not_found";
         case RefusalReason::missing_connection: return "missing_connection";
         case RefusalReason::missing_client_capability: return "missing_client_capability";
+        case RefusalReason::insufficient_scope: return "insufficient_scope";
     }
     return {};
 }
@@ -121,6 +122,15 @@ constexpr std::string_view limit_reason = "limit";
 // client sees the same refusal from any server.
 constexpr std::string_view invalid_state_message = "Invalid or expired requestState";
 constexpr std::string_view invalid_state_reason = "invalid_request_state";
+// The methods whose items may declare scopes, as the handlers' table names them.
+constexpr std::string_view tools_call_method = "tools/call";
+constexpr std::string_view resources_read_method = "resources/read";
+constexpr std::string_view completion_method = "completion/complete";
+constexpr std::string_view prompts_get_method = "prompts/get";
+// The answer to a request refused for a scope its authorization lacks, for a transport that sends the line; the
+// transport that authorizes answers with its own challenge instead.
+constexpr std::string_view insufficient_scope_message =
+    "Invalid Request: the authorization lacks a scope the request needs";
 
 const json* member(const json& object, std::string_view name) {
     const auto* members = object.get_ptr<const json::object_t*>();
@@ -209,6 +219,8 @@ struct Claims {
     std::string_view version_name;   // the name of the version header, as a profile spells it
     std::string_view version;        // the value of the first such field
     const Served* named = nullptr;   // the served profile of the revision it names; null when it names none
+    // What the transport found when it validated the request's credentials; null when it authorizes nothing.
+    std::shared_ptr<const Authorization> authorization;
 };
 
 // Where a request's client and log level come from.
@@ -291,6 +303,7 @@ struct CallState {
     Batch batch;
     std::size_t batch_index = 0;
     CallSubject subject;
+    std::shared_ptr<const Authorization> authorization;  // the unit's; null when it came without one
 
     // Guarded by the core's mutex.
     bool active = true;      // false once answered, cancelled or closed
@@ -335,6 +348,7 @@ struct Answer {
     json message;
     RefusalReason refusal = RefusalReason::none;
     profile::ProfilePtr profile;  // the profile that governs it; null when none is known
+    std::vector<std::string> required_scopes{};  // with RefusalReason::insufficient_scope: what the request lacks
 };
 
 // What handling one message gave.
@@ -354,7 +368,8 @@ public:
                                                                           OutputSink sink);
 
     // `unit` empty: the input belongs to no unit.
-    bool receive(std::optional<UnitId> unit, std::string_view input, std::span<const HeaderField> headers);
+    bool receive(std::optional<UnitId> unit, std::string_view input, std::span<const HeaderField> headers,
+                 std::shared_ptr<const Authorization> authorization);
     void abandon(UnitId unit);
     void close();
     bool idle() const;
@@ -438,7 +453,7 @@ private:
     // ---- the change feed
     std::optional<Answer> on_feed(Message& request, const Served& served, Origin& origin, const Place& place);
     std::optional<Answer> on_watch(const Message& request, const FeedRequest& asked, const Served& served,
-                                   const Origin& origin);
+                                   const Origin& origin, const Place& place);
     std::optional<Answer> on_listen(const Message& request, const FeedRequest& asked, const Served& served,
                                     Origin& origin, const Place& place);
     // The outputs that end a subscription the server tears down, in order; with mutex_ held.
@@ -448,6 +463,23 @@ private:
     // The line of a notification of the feed under `served`; empty when the profile has no such notification.
     std::optional<std::string> feed_line(const Served& served, FeedMessage message) const;
     Answer limit_refusal(const RequestId& id, std::string message, const Served& served) const;
+
+    // ---- scopes (neomcp/authorization.h)
+    // Whether the scopes items declare are checked for the requests of a unit: only where it came with an
+    // authorization. Without one there is no identity to check, and nothing is.
+    static bool checks_scopes(const Claims& claims) noexcept;
+    // The refusal of a request whose authorization does not meet `required` (what `find` gives, asked of the host only
+    // when scopes are checked); empty when it is met or not checked. A host that throws refuses the request with an
+    // internal error.
+    template <class Find>
+    std::optional<Answer> scope_refusal(const RequestId& id, const Place& place, const Served& served,
+                                        Find&& find) const;
+    // The scopes the item a request asks for declares, found through the host as its handler finds the item; empty
+    // when it declares none, or nothing enabled is found. Throws what the host throws.
+    std::vector<std::string> requirement_of(const Message& request, const Served& served) const;
+    // Before any request of a batch is handled: the refusal of the whole batch when one of its requests lacks a scope.
+    std::optional<Answer> batch_scope_refusal(const json::array_t& items, const Claims& claims, const Served& served,
+                                              const profile::ProfilePtr& profile) const;
 
     // ---- headers
     Claims claims_of(std::span<const HeaderField> fields) const;
@@ -497,7 +529,8 @@ private:
     // What a request carries about an earlier round of its call, read under the call's input mechanism: the answers
     // and the host's state go into `subject.request`. The answer when the state is refused or an answer is
     // malformed; empty otherwise.
-    std::optional<Answer> take_retry(const Message& request, const Served& served, CallSubject& subject) const;
+    std::optional<Answer> take_retry(const Message& request, const Served& served, const Place& place,
+                                     CallSubject& subject) const;
     Answer state_refusal(const RequestId& id, RequestStateProblem problem, const std::string& method) const;
     // The call asks for input: its result asks, or its requests go to the client and it waits.
     void ask(const std::shared_ptr<CallState>& call, InputRequired asked);
@@ -620,6 +653,28 @@ CompletionState::~CompletionState() {
         if (auto core = call->core.lock()) core->complete_dropped(call);
     } catch (...) {
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Scopes
+
+bool SessionCore::checks_scopes(const Claims& claims) noexcept { return claims.authorization != nullptr; }
+
+template <class Find>
+std::optional<Answer> SessionCore::scope_refusal(const RequestId& id, const Place& place, const Served& served,
+                                                 Find&& find) const {
+    if (!checks_scopes(*place.claims)) return std::nullopt;
+    std::vector<std::string> missing;
+    try {
+        missing = missing_scopes(place.claims->authorization->scopes, find(), options_.scope_implications);
+    } catch (...) {
+        return Answer{make_error(id, error_code::internal_error,
+                                 "Internal error: the scopes the request needs could not be found"),
+                      RefusalReason::none, served.profile};
+    }
+    if (missing.empty()) return std::nullopt;
+    return Answer{make_error(id, error_code::invalid_request, std::string(insufficient_scope_message)),
+                  RefusalReason::insufficient_scope, served.profile, std::move(missing)};
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -807,7 +862,7 @@ std::variant<std::shared_ptr<SessionCore>, CreateError> SessionCore::create(Sess
 // Input
 
 bool SessionCore::receive(std::optional<UnitId> number, std::string_view input,
-                          std::span<const HeaderField> headers) {
+                          std::span<const HeaderField> headers, std::shared_ptr<const Authorization> authorization) {
     Unit unit;
     {
         const std::lock_guard<std::mutex> lock(mutex_);
@@ -824,7 +879,8 @@ bool SessionCore::receive(std::optional<UnitId> number, std::string_view input,
     std::exception_ptr failure;
     bool awaits = false;
     try {
-        const Claims claims = claims_of(headers);
+        Claims claims = claims_of(headers);
+        claims.authorization = std::move(authorization);
         awaits = read(input, unit, claims);
         if (unit && !awaits) end_unit(unit, Writer::reader);
     } catch (...) {
@@ -876,12 +932,14 @@ bool SessionCore::receive_array(json value, const Unit& unit, const Claims& clai
         return true;
     }
     const BatchMechanism* mechanism = nullptr;
+    const Served* served = nullptr;
     profile::ProfilePtr profile;
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         if (connection_) {
-            mechanism = connection_->served->batch;
-            profile = connection_->served->profile;
+            served = connection_->served;
+            mechanism = served->batch;
+            profile = served->profile;
         }
     }
     if (mechanism == nullptr || !mechanism->accepts_arrays()) {
@@ -894,6 +952,14 @@ bool SessionCore::receive_array(json value, const Unit& unit, const Claims& clai
         emit_refusal(unit, claims, error_code::invalid_request, "Invalid Request: the batch is empty",
                      RefusalReason::invalid_request);
         return true;
+    }
+    // One request that lacks a scope refuses the whole batch, before any of its requests runs; the scopes are checked
+    // again as each request is handled.
+    if (checks_scopes(claims)) {
+        if (auto refusal = batch_scope_refusal(items, claims, *served, profile)) {
+            emit_answer(std::move(*refusal), unit, claims, Writer::reader);
+            return true;
+        }
     }
     auto batch = std::make_shared<BatchState>();
     batch->mechanism = mechanism;
@@ -1355,6 +1421,7 @@ std::shared_ptr<CallState> SessionCore::begin_call(CallKind kind, const RequestI
     call->unit = place.unit;
     call->batch = place.batch;
     call->batch_index = place.index;
+    call->authorization = place.claims->authorization;
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         if (closed_) return nullptr;
@@ -1408,6 +1475,9 @@ std::optional<Answer> SessionCore::on_tools_call(Message& request, const Served&
     if (tool == tools.end()) {
         return served_answer(make_error(id, error_code::invalid_params, "Unknown tool: " + *tool_name), served);
     }
+    // The scopes of the tool found, before anything else about the call is looked at.
+    const auto tool_index = static_cast<std::size_t>(tool - tools.begin());
+    if (auto refusal = scope_refusal(id, place, served, [&] { return host_.tool_scopes(tool_index); })) return refusal;
 
     // What the headers claim about the arguments is checked before the arguments are checked against the schema: a
     // header that contradicts the body is refused as such, whatever else is wrong with the call.
@@ -1459,7 +1529,7 @@ std::optional<Answer> SessionCore::on_tools_call(Message& request, const Served&
     call_request.arguments = std::move(arguments);
     if (meta != nullptr) call_request.meta = *meta;
     subject.request = std::move(call_request);
-    if (auto refusal = take_retry(request, served, subject)) return refusal;
+    if (auto refusal = take_retry(request, served, place, subject)) return refusal;
 
     auto call = begin_call(CallKind::tool, id, served, origin, place, std::move(progress_token), std::move(subject));
     if (!call) return std::nullopt;
@@ -1547,6 +1617,8 @@ std::optional<Answer> SessionCore::on_resources_read(Message& request, const Ser
     auto token = progress_token_of(request, served);
     if (auto* refusal = std::get_if<Answer>(&token)) return std::move(*refusal);
 
+    if (auto refusal = scope_refusal(id, place, served, [&] { return host->read_scopes(*text); })) return refusal;
+
     ReadRequest read;
     read.uri = *text;
     if (const json* meta = member(request.params, "_meta")) read.meta = *meta;
@@ -1554,7 +1626,7 @@ std::optional<Answer> SessionCore::on_resources_read(Message& request, const Ser
     subject.method = request.method;
     subject.name = *text;
     subject.request = std::move(read);
-    if (auto refusal = take_retry(request, served, subject)) return refusal;
+    if (auto refusal = take_retry(request, served, place, subject)) return refusal;
 
     auto call = begin_call(CallKind::resource_read, id, served, origin, place, std::move(std::get<json>(token)),
                            std::move(subject));
@@ -1621,6 +1693,9 @@ std::optional<Answer> SessionCore::on_completion(Message& request, const Served&
                 completion.resolved.emplace(name, *text);
             }
         }
+    }
+    if (auto refusal = scope_refusal(id, place, served, [&] { return host->completion_scopes(completion); })) {
+        return refusal;
     }
     auto token = progress_token_of(request, served);
     if (auto* refusal = std::get_if<Answer>(&token)) return std::move(*refusal);
@@ -1698,6 +1773,10 @@ std::optional<Answer> SessionCore::on_prompts_get(Message& request, const Served
             make_error(id, error_code::internal_error, "Internal error: the prompts could not be listed"), served);
     }
     if (prompt == prompts.end()) return invalid("unknown prompt: " + get.name);
+    const auto prompt_index = static_cast<std::size_t>(prompt - prompts.begin());
+    if (auto refusal = scope_refusal(id, place, served, [&] { return host->prompt_scopes(prompt_index); })) {
+        return refusal;
+    }
     for (const auto& argument : prompt->arguments) {
         if (argument.required && get.arguments.find(argument.name) == get.arguments.end()) {
             return invalid("missing required argument: " + argument.name);
@@ -1712,7 +1791,7 @@ std::optional<Answer> SessionCore::on_prompts_get(Message& request, const Served
     subject.name = get.name;
     for (const auto& [argument, value] : get.arguments) subject.arguments[argument] = value;
     subject.request = std::move(get);
-    if (auto refusal = take_retry(request, served, subject)) return refusal;
+    if (auto refusal = take_retry(request, served, place, subject)) return refusal;
 
     auto call = begin_call(CallKind::prompt_get, id, served, origin, place, std::move(std::get<json>(token)),
                            std::move(subject));
@@ -1770,20 +1849,24 @@ std::optional<Answer> SessionCore::on_feed(Message& request, const Served& serve
     const FeedRequest& asked = std::get<FeedRequest>(read);
     switch (asked.action) {
         case FeedRequest::Action::watch:
-        case FeedRequest::Action::unwatch: return on_watch(request, asked, served, origin);
+        case FeedRequest::Action::unwatch: return on_watch(request, asked, served, origin, place);
         case FeedRequest::Action::listen: return on_listen(request, asked, served, origin, place);
     }
     return method_not_found(request, served);
 }
 
 std::optional<Answer> SessionCore::on_watch(const Message& request, const FeedRequest& asked, const Served& served,
-                                            const Origin& origin) {
+                                            const Origin& origin, const Place& place) {
     const RequestId& id = *request.id;
     // Watching a resource is offered where the session declared its updates, on a connection the feed delivers to.
     ResourceHost* resources = host_.resource_host();
     if (served.feed->delivery() != FeedDelivery::connection || !origin.connection || resources == nullptr ||
         !reported().resource_updates) {
         return method_not_found(request, served);
+    }
+    // Being told of a resource's updates needs what reading it needs.
+    if (auto refusal = scope_refusal(id, place, served, [&] { return resources->read_scopes(asked.uri); })) {
+        return refusal;
     }
     if (asked.action == FeedRequest::Action::watch) {
         // Bounded before the URI reaches the host, or an answer that would repeat it. A longer URI is never watched,
@@ -1993,6 +2076,94 @@ void SessionCore::ending_outputs(const std::shared_ptr<CallState>& call, std::ve
                                 call->unit != nullptr, RefusalReason::none, call->profile);
     output.long_lived = true;
     out.push_back(Queued{std::move(output), nullptr, call->unit, true});
+}
+
+std::vector<std::string> SessionCore::requirement_of(const Message& request, const Served& served) const {
+    const auto text_of = [](const json* value) -> const std::string* {
+        return value == nullptr ? nullptr : value->get_ptr<const std::string*>();
+    };
+    const auto copied = [](std::span<const std::string> scopes) {
+        return std::vector<std::string>(scopes.begin(), scopes.end());
+    };
+    if (request.method == tools_call_method) {
+        const std::string* name = text_of(member(request.params, "name"));
+        if (name == nullptr) return {};
+        const std::span<const ToolDefinition> tools = host_.tools();
+        for (std::size_t i = 0; i < tools.size(); ++i) {
+            if (tools[i].name != *name) continue;
+            if (!host_.tool_enabled(i)) return {};
+            return copied(host_.tool_scopes(i));
+        }
+        return {};
+    }
+    if (request.method == prompts_get_method) {
+        PromptHost* prompts = host_.prompt_host();
+        const std::string* name = text_of(member(request.params, "name"));
+        if (prompts == nullptr || name == nullptr) return {};
+        const std::span<const PromptDefinition> defined = prompts->prompts();
+        for (std::size_t i = 0; i < defined.size(); ++i) {
+            if (defined[i].name != *name) continue;
+            if (!prompts->prompt_enabled(i)) return {};
+            return copied(prompts->prompt_scopes(i));
+        }
+        return {};
+    }
+    if (request.method == resources_read_method) {
+        ResourceHost* resources = host_.resource_host();
+        const std::string* uri = text_of(member(request.params, "uri"));
+        if (resources == nullptr || uri == nullptr) return {};
+        return copied(resources->read_scopes(*uri));
+    }
+    if (request.method == completion_method) {
+        CompletionHost* completions = host_.completion_host();
+        const json* ref = member(request.params, "ref");
+        if (completions == nullptr || ref == nullptr) return {};
+        const std::string* type = text_of(member(*ref, "type"));
+        if (type == nullptr) return {};
+        CompletionRequest completion;
+        const std::string* reference = nullptr;
+        if (*type == prompt_reference_type) {
+            completion.kind = CompletionRefKind::prompt;
+            reference = text_of(member(*ref, "name"));
+        } else if (*type == resource_reference_type) {
+            completion.kind = CompletionRefKind::resource;
+            reference = text_of(member(*ref, "uri"));
+        }
+        if (reference == nullptr) return {};
+        completion.reference = *reference;
+        return copied(completions->completion_scopes(completion));
+    }
+    if (served.feed->serves(request.method)) {
+        auto read = served.feed->read(request);
+        const auto* asked = std::get_if<FeedRequest>(&read);
+        ResourceHost* resources = host_.resource_host();
+        if (asked == nullptr || resources == nullptr || asked->action == FeedRequest::Action::listen) return {};
+        return copied(resources->read_scopes(asked->uri));
+    }
+    return {};
+}
+
+std::optional<Answer> SessionCore::batch_scope_refusal(const json::array_t& items, const Claims& claims,
+                                                       const Served& served, const profile::ProfilePtr& profile) const {
+    std::vector<std::string> missing;
+    try {
+        for (const json& item : items) {
+            const Message message = classify(item);
+            if (message.kind != MessageKind::request) continue;
+            const std::vector<std::string> required = requirement_of(message, served);
+            const auto lacked = missing_scopes(claims.authorization->scopes, required, options_.scope_implications);
+            for (const std::string& scope : lacked) {
+                if (std::find(missing.begin(), missing.end(), scope) == missing.end()) missing.push_back(scope);
+            }
+        }
+    } catch (...) {
+        return Answer{make_error(std::nullopt, error_code::internal_error,
+                                 "Internal error: the scopes the batch needs could not be found"),
+                      RefusalReason::none, profile};
+    }
+    if (missing.empty()) return std::nullopt;
+    return Answer{make_error(std::nullopt, error_code::invalid_request, std::string(insufficient_scope_message)),
+                  RefusalReason::insufficient_scope, profile, std::move(missing)};
 }
 
 Answer SessionCore::limit_refusal(const RequestId& id, std::string message, const Served& served) const {
@@ -2407,7 +2578,8 @@ Answer SessionCore::state_refusal(const RequestId& id, RequestStateProblem probl
                   RefusalReason::none, nullptr};
 }
 
-std::optional<Answer> SessionCore::take_retry(const Message& request, const Served& served, CallSubject& subject) const {
+std::optional<Answer> SessionCore::take_retry(const Message& request, const Served& served, const Place& place,
+                                              CallSubject& subject) const {
     const RequestId& id = *request.id;
     auto read = served.input->retry(request, *served.profile);
     if (const auto* error = std::get_if<RequestError>(&read)) {
@@ -2457,7 +2629,8 @@ std::optional<Answer> SessionCore::take_retry(const Message& request, const Serv
     if (const auto* problem = std::get_if<RequestStateProblem>(&opened)) return refuse(*problem);
     StateClaims& claims = std::get<StateClaims>(opened);
     const std::string digest = arguments_digest(subject.arguments);
-    const StateBinding binding{subject.method, subject.name, digest, options_.server_info.name, std::string_view()};
+    const std::string principal = principal_digest(place.claims->authorization.get());
+    const StateBinding binding{subject.method, subject.name, digest, options_.server_info.name, principal};
     if (const auto problem = check_claims(claims, binding, now())) return refuse(*problem);
 
     // Each answer asked for must have the shape of its kind; answers to keys that were not asked are ignored.
@@ -2579,6 +2752,7 @@ void SessionCore::ask(const std::shared_ptr<CallState>& call, InputRequired aske
         claims.subject = call->subject.name;
         claims.arguments = arguments_digest(call->subject.arguments);
         claims.server = options_.server_info.name;
+        claims.principal = principal_digest(call->authorization.get());
         claims.round = call->subject.round + 1;
         claims.state = std::move(asked.state);
         json body = mechanism.asking_result(std::move(requests), sealer_->seal(claims));
@@ -2905,10 +3079,10 @@ void SessionCore::conform_id(json& message, const profile::ProfilePtr& client) c
 
 void SessionCore::emit_answer(Answer answer, const Unit& unit, const Claims& claims, Writer writer) {
     conform_id(answer.message, client_profile(unit, &claims));
-    emit(Queued{make_output(serialize(answer.message), OutputKind::response, unit != nullptr, answer.refusal,
-                            std::move(answer.profile)),
-                nullptr, unit},
-         writer);
+    Output output = make_output(serialize(answer.message), OutputKind::response, unit != nullptr, answer.refusal,
+                                std::move(answer.profile));
+    output.required_scopes = std::move(answer.required_scopes);
+    emit(Queued{std::move(output), nullptr, unit}, writer);
 }
 
 void SessionCore::emit_refusal(const Unit& unit, const Claims& claims, int code, std::string message,
@@ -3153,12 +3327,13 @@ Session::~Session() {
 
 void Session::receive(std::string_view line) {
     const auto core = core_;  // the sink may destroy the session while this runs
-    core->receive(std::nullopt, line, {});
+    core->receive(std::nullopt, line, {}, nullptr);
 }
 
-bool Session::receive(UnitId unit, std::string_view input, std::span<const HeaderField> headers) {
+bool Session::receive(UnitId unit, std::string_view input, std::span<const HeaderField> headers,
+                      std::shared_ptr<const Authorization> authorization) {
     const auto core = core_;
-    return core->receive(unit, input, headers);
+    return core->receive(unit, input, headers, std::move(authorization));
 }
 
 void Session::abandon(UnitId unit) {
@@ -3201,6 +3376,7 @@ void InputWait::expire() const {
     if (auto core = state_->core.lock()) core->expire(state_);
 }
 const json& CallControl::client_info() const noexcept { return state_->client->info; }
+const Authorization* CallControl::authorization() const noexcept { return state_->authorization.get(); }
 const json& CallControl::client_capabilities() const noexcept { return state_->client->capabilities; }
 
 void Completion::operator()(CallOutcome outcome) const {

@@ -58,6 +58,14 @@ public:
     // the updates of. Thread-safe. Default: whether an enabled resource of resources() has exactly this URI (a host
     // with templates overrides it).
     virtual bool offers(std::string_view uri) const;
+    // The scopes a request about the resource at `uri` needs (a read of it, and asking to be told of its updates): the
+    // declaration of what a read of it would find now, as offers() finds it (see neomcp/authorization.h); empty when
+    // that declares none or nothing is found. The span stays valid and its contents unchanged while a session uses the
+    // host. Thread-safe. Default: none.
+    virtual std::span<const std::string> read_scopes(std::string_view uri) const {
+        static_cast<void>(uri);
+        return {};
+    }
     // Paging and caching of resources/list and resources/templates/list.
     virtual ListSettings resource_list_settings() const { return {}; }
 
@@ -86,6 +94,11 @@ public:
     virtual bool prompt_enabled(std::size_t index) const {
         static_cast<void>(index);
         return true;
+    }
+    // The scopes a request for the prompt at `index` of prompts() needs (see ToolHost::tool_scopes). Default: none.
+    virtual std::span<const std::string> prompt_scopes(std::size_t index) const {
+        static_cast<void>(index);
+        return {};
     }
     // Paging and caching of prompts/list.
     virtual ListSettings prompt_list_settings() const { return {}; }
@@ -120,6 +133,14 @@ public:
     // InvalidRequest when the reference names nothing the host offers, with a Refusal or a HostFailure. Must not block
     // for the duration of the call.
     virtual void complete(const CompletionRequest& request, CallControl control, Completion done) = 0;
+    // The scopes a completion of `request` needs: those of the prompt or the resource template (or resource) it refers
+    // to, found as complete() finds it, since completed values can tell what the item holds. Empty when that declares
+    // none or nothing is found. The span stays valid and its contents unchanged while a session uses the host.
+    // Thread-safe. Default: none.
+    virtual std::span<const std::string> completion_scopes(const CompletionRequest& request) const {
+        static_cast<void>(request);
+        return {};
+    }
 };
 
 }  // namespace neomcp

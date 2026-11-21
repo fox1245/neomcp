@@ -25,6 +25,7 @@
 #include <utility>
 #include <variant>
 
+#include "neomcp/authorization.h"
 #include "neomcp/change.h"
 #include "neomcp/input.h"
 #include "neomcp/json.h"
@@ -105,6 +106,10 @@ public:
     // From the handshake on a connection that has one, else from the request; null and {} when not given.
     const json& client_info() const noexcept;
     const json& client_capabilities() const noexcept;
+    // What the transport found when it validated the credentials of the request that started the call (see
+    // neomcp/authorization.h), for as long as the call lives; null when the call came without one (on stdio, in
+    // process). Read only, and never the token.
+    const Authorization* authorization() const noexcept;
 
     // Whether the call may ask the client for `request`: the revision can carry it and the client declared the
     // capability it needs (for an elicitation, the mode; for sampling, tools and context where the request uses
@@ -177,6 +182,12 @@ public:
     virtual bool tool_enabled(std::size_t index) const {
         static_cast<void>(index);
         return true;
+    }
+    // The scopes a call of the tool at `index` of tools() needs, all of them (see neomcp/authorization.h). The span
+    // stays valid and its contents unchanged while a session uses the host. Default: none.
+    virtual std::span<const std::string> tool_scopes(std::size_t index) const {
+        static_cast<void>(index);
+        return {};
     }
 
     // The kinds of change the host reports to the listeners registered with watch(). Default: none.

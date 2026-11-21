@@ -153,6 +153,14 @@ target_include_directories(neomcp_core_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}
 neomcp_configure_target(neomcp_core_test)
 gtest_discover_tests(neomcp_core_test DISCOVERY_TIMEOUT 120)
 
+# Authorization in the core: scope-tokens, declared implications, the principal and its digest in request state, and a
+# session that checks the scopes a host declares; the test reaches the sealing of request state.
+add_executable(neomcp_authorization_test authorization_test.cpp)
+target_link_libraries(neomcp_authorization_test PRIVATE neomcp::core GTest::gtest_main Threads::Threads)
+target_include_directories(neomcp_authorization_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+neomcp_configure_target(neomcp_authorization_test)
+gtest_discover_tests(neomcp_authorization_test DISCOVERY_TIMEOUT 120)
+
 add_executable(neomcp_wire_annotations_test wire_annotations_test.cpp)
 target_link_libraries(neomcp_wire_annotations_test PRIVATE neomcp::core GTest::gtest_main Threads::Threads)
 neomcp_configure_target(neomcp_wire_annotations_test)
@@ -226,6 +234,12 @@ add_executable(neomcp_server_form_test server_form_test.cpp)
 target_link_libraries(neomcp_server_form_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
 neomcp_configure_target(neomcp_server_form_test)
 gtest_discover_tests(neomcp_server_form_test DISCOVERY_TIMEOUT 120)
+
+# The scopes a server's items declare, checked against the authorization of each input unit.
+add_executable(neomcp_server_authorization_test server_authorization_test.cpp)
+target_link_libraries(neomcp_server_authorization_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_server_authorization_test)
+gtest_discover_tests(neomcp_server_authorization_test DISCOVERY_TIMEOUT 120)
 
 # ---- The stdio transport ---------------------------------------------------------------------------------------------
 
