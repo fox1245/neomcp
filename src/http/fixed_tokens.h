@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <set>
 #include <span>
 #include <vector>
 
@@ -15,9 +16,20 @@ namespace neomcp::http {
 struct FixedTokenTable::Entries {
     std::vector<neomcp::detail::Sha256Digest> digests;     // the digest of each entry's token
     std::vector<std::shared_ptr<const Authorization>> grants;  // what each entry grants, in the same order
+    std::set<const Authorization*> objects;                    // the objects of `grants`
 };
 
 namespace detail {
+
+// What the endpoint does with tables besides looking tokens up.
+struct FixedTokenAccess {
+    // `next`, where each entry whose digest `previous` holds with an equal grant takes the grant object of `previous`.
+    // A stream holds the grant object of the token that opened it, so its token is still in a table, with the same
+    // grant, exactly when that table holds the object: the object of an unchanged entry passes from table to table.
+    static FixedTokenTable carried(const FixedTokenTable& next, const FixedTokenTable& previous);
+    // Whether `grant` is one of the grant objects of `table`.
+    static bool holds(const FixedTokenTable& table, const Authorization* grant);
+};
 
 // The place of the digest in `digests` that `equal` finds equal to `digest`, or digests.size() when none is. Every
 // digest is compared, once each and in order, whichever matches: the time of a scan depends on the size of the table,

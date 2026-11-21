@@ -31,7 +31,7 @@ interface, and a new patch number does not.
   of items as an OAuth token's do; no protected resource metadata is served and the challenges carry no
   `resource_metadata`. The table keeps SHA-256 digests only and compares in constant time over every entry;
   `FixedTokenTable::create` refuses what it cannot serve with a `FixedTokenError`; `replace_fixed_tokens` swaps the
-  table while the server runs.
+  table while the server runs and ends the open streams of tokens that are gone or whose grants changed.
 
 ### Client
 

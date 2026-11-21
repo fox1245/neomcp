@@ -28,7 +28,8 @@
 //   lets through
 //   a token without required_scopes, or without   403, a challenge with error "insufficient_scope" and the scopes to ask
 //   the scopes an item declares                   for (as with ResourceServerOptions), the OAuth error object
-//   the endpoint is stopping                      503, a JSON-RPC error
+//
+// A request that arrives while the endpoint stops is answered 503 with a JSON-RPC error, as it is without tokens.
 //
 // The table. Tokens are kept only as their SHA-256 digests; the text of a token is never kept, and the strings the
 // application gave are overwritten once digested. A lookup computes the digest of the presented token and compares it
@@ -38,9 +39,12 @@
 //
 // Replacement. Endpoint::replace_fixed_tokens (and HttpServer::replace_fixed_tokens) swaps the whole table at once: a
 // request sees the table before or the table after, never a part of each. A token that the new table does not hold, or
-// holds with other grants, is refused, or granted what the new table says, from the next request on. A stream already
-// open (the stream of a session, a subscription) stays open until the expiry of the token that opened it, as with an
-// OAuth token that is revoked: give tokens an expiry to bound it.
+// holds with other grants, is refused, or granted what the new table says, from the next request on. Every stream open
+// with such a token ends shortly after the replacement, on the endpoint's thread, as a stream ends when its token
+// expires: the stream of a session (GET), the event stream of a request in progress, and a subscription. The client
+// opens it again and is answered with what the new table says (401 for a token that is gone). A stream of a token whose
+// entry stays the same (its subject, scopes and expiry) stays open; the entries are matched by the digests of their
+// tokens.
 #pragma once
 
 #include <chrono>
@@ -57,6 +61,10 @@
 #include "neomcp/http/resource_server.h"
 
 namespace neomcp::http {
+
+namespace detail {
+struct FixedTokenAccess;
+}  // namespace detail
 
 // One entry of the table, as the application gives it.
 struct FixedToken {
@@ -131,6 +139,7 @@ public:
     struct Entries;  // internal
 
 private:
+    friend struct detail::FixedTokenAccess;
     explicit FixedTokenTable(std::shared_ptr<const Entries> entries);
 
     std::shared_ptr<const Entries> entries_;

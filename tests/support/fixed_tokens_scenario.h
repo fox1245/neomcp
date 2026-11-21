@@ -35,11 +35,14 @@ inline FixedToken fixed(std::string token, std::string subject, std::vector<std:
     return FixedToken{std::move(token), std::move(subject), std::move(scopes), expires};
 }
 
-// An HttpServer on a loopback port with fixed tokens (required_scopes mcp:use), over the items of resource_scenario.h.
+// An HttpServer on a loopback port with fixed tokens (required_scopes mcp:use), over the items of resource_scenario.h
+// and those `more` registers.
 struct FixedHarness {
-    explicit FixedHarness(std::vector<FixedToken> tokens, std::function<void(HttpServerOptions&)> tweak = {})
+    explicit FixedHarness(std::vector<FixedToken> tokens, std::function<void(HttpServerOptions&)> tweak = {},
+                          std::function<void(Server&)> more = {})
         : server(server_options()) {
         register_items(server, items);
+        if (more) more(server);
         HttpServerOptions options = quick_options();
         http::FixedTokenOptions fixed_options;
         fixed_options.tokens = fixed_table(std::move(tokens));

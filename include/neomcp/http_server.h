@@ -114,8 +114,8 @@ public:
     // without authorization, or for a list that cannot be used.
     http::Outcome<bool> update_authorization_servers(std::vector<std::string> issuers);
 
-    // Replaces the table of fixed tokens (see http::Endpoint::replace_fixed_tokens). Fails before start(), or without
-    // fixed_tokens.
+    // Replaces the table of fixed tokens, and ends the open streams of tokens that are gone or whose grants changed
+    // (see http::Endpoint::replace_fixed_tokens). Fails before start(), or without fixed_tokens.
     http::Outcome<bool> replace_fixed_tokens(http::FixedTokenTable tokens);
 
     // Closes every session and stream (an open subscription ends gracefully, and its end is written out within the

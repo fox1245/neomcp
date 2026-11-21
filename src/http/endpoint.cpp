@@ -19,7 +19,13 @@
 // lock, and a request with the same token that arrives meanwhile joins the end of the list. Only when the list is
 // empty does the flight end and its verdict become a remembered one, so no later request overtakes a waiting one.
 // With fixed tokens there is no validator, nothing waits and nothing is remembered: the request takes the table that is
-// current (Impl::fixed_table, under gate_mutex), looks its token up outside the lock and is delivered at once.
+// current (Impl::fixed_table, under gate_mutex), looks its token up outside the lock and is delivered at once. A stream
+// holds the grant object of the token that opened it, and a replacement carries the object of every entry whose digest
+// and grant stay (FixedTokenAccess::carried), so a stream's token is still good exactly when the current table holds
+// its object. A replacement swaps the table, then a job of the timer ends every stream whose object the table no
+// longer holds (revoke_streams), as the stream of an expired token ends. A stream that opens meanwhile, for a request
+// that took the table before, is checked by a job scheduled when it opens: either the sweep finds it open, or its own
+// check runs after the swap and finds its object gone.
 //
 // Sessions nobody used. A kept entry is listed in Impl::unused, in the order it was kept, until a request names it
 // (find) or it ends; the list and the entry's place in it are guarded by Impl::mutex, so a newcomer that takes the
@@ -57,6 +63,7 @@
 
 #include "crypto/sha256.h"
 #include "http/endpoint_probe.h"
+#include "http/fixed_tokens.h"
 #include "http/resource_server.h"
 #include "http/timer.h"
 #include "neomcp/http/bearer.h"
@@ -289,6 +296,8 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
         std::deque<Feed> inputs;
         std::map<UnitId, std::shared_ptr<Exchange>> exchanges;
         std::shared_ptr<BodyStream> connection_stream;
+        // With fixed tokens: the grant of the request that opened connection_stream (meaningful while it is set).
+        std::shared_ptr<const Authorization> connection_grant;
         std::size_t active = 0;            // exchanges not released, and the connection stream
         std::uint64_t idle_generation = 0;  // a job of the idle timer acts only when it is still current
         Timer::Id idle_timer = 0;
@@ -428,6 +437,13 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
     // ---- the gate
     void authorize(Request request, Responder responder);
     void authorize_fixed(Request request, Responder responder, std::string_view token);
+    // With fixed tokens: whether the current table holds `granted` (see the top of the file); takes gate_mutex.
+    bool still_granted(const Authorization& granted);
+    // With fixed tokens: ends every stream whose grant the current table does not hold. Runs as a job of the timer.
+    void revoke_streams();
+    // With fixed tokens: the same for one stream that just opened (a job of the timer, scheduled when it opened).
+    void revoke_connection_if_gone(const std::shared_ptr<Entry>& entry, const std::shared_ptr<BodyStream>& stream);
+    void revoke_exchange_if_gone(const std::shared_ptr<Exchange>& exchange);
     void validate(const TokenKey& key, const std::shared_ptr<Flight>& flight, std::string& token);
     void settle(const TokenKey& key, const std::shared_ptr<Flight>& flight, TokenVerdict reported);
     void deliver(Waiter waiter, const Verdict& verdict);
@@ -814,6 +830,7 @@ void Endpoint::Impl::get(const Request& request, const Responder& responder,
             return;
         }
         entry->connection_stream = stream;
+        if (resource_server && resource_server->fixed_tokens) entry->connection_grant = granted;
         activate(*entry);
     }
     stream->on_close([self = weak_from_this(), weak = std::weak_ptr<Entry>(entry), raw = stream.get()] {
@@ -829,6 +846,15 @@ void Endpoint::Impl::get(const Request& request, const Responder& responder,
             const auto owner = weak.lock();
             const auto expired = opened.lock();
             if (impl && owner && expired) impl->expire_connection(owner, expired);
+        });
+    }
+    if (granted && resource_server->fixed_tokens) {
+        timer.schedule(Clock::now(), [self = weak_from_this(), weak = std::weak_ptr<Entry>(entry),
+                                      opened = std::weak_ptr<BodyStream>(stream)] {
+            const auto impl = self.lock();
+            const auto owner = weak.lock();
+            const auto checked = opened.lock();
+            if (impl && owner && checked) impl->revoke_connection_if_gone(owner, checked);
         });
     }
     if (!responder.complete(stream_response(nullptr, rules, stream))) stream->close();
@@ -1249,6 +1275,13 @@ void Endpoint::Impl::open_stream(Exchange& exchange) {
     if (exchange.timer != 0) timer.cancel(exchange.timer);
     exchange.timer = 0;
     exchange.stream = std::make_shared<BodyStream>(options.max_stream_buffer_bytes);
+    if (exchange.authorization && resource_server && resource_server->fixed_tokens) {
+        timer.schedule(Clock::now(), [self = weak_from_this(), weak = exchange.weak_from_this()] {
+            const auto impl = self.lock();
+            const auto due = weak.lock();
+            if (impl && due) impl->revoke_exchange_if_gone(due);
+        });
+    }
     Step step;
     step.kind = Step::Kind::complete;
     step.response = stream_response(&exchange, governing(exchange, nullptr), exchange.stream);
@@ -1546,6 +1579,58 @@ void Endpoint::Impl::authorize_fixed(Request request, Responder responder, std::
         }
     }
     deliver(Waiter{std::move(request), std::move(responder)}, verdict);
+}
+
+bool Endpoint::Impl::still_granted(const Authorization& granted) {
+    std::lock_guard lock(gate_mutex);
+    return detail::FixedTokenAccess::holds(fixed_table, &granted);
+}
+
+void Endpoint::Impl::revoke_streams() {
+    FixedTokenTable table;
+    {
+        std::lock_guard lock(gate_mutex);
+        table = fixed_table;
+    }
+    const auto gone = [&](const std::shared_ptr<const Authorization>& granted) {
+        return granted && !detail::FixedTokenAccess::holds(table, granted.get());
+    };
+    std::vector<std::shared_ptr<Entry>> entries;
+    {
+        std::lock_guard lock(mutex);
+        for (const auto& item : live) entries.push_back(item.second);
+    }
+    for (const std::shared_ptr<Entry>& entry : entries) {
+        std::shared_ptr<BodyStream> stream;
+        std::shared_ptr<const Authorization> opener;
+        std::vector<std::shared_ptr<Exchange>> exchanges;
+        {
+            std::lock_guard lock(entry->mutex);
+            stream = entry->connection_stream;
+            opener = entry->connection_grant;
+            for (const auto& item : entry->exchanges) exchanges.push_back(item.second);
+        }
+        if (stream && gone(opener)) expire_connection(entry, stream);
+        // Only a streaming exchange is ended; one that waits answers once, or is checked when its stream opens.
+        for (const std::shared_ptr<Exchange>& exchange : exchanges) {
+            if (gone(exchange->authorization)) expire_exchange(exchange);
+        }
+    }
+}
+
+void Endpoint::Impl::revoke_connection_if_gone(const std::shared_ptr<Entry>& entry,
+                                               const std::shared_ptr<BodyStream>& stream) {
+    std::shared_ptr<const Authorization> opener;
+    {
+        std::lock_guard lock(entry->mutex);
+        if (entry->connection_stream != stream) return;
+        opener = entry->connection_grant;
+    }
+    if (opener && !still_granted(*opener)) expire_connection(entry, stream);
+}
+
+void Endpoint::Impl::revoke_exchange_if_gone(const std::shared_ptr<Exchange>& exchange) {
+    if (exchange->authorization && !still_granted(*exchange->authorization)) expire_exchange(exchange);
 }
 
 void Endpoint::Impl::validate(const TokenKey& key, const std::shared_ptr<Flight>& flight, std::string& token) {
@@ -1948,10 +2033,17 @@ Outcome<bool> Endpoint::replace_fixed_tokens(FixedTokenTable tokens) {
         return Outcome<bool>::failure("the endpoint has no fixed tokens");
     }
     {
+        // Carried from the table it replaces, under the lock, so that two replacements at once carry one after the
+        // other.
         std::lock_guard lock(impl_->gate_mutex);
-        std::swap(impl_->fixed_table, tokens);
+        FixedTokenTable next = detail::FixedTokenAccess::carried(tokens, impl_->fixed_table);
+        tokens = std::exchange(impl_->fixed_table, std::move(next));
     }
-    // The table before is let go here, outside the lock (a request that took it still holds it).
+    // The streams of tokens that are gone end on the timer's thread, which runs no application code, and never in the
+    // caller's (a handler may replace the table). The table before is let go here, outside the lock.
+    impl_->timer.schedule(Clock::now(), [weak = std::weak_ptr<Impl>(impl_)] {
+        if (const auto impl = weak.lock()) impl->revoke_streams();
+    });
     return Outcome<bool>::success(true);
 }
 

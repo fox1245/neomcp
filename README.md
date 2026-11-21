@@ -367,9 +367,10 @@ digest of a presented token with every entry in a time that does not depend on t
 empty, duplicate or malformed token (one a client cannot send as a Bearer token), an empty subject, a value that is
 not a scope token, and more tokens or scopes than its bounds (1024 tokens and 256 scopes each by default).
 `HttpServer::replace_fixed_tokens` swaps the whole table while the server runs: a request sees the old table or the
-new one, and a token that is gone is refused from the next request on. A stream already open stays open until the
-expiry of the token that opened it, so tokens that may be removed should have one. `authorization` and `fixed_tokens`
-are not set together.
+new one, and a token that is gone is refused from the next request on. The open streams of a token that is gone, or
+whose subject, scopes or expiry changed (the stream of a session, a request's event stream, a subscription), end
+shortly after, as when a token expires; the client opens them again and gets what the new table says. Streams of
+tokens whose entries stay the same stay open. `authorization` and `fixed_tokens` are not set together.
 
 On stdio and in process there is no token and no identity: credentials come from the environment there, and declared
 scopes are not checked. A server that protects its items serves them only over HTTP with `authorization` or

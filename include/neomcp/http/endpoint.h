@@ -148,8 +148,9 @@ public:
     Outcome<bool> update_authorization_servers(std::vector<std::string> issuers);
 
     // Replaces the table of fixed tokens at once: a request sees the table before or this one, and from the next
-    // request on only the tokens of this one are accepted, with what this one grants. Thread-safe. Fails without
-    // fixed_tokens (and then nothing changes).
+    // request on only the tokens of this one are accepted, with what this one grants. The open streams of tokens that
+    // are gone, or whose grants changed, end shortly after, on the endpoint's thread (see neomcp/http/fixed_tokens.h).
+    // Thread-safe; may be called from a handler. Fails without fixed_tokens (and then nothing changes).
     Outcome<bool> replace_fixed_tokens(FixedTokenTable tokens);
 
     // Closes every session and every stream: requests waiting for an answer are answered 503, an open subscription

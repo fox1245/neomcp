@@ -118,7 +118,7 @@ and the scopes items declare as an OAuth token's do; no metadata document is pub
 Bearer challenges. The table keeps SHA-256 digests and compares a presented token's digest with every entry in
 constant time; it refuses at creation what it cannot serve (empty, duplicate or malformed tokens, empty subjects,
 values that are not scope tokens, more tokens or scopes than its bounds) with a typed error, and is replaced whole
-while the server runs. Tested over every revision the HTTP endpoint serves, under replacement while requests run, and
+while the server runs; the open streams of tokens that are gone or whose grants changed end then. Tested over every revision the HTTP endpoint serves, under replacement while requests run, and
 with the library's own client sending a static token.
 
 ## Packaging: done

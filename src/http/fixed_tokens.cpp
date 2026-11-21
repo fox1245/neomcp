@@ -1,5 +1,6 @@
 #include "http/fixed_tokens.h"
 
+#include <map>
 #include <optional>
 #include <set>
 #include <span>
@@ -102,6 +103,7 @@ std::variant<FixedTokenTable, FixedTokenError> FixedTokenTable::create(std::vect
         granted.expires = tokens[index].expires;
         entries->digests.push_back(digest);
         entries->grants.push_back(std::make_shared<const Authorization>(std::move(granted)));
+        entries->objects.insert(entries->grants.back().get());
     }
     wipe_tokens(tokens);
     return FixedTokenTable(std::move(entries));
@@ -120,5 +122,42 @@ std::shared_ptr<const Authorization> FixedTokenTable::find(std::string_view toke
 }
 
 std::size_t FixedTokenTable::size() const noexcept { return entries_->digests.size(); }
+
+namespace detail {
+
+namespace {
+
+bool same_grant(const Authorization& left, const Authorization& right) {
+    return left.issuer == right.issuer && left.subject == right.subject && left.client_id == right.client_id &&
+           left.scopes == right.scopes && left.audiences == right.audiences && left.expires == right.expires &&
+           left.not_before == right.not_before && left.claims == right.claims;
+}
+
+}  // namespace
+
+FixedTokenTable FixedTokenAccess::carried(const FixedTokenTable& next, const FixedTokenTable& previous) {
+    // The application's own tables, joined by digest: no token of a request is compared here.
+    std::map<Sha256Digest, std::size_t> before;
+    for (std::size_t at = 0; at < previous.entries_->digests.size(); ++at) {
+        before.emplace(previous.entries_->digests[at], at);
+    }
+    auto entries = std::make_shared<FixedTokenTable::Entries>();
+    entries->digests = next.entries_->digests;
+    entries->grants = next.entries_->grants;
+    for (std::size_t at = 0; at < entries->digests.size(); ++at) {
+        if (const auto found = before.find(entries->digests[at]); found != before.end()) {
+            const std::shared_ptr<const Authorization>& kept = previous.entries_->grants[found->second];
+            if (same_grant(*kept, *entries->grants[at])) entries->grants[at] = kept;
+        }
+        entries->objects.insert(entries->grants[at].get());
+    }
+    return FixedTokenTable(std::move(entries));
+}
+
+bool FixedTokenAccess::holds(const FixedTokenTable& table, const Authorization* grant) {
+    return table.entries_->objects.count(grant) != 0;
+}
+
+}  // namespace detail
 
 }  // namespace neomcp::http

@@ -390,15 +390,16 @@ foreach(scenario_name IN ITEMS token scope session bounds)
 endforeach()
 
 # The endpoint protected by a fixed table of tokens: the table on its own (which reaches the internal scan of its
-# digests), the scenarios over loopback sockets, the table replaced while requests run, and the library's own client
-# with a static token (with the HTTP client only). The scenarios share tests/support/fixed_tokens_scenario.h.
+# digests), the scenarios over loopback sockets, the table replaced while requests run, the open streams of tokens
+# when the table is replaced, and the library's own client with a static token (with the HTTP client only). The
+# scenarios share tests/support/fixed_tokens_scenario.h.
 add_executable(neomcp_http_fixed_tokens_table_test http_fixed_tokens_table_test.cpp)
 target_link_libraries(neomcp_http_fixed_tokens_table_test PRIVATE neomcp::http GTest::gtest_main)
 target_include_directories(neomcp_http_fixed_tokens_table_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 neomcp_configure_target(neomcp_http_fixed_tokens_table_test)
 gtest_discover_tests(neomcp_http_fixed_tokens_table_test DISCOVERY_TIMEOUT 120)
 
-foreach(fixed_tokens_name IN ITEMS scenario replace)
+foreach(fixed_tokens_name IN ITEMS scenario replace stream)
     add_executable(neomcp_http_fixed_tokens_${fixed_tokens_name}_test http_fixed_tokens_${fixed_tokens_name}_test.cpp)
     target_link_libraries(neomcp_http_fixed_tokens_${fixed_tokens_name}_test
         PRIVATE neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)
