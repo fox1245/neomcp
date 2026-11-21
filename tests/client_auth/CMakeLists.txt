@@ -9,6 +9,7 @@ add_executable(neomcp_client_auth_test
     registration_test.cpp
     resource_metadata_test.cpp
     server_metadata_test.cpp
+    random_input_test.cpp
     tokens_test.cpp
     url_test.cpp)
 target_link_libraries(neomcp_client_auth_test PRIVATE neomcp::client_auth neomcp::client neomcp::http_base
