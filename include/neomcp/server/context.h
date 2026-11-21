@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <stop_token>
 #include <string>
+#include <string_view>
 
 #include "neomcp/authorization.h"
 #include "neomcp/input.h"
@@ -18,6 +19,7 @@ namespace neomcp {
 namespace detail {
 class ServerCore;
 class InputRound;
+struct TaskRun;
 }  // namespace detail
 
 // Thrown by a handler to answer its call with a tool execution error: a result with `isError` whose one text block
@@ -48,9 +50,18 @@ public:
     Context& operator=(const Context&) = delete;
 
     // Stop is requested when the client cancels the call, when its session closes, and when the server is destroyed.
-    // After that nothing more is written for the call, so the handler may give up at once.
+    // After that nothing more is written for the call, so the handler may give up at once. For a call that runs as a
+    // task, stop is requested when the task is cancelled, when its lifetime ends and when the server is destroyed; the
+    // end of the request or session that started it does not request it.
     std::stop_token stop_token() const noexcept { return stop_; }
     bool cancelled() const noexcept { return stop_.stop_requested(); }
+
+    // The id of the task, when the call runs as one (see "Tasks" in neomcp/server.h); empty otherwise. Valid as long
+    // as this Context.
+    std::optional<std::string_view> task_id() const noexcept;
+    // Sets the status message of the task, which the requester sees when it asks about the task; the task stays
+    // working. Dropped when the call does not run as a task, and once the task has ended.
+    void task_status(std::string message) const;
 
     // Sends a progress notification when the request asked for progress (it carried a progress token); a value that
     // is not greater than the last one sent is dropped. A no-op otherwise.
@@ -91,14 +102,15 @@ private:
     friend class detail::ServerCore;
     friend class detail::InputRound;  // the declared inputs of neomcp/server/inputs.h: the call's profile
     Context(const CallControl& control, const json& meta, std::stop_token stop, const InputResponses& responses,
-            const std::optional<std::string>& state)
-        : control_(control), meta_(meta), stop_(std::move(stop)), responses_(responses), state_(state) {}
+            const std::optional<std::string>& state, const detail::TaskRun* task = nullptr)
+        : control_(control), meta_(meta), stop_(std::move(stop)), responses_(responses), state_(state), task_(task) {}
 
     const CallControl& control_;
     const json& meta_;
     std::stop_token stop_;
     const InputResponses& responses_;
     const std::optional<std::string>& state_;
+    const detail::TaskRun* task_;  // the task the call runs as; null for a call
 };
 
 }  // namespace neomcp
