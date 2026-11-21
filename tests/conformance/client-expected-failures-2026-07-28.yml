@@ -1,33 +1,8 @@
 # The client scenarios of the official conformance runner, revision 2026-07-28, that the client fixture cannot pass yet.
 # An entry that starts to pass fails the run, so a scenario is listed here only while it cannot pass.
 client:
-  # They need authorization, which the client does not have yet.
-  - auth/metadata-default
-  - auth/metadata-var1
-  - auth/metadata-var2
-  - auth/metadata-var3
-  - auth/basic-cimd
-  - auth/scope-from-www-authenticate
-  - auth/scope-from-scopes-supported
-  - auth/scope-omitted-when-undefined
-  - auth/scope-step-up
-  - auth/scope-retry-limit
-  - auth/token-endpoint-auth-basic
-  - auth/token-endpoint-auth-post
-  - auth/token-endpoint-auth-none
-  - auth/pre-registration
-  - auth/resource-mismatch
-  - auth/offline-access-scope
-  - auth/offline-access-not-supported
-  - auth/authorization-server-migration
-  - auth/iss-supported
-  - auth/iss-not-advertised
-  - auth/iss-supported-missing
-  - auth/iss-wrong-issuer
-  - auth/iss-unexpected
-  - auth/iss-normalized
-  - auth/metadata-issuer-mismatch
-  # Run but never scored: extensions of authorization.
+  # Run but never scored: extensions of authorization (other grants than the authorization code, and DPoP), which the
+  # client does not implement.
   - auth/client-credentials-jwt
   - auth/client-credentials-basic
   - auth/enterprise-managed-authorization

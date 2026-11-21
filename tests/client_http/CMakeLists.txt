@@ -40,7 +40,9 @@ neomcp_configure_target(neomcp_client_http_test)
 gtest_discover_tests(neomcp_client_http_test DISCOVERY_TIMEOUT 120)
 
 # The client the official conformance runner tests (the CI job `conformance-client`). It is neither installed nor an
-# example; the runner starts it with the URL of each scenario's server as its last argument.
+# example; the runner starts it with the URL of each scenario's server as its last argument. It requests the
+# authorization URL of a sign-in with libcurl itself, standing in for the person's browser.
 add_executable(neomcp_conformance_client ../conformance/client_fixture.cpp)
-target_link_libraries(neomcp_conformance_client PRIVATE neomcp::client_http neomcp::client Threads::Threads)
+target_link_libraries(neomcp_conformance_client PRIVATE neomcp::client_http neomcp::client CURL::libcurl
+    Threads::Threads)
 neomcp_configure_target(neomcp_conformance_client)
