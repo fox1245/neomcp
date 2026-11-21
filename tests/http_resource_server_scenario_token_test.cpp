@@ -34,9 +34,9 @@ std::string hex_digest(const std::string& text, bool upper) {
     const char* digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
     const auto digest = neomcp::detail::sha256(text);
     std::string out;
-    for (const unsigned char byte : digest) {
-        out.push_back(digits[byte >> 4]);
-        out.push_back(digits[byte & 0x0f]);
+    for (const unsigned char octet : digest) {
+        out.push_back(digits[octet >> 4]);
+        out.push_back(digits[octet & 0x0f]);
     }
     return out;
 }
@@ -225,8 +225,8 @@ TEST(ResourceServerScenarioCache, TheVerdictOnOneTokenNeverAnswersAnotherThatLoo
     EXPECT_EQ(harness.table->calls(), 2);
     const int before = harness.table->calls();
     int refused = 0;
-    for (const char* near : {"token", "tokenAA", "tokenC", "TOKENA", "tokenA=", "okenA", "tokenA-"}) {
-        const Reply reply = probe(harness, near);
+    for (const char* candidate : {"token", "tokenAA", "tokenC", "TOKENA", "tokenA=", "okenA", "tokenA-"}) {
+        const Reply reply = probe(harness, candidate);
         if (reply.status == 401) ++refused;
     }
     EXPECT_EQ(refused, 7);
