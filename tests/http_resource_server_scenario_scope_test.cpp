@@ -473,6 +473,55 @@ TEST(ResourceServerScenarioScope, ASubscriptionIsOnlyToldOfTheResourcesItsAuthor
     }
 }
 
+// The same on the 2025-11-25 revision, where a session subscribes to resources one by one and is told of their updates on
+// its own stream: a session whose token cannot read a resource cannot subscribe to it, and its stream is never told of
+// that resource's updates, which a session that may read it is told of.
+TEST(ResourceServerScenarioScope, ASessionIsOnlyToldOfTheUpdatesOfResourcesItsAuthorizationCouldSubscribeTo) {
+    Harness harness;
+    auto& clock = harness.clock;
+    const std::string plain = harness.token("plain", granted(clock, "a", {"mcp:use"}));
+    const std::string reader = harness.token("reader", granted(clock, "b", {"mcp:use", "secret:read"}));
+    const std::string plain_session = open_session(harness.port, plain);
+    const std::string reader_session = open_session(harness.port, reader);
+    const auto subscribe = [&](const std::string& session, const std::string& token, const std::string& uri) {
+        return session_request(harness.port, session, token, "resources/subscribe", json{{"uri", uri}});
+    };
+    expect_scope_refusal(subscribe(plain_session, plain, "test://secret"), (Scopes{"secret:read", "mcp:use"}),
+                         "a session that subscribes to a secret");
+    EXPECT_EQ(subscribe(plain_session, plain, "test://open").status, 200);
+    EXPECT_EQ(subscribe(reader_session, reader, "test://secret").status, 200);
+    EXPECT_EQ(subscribe(reader_session, reader, "test://open").status, 200);
+
+    const auto open_stream = [&](const std::string& session, const std::string& token) {
+        httplib::Headers headers = legacy_headers(session, token);
+        headers.erase("Accept");
+        headers.emplace("Accept", "text/event-stream");
+        return std::make_unique<Call>(harness.port, "GET", std::move(headers));
+    };
+    auto plain_stream = open_stream(plain_session, plain);
+    auto reader_stream = open_stream(reader_session, reader);
+    ASSERT_TRUE(plain_stream->wait_for_headers());
+    ASSERT_TRUE(reader_stream->wait_for_headers());
+    ASSERT_EQ(plain_stream->now().status, 200);
+    ASSERT_EQ(reader_stream->now().status, 200);
+
+    // The secret resource changes first: by the time the open one's update arrives, the secret one's would have.
+    harness.server.notify_resource_updated("test://secret");
+    harness.server.notify_resource_updated("test://open");
+    const auto told_of_open = [](const std::string& body) {
+        const auto uris = updated_resources(body);
+        return std::find(uris.begin(), uris.end(), "test://open") != uris.end();
+    };
+    ASSERT_TRUE(plain_stream->wait_until(told_of_open));
+    ASSERT_TRUE(reader_stream->wait_until(told_of_open));
+    EXPECT_EQ(updated_resources(plain_stream->now().body), (std::vector<std::string>{"test://open"}));
+    EXPECT_EQ(plain_stream->now().body.find("test://secret"), std::string::npos);
+    const auto both = updated_resources(reader_stream->now().body);
+    EXPECT_EQ(std::set<std::string>(both.begin(), both.end()), (std::set<std::string>{"test://secret", "test://open"}));
+    plain_stream->disconnect();
+    reader_stream->disconnect();
+}
+
 // ---- A retried call under another principal --------------------------------------------------------------------------
 
 TEST(ResourceServerScenarioScope, AToolsAnswerToItsQuestionIsTakenOnlyFromThePrincipalThatWasAsked) {
