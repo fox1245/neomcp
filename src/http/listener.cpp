@@ -51,11 +51,15 @@ constexpr std::string_view proxy_buffering_field = "X-Accel-Buffering";
 constexpr std::string_view no_store = "no-store";
 constexpr std::string_view no = "no";
 constexpr std::string_view default_content_type = "application/octet-stream";
+constexpr std::string_view get_method = "GET";
 constexpr std::string_view head_method = "HEAD";
 constexpr std::string_view post_method = "POST";
 constexpr std::string_view put_method = "PUT";
 constexpr std::string_view patch_method = "PATCH";
 constexpr std::string_view delete_method = "DELETE";
+constexpr std::string_view allow_field = "Allow";
+constexpr std::string_view route_methods = "GET, HEAD";
+constexpr int method_not_allowed_status = 405;
 
 // The methods whose requests carry a body here: the library reads their bodies through the listener (Impl::receive),
 // which bounds the time a body takes. The others (GET, HEAD, OPTIONS) take none.
@@ -68,6 +72,14 @@ bool takes_body(const std::string& method) {
 bool frames_body(const httplib::Request& incoming) {
     return incoming.has_header(std::string(transfer_encoding_field)) ||
            incoming.get_header_value_u64(std::string(content_length_field)) > 0;
+}
+
+// The route whose path is the path as received, or none: an exact comparison, not a pattern.
+const Route* find_route(const ListenerOptions& options, const std::string& path) {
+    for (const Route& extra : options.routes) {
+        if (extra.path == path) return &extra;
+    }
+    return nullptr;
 }
 
 // The answer a worker waits for: filled once, by the responder, by the destruction of the last responder copy, or by
@@ -195,12 +207,42 @@ bool valid_path(const std::string& path) {
     });
 }
 
+// A path of a route: '/' and one or more segments, none empty, none "." or "..", each of letters, digits and - _ ~ .
+bool valid_route_path(const std::string& path) {
+    if (path.size() < 2 || path.front() != '/') return false;
+    std::string_view rest = std::string_view(path).substr(1);
+    for (;;) {
+        const std::size_t slash = rest.find('/');
+        const std::string_view segment = rest.substr(0, slash);
+        if (segment.empty() || segment == "." || segment == "..") return false;
+        const bool allowed = std::all_of(segment.begin(), segment.end(), [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' ||
+                   c == '_' || c == '~' || c == '.';
+        });
+        if (!allowed) return false;
+        if (slash == std::string_view::npos) return true;
+        rest.remove_prefix(slash + 1);
+    }
+}
+
 // An empty string when the options are usable, else what is wrong.
 std::string check_options(const ListenerOptions& o) {
     using std::chrono::milliseconds;
     if (o.bind_address.empty()) return "bind_address is empty";
     if (!valid_path(o.path)) {
         return "path \"" + o.path + "\" must start with '/' and hold only letters, digits and - _ ~ /";
+    }
+    for (std::size_t at = 0; at < o.routes.size(); ++at) {
+        const Route& route = o.routes[at];
+        if (!valid_route_path(route.path)) {
+            return "route path \"" + route.path +
+                   "\" must start with '/' and hold non-empty segments of letters, digits and - _ ~ . that are not . or ..";
+        }
+        if (!route.handler) return "the handler of route \"" + route.path + "\" is empty";
+        if (route.path == o.path) return "route path \"" + route.path + "\" is the path";
+        for (std::size_t before = 0; before < at; ++before) {
+            if (o.routes[before].path == route.path) return "route path \"" + route.path + "\" is repeated";
+        }
     }
     if (o.max_body_bytes < 1) return "max_body_bytes must be at least 1";
     if (o.worker_threads < 1) return "worker_threads must be at least 1";
@@ -226,7 +268,9 @@ struct Listener::Impl {
     Outcome<std::uint16_t> start();
     void stop() noexcept;
     void receive(const httplib::Request& incoming, httplib::Response& outgoing, const httplib::ContentReader& reader);
-    void handle(const httplib::Request& incoming, std::string body, httplib::Response& outgoing);
+    void handle(const httplib::Request& incoming, std::string body, httplib::Response& outgoing,
+                const Handler& target);
+    void answer_route(const Route& route, const httplib::Request& incoming, httplib::Response& outgoing);
     void write(Response&& response, const httplib::Request& incoming, httplib::Response& outgoing);
     void write_stream(std::shared_ptr<BodyStream> stream, const std::string& content_type,
                       httplib::Response& outgoing);
@@ -292,7 +336,7 @@ Outcome<std::uint16_t> Listener::Impl::start() {
         return httplib::Server::HandlerResponse::Handled;
     });
     const httplib::Server::Handler route = [this](const httplib::Request& incoming, httplib::Response& outgoing) {
-        handle(incoming, std::string(), outgoing);
+        handle(incoming, std::string(), outgoing, handler);
     };
     const httplib::Server::HandlerWithContentReader reading =
         [this](const httplib::Request& incoming, httplib::Response& outgoing, const httplib::ContentReader& reader) {
@@ -304,6 +348,15 @@ Outcome<std::uint16_t> Listener::Impl::start() {
     candidate->Put(options.path, reading);
     candidate->Delete(options.path, reading);
     candidate->Patch(options.path, reading);
+
+    // The routes are answered before the library's own routing (a route is never one of its patterns: the library
+    // reads a pattern with a '.' in it as an expression, and a path here is compared as the text it is).
+    candidate->set_pre_routing_handler([this](const httplib::Request& incoming, httplib::Response& outgoing) {
+        const Route* extra = find_route(options, incoming.path);
+        if (extra == nullptr) return httplib::Server::HandlerResponse::Unhandled;
+        answer_route(*extra, incoming, outgoing);
+        return httplib::Server::HandlerResponse::Handled;
+    });
 
     int port = 0;
     if (options.port == 0) {
@@ -432,10 +485,31 @@ void Listener::Impl::receive(const httplib::Request& incoming, httplib::Response
         outgoing.set_header(std::string(connection_field), std::string(close_token));
         return;
     }
-    handle(incoming, std::move(body), outgoing);
+    handle(incoming, std::move(body), outgoing, handler);
 }
 
-void Listener::Impl::handle(const httplib::Request& incoming, std::string body, httplib::Response& outgoing) {
+// GET and HEAD go to the route's handler, unless the request frames a body (refused before anything is read, as on the
+// main path). Every other method is refused 405: a body it announced is not read, so the connection ends with the
+// answer.
+void Listener::Impl::answer_route(const Route& route, const httplib::Request& incoming, httplib::Response& outgoing) {
+    const bool reading = incoming.method == get_method || incoming.method == head_method;
+    if (reading && !frames_body(incoming)) {
+        handle(incoming, std::string(), outgoing, route.handler);
+        return;
+    }
+    if (reading) {
+        outgoing.status = bad_request_status;
+    } else {
+        outgoing.status = method_not_allowed_status;
+        outgoing.set_header(std::string(allow_field), std::string(route_methods));
+    }
+    if (takes_body(incoming.method) || frames_body(incoming)) {
+        outgoing.set_header(std::string(connection_field), std::string(close_token));
+    }
+}
+
+void Listener::Impl::handle(const httplib::Request& incoming, std::string body, httplib::Response& outgoing,
+                            const Handler& target) {
     // A responder the handler keeps may outlive this call, so the exchange is shared with it.
     const auto exchange = std::make_shared<Exchange>();
     {
@@ -462,7 +536,7 @@ void Listener::Impl::handle(const httplib::Request& incoming, std::string body, 
         // watch does not count as a copy.
         Responder responder([exchange](Response&& response) { return exchange->deliver(std::move(response)); });
         watch = responder.watch();
-        handler(std::move(request), std::move(responder));
+        target(std::move(request), std::move(responder));
     } catch (...) {
         exchange->deliver(make_response(internal_error_status));
     }

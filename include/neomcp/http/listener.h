@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "neomcp/http/message.h"
 #include "neomcp/http/outcome.h"
@@ -52,6 +53,20 @@ struct ListenerDefaults {
     static constexpr std::chrono::milliseconds disconnect_poll_interval{250};
 };
 
+// An extra path the listener serves for reading, beside the main path: a document published at a well-known address,
+// say. Only GET and HEAD reach the handler; any other method is answered 405 with `Allow: GET, HEAD` by the listener,
+// and the handler is not called. A GET or HEAD that frames a body is refused 400 before the handler runs, as on the
+// main path. The request the handler gets carries the route's path.
+struct Route {
+    // The one path served: exact, compared as received (no case folding, no trailing slash, no prefix). It starts
+    // with '/', and every segment between the slashes is not empty, is not "." or "..", and holds only letters,
+    // digits and '-', '_', '~', '.'. So "/" is not a route path, and neither is a path that ends with '/'. It differs
+    // from ListenerOptions::path and from every other route.
+    std::string path;
+    // Called on worker threads, possibly several at once, like the main handler.
+    Handler handler;
+};
+
 struct ListenerOptions {
     // The address to bind: an IP address or a name the system resolves. Loopback by default: a listener is reachable
     // from other machines only when the caller asks for it.
@@ -61,10 +76,15 @@ struct ListenerOptions {
     // listener does not share addresses.
     std::uint16_t port = 0;
 
-    // The one path served. It starts with '/' and holds only letters, digits and '-', '_', '~', '/'. Every method on
-    // it goes to the handler (GET, HEAD, POST, PUT, DELETE, PATCH and OPTIONS; a method the HTTP library does not know is
-    // answered 400 by it). Any other path is answered 404, and the handler is not called.
+    // The main path. It starts with '/' and holds only letters, digits and '-', '_', '~', '/' (no '.', so no segment
+    // can be "." or ".."). Every method on it goes to the handler (GET, HEAD, POST, PUT, DELETE, PATCH and OPTIONS; a
+    // method the HTTP library does not know is answered 400 by it). Any other path, except those of `routes`, is
+    // answered 404, and the handler is not called.
     std::string path = "/";
+
+    // Further paths, each for GET and HEAD only, each with a handler of its own (see Route). A path that is not valid,
+    // is the main path, is repeated, or has no handler makes start() fail.
+    std::vector<Route> routes;
 
     // The largest request body in bytes, at least 1. A larger body is answered 413 before the handler runs. Default
     // 8 MiB.

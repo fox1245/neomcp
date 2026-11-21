@@ -968,4 +968,360 @@ TEST(HttpListener, ABurstThatFitsTheWorkersAndTheQueueIsNeverRefused) {
     EXPECT_EQ(refused, 0);
 }
 
+// ---- Further paths for reading -----------------------------------------------------------------------------------
+
+neomcp::http::Route text_route(std::string path, std::string text, std::atomic<int>& calls) {
+    return {std::move(path), [&calls, text = std::move(text)](Request request, Responder responder) {
+                ++calls;
+                responder.complete(neomcp::http::make_response(200, "text/plain", text + "|" + request.path + "|" + request.query));
+            }};
+}
+
+ListenerOptions with_routes(std::string path, std::vector<neomcp::http::Route> routes) {
+    ListenerOptions options = defaults();
+    options.path = std::move(path);
+    options.routes = std::move(routes);
+    return options;
+}
+
+TEST(ListenerRoutes, ARouteIsServedForGetAndHeadByItsOwnHandler) {
+    std::atomic<int> main_calls{0};
+    std::atomic<int> route_calls{0};
+    auto server = run(with_routes("/mcp", {text_route("/.well-known/oauth-protected-resource/mcp", "doc", route_calls)}),
+                      [&](Request, Responder responder) {
+                          ++main_calls;
+                          responder.complete(neomcp::http::make_response(200, "text/plain", "main"));
+                      });
+    auto client = make_client(server->port);
+    auto got = client->Get("/.well-known/oauth-protected-resource/mcp?a=b");
+    ASSERT_TRUE(got);
+    EXPECT_EQ(got->status, 200);
+    EXPECT_EQ(got->body, "doc|/.well-known/oauth-protected-resource/mcp|a=b");
+    auto head = client->Head("/.well-known/oauth-protected-resource/mcp");
+    ASSERT_TRUE(head);
+    EXPECT_EQ(head->status, 200);
+    EXPECT_TRUE(head->body.empty());
+    EXPECT_EQ(route_calls, 2);
+    EXPECT_EQ(main_calls, 0);
+    // The main path still goes to its handler.
+    auto main = client->Get("/mcp");
+    ASSERT_TRUE(main);
+    EXPECT_EQ(main->body, "main");
+    EXPECT_EQ(main_calls, 1);
+    EXPECT_EQ(route_calls, 2);
+}
+
+TEST(ListenerRoutes, EveryOtherMethodIsAnswered405WithAllowAndTheHandlerIsNotCalled) {
+    std::atomic<int> main_calls{0};
+    std::atomic<int> route_calls{0};
+    auto server = run(with_routes("/mcp", {text_route("/.well-known/doc", "doc", route_calls)}),
+                      [&](Request, Responder responder) {
+                          ++main_calls;
+                          responder.complete(neomcp::http::make_response(200));
+                      });
+    auto client = make_client(server->port);
+    auto check = [&](const std::string& method, const httplib::Result& result) {
+        SCOPED_TRACE(method);
+        ASSERT_TRUE(result);
+        EXPECT_EQ(result->status, 405);
+        EXPECT_EQ(result->get_header_value("Allow"), "GET, HEAD");
+    };
+    check("POST", client->Post("/.well-known/doc", "body", "text/plain"));
+    check("PUT", client->Put("/.well-known/doc", "body", "text/plain"));
+    check("DELETE", client->Delete("/.well-known/doc"));
+    check("PATCH", client->Patch("/.well-known/doc", "body", "text/plain"));
+    check("OPTIONS", client->Options("/.well-known/doc"));
+    // A method the HTTP library does not know is answered 400 by it, on a route as on the main path.
+    httplib::Request unknown;
+    unknown.method = "PURGE";
+    unknown.path = "/.well-known/doc";
+    auto purged = make_client(server->port)->send(unknown);
+    ASSERT_TRUE(purged);
+    EXPECT_EQ(purged->status, 400);
+    EXPECT_EQ(route_calls, 0);
+    EXPECT_EQ(main_calls, 0);
+    // The refusals left the listener serving.
+    auto fine = client->Get("/.well-known/doc");
+    ASSERT_TRUE(fine);
+    EXPECT_EQ(fine->status, 200);
+}
+
+TEST(ListenerRoutes, ABodyOnARouteIsNotReadAndTheConnectionEndsWithTheAnswer) {
+    std::atomic<int> route_calls{0};
+    auto server = run(with_routes("/mcp", {text_route("/.well-known/doc", "doc", route_calls)}),
+                      [](Request, Responder responder) { responder.complete(neomcp::http::make_response(200)); });
+    // A client that keeps its connection: the body bytes that were not read must not be taken for a next request.
+    httplib::Client client("127.0.0.1", server->port);
+    client.set_keep_alive(true);
+    client.set_read_timeout(30, 0);
+    auto refused = client.Post("/.well-known/doc", std::string(4096, 'x'), "text/plain");
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(refused->status, 405);
+    auto fine = client.Get("/.well-known/doc");
+    ASSERT_TRUE(fine);
+    EXPECT_EQ(fine->status, 200);
+    EXPECT_EQ(route_calls, 1);
+}
+
+TEST(ListenerRoutes, AGetThatFramesABodyIsRefusedBeforeTheHandlerRuns) {
+    std::atomic<int> route_calls{0};
+    auto server = run(with_routes("/mcp", {text_route("/.well-known/doc", "doc", route_calls)}),
+                      [](Request, Responder responder) { responder.complete(neomcp::http::make_response(200)); });
+    httplib::Request request;
+    request.method = "GET";
+    request.path = "/.well-known/doc";
+    request.body = "hello";
+    request.set_header("Content-Length", "5");
+    auto result = make_client(server->port)->send(request);
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->status, 400);
+    EXPECT_EQ(route_calls, 0);
+}
+
+TEST(ListenerRoutes, OnlyTheExactPathIsServed) {
+    std::atomic<int> route_calls{0};
+    auto server = run(with_routes("/mcp", {text_route("/.well-known/doc.json", "doc", route_calls)}),
+                      [](Request, Responder responder) { responder.complete(neomcp::http::make_response(200)); });
+    auto client = make_client(server->port);
+    // '.' is a character of the path here and not a wildcard; no case folding, no prefix, no trailing slash.
+    for (const char* path : {"/.well-known/docXjson", "/.well-known/doc.jso", "/.well-known/doc.jsonx", "/.well-known/doc.json/",
+                             "/.well-known/doc.json/x", "/.WELL-KNOWN/doc.json", "/x.well-known/doc.json", "/",
+                             "/.well-known", "//.well-known/doc.json", "/.well-known//doc.json"}) {
+        auto result = client->Get(path);
+        ASSERT_TRUE(result) << path;
+        EXPECT_EQ(result->status, 404) << path;
+    }
+    EXPECT_EQ(route_calls, 0);
+    // The same for the other methods: only the exact path is a route that refuses them.
+    auto elsewhere = client->Post("/.well-known/docXjson", "x", "text/plain");
+    ASSERT_TRUE(elsewhere);
+    EXPECT_EQ(elsewhere->status, 404);
+    EXPECT_TRUE(elsewhere->get_header_value("Allow").empty());
+    auto exact = client->Post("/.well-known/doc.json", "x", "text/plain");
+    ASSERT_TRUE(exact);
+    EXPECT_EQ(exact->status, 405);
+    auto hit = client->Get("/.well-known/doc.json");
+    ASSERT_TRUE(hit);
+    EXPECT_EQ(hit->status, 200);
+}
+
+TEST(ListenerRoutes, RoutesThatTheLibraryWouldMatchLoselyEachGetTheirOwnHandler) {
+    std::atomic<int> dotted_calls{0};
+    std::atomic<int> plain_calls{0};
+    auto server = run(with_routes("/mcp", {text_route("/a.b", "dotted", dotted_calls),
+                                           text_route("/aXb", "plain", plain_calls)}),
+                      [](Request, Responder responder) { responder.complete(neomcp::http::make_response(200)); });
+    auto client = make_client(server->port);
+    auto plain = client->Get("/aXb");
+    ASSERT_TRUE(plain);
+    EXPECT_EQ(plain->body, "plain|/aXb|");
+    auto dotted = client->Get("/a.b");
+    ASSERT_TRUE(dotted);
+    EXPECT_EQ(dotted->body, "dotted|/a.b|");
+    auto other = client->Get("/aYb");
+    ASSERT_TRUE(other);
+    EXPECT_EQ(other->status, 404);
+    EXPECT_EQ(dotted_calls, 1);
+    EXPECT_EQ(plain_calls, 1);
+}
+
+TEST(ListenerRoutes, TheMainPathStaysAsItWasWithRoutesBesideIt) {
+    std::atomic<int> route_calls{0};
+    std::atomic<int> main_calls{0};
+    auto server = run(with_routes("/mcp", {text_route("/.well-known/doc", "doc", route_calls)}),
+                      [&](Request request, Responder responder) {
+                          ++main_calls;
+                          responder.complete(neomcp::http::make_response(200, "text/plain", request.method));
+                      });
+    auto client = make_client(server->port);
+    auto post = client->Post("/mcp", "b", "text/plain");
+    ASSERT_TRUE(post);
+    EXPECT_EQ(post->body, "POST");
+    auto deleted = client->Delete("/mcp");
+    ASSERT_TRUE(deleted);
+    EXPECT_EQ(deleted->body, "DELETE");
+    auto options = client->Options("/mcp");
+    ASSERT_TRUE(options);
+    EXPECT_EQ(options->body, "OPTIONS");
+    for (const char* path : {"/", "/mcp/", "/mcp.json", "/other", "/.well-known/doc/x"}) {
+        auto result = client->Get(path);
+        ASSERT_TRUE(result) << path;
+        EXPECT_EQ(result->status, 404) << path;
+    }
+    EXPECT_EQ(main_calls, 3);
+    EXPECT_EQ(route_calls, 0);
+}
+
+TEST(ListenerRoutes, ARouteHandlerMayCompleteItsResponderLaterFromAnotherThread) {
+    std::promise<Responder> parked;
+    auto parked_future = parked.get_future();
+    neomcp::http::Route route{"/late", [&parked](Request, Responder responder) { parked.set_value(std::move(responder)); }};
+    auto server = run(with_routes("/mcp", {route}), [](Request, Responder responder) {
+        responder.complete(neomcp::http::make_response(200));
+    });
+    std::thread finisher([&] {
+        if (parked_future.wait_for(patience) != std::future_status::ready) return;
+        Responder responder = parked_future.get();
+        responder.complete(neomcp::http::make_response(200, "text/plain", "late"));
+    });
+    auto result = make_client(server->port)->Get("/late");
+    finisher.join();
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->status, 200);
+    EXPECT_EQ(result->body, "late");
+}
+
+TEST(ListenerRoutes, AStoppedListenerAnswersARouteRequestThatWaitsWith503) {
+    std::promise<Responder> parked;
+    auto parked_future = parked.get_future();
+    neomcp::http::Route route{"/wait", [&parked](Request, Responder responder) { parked.set_value(std::move(responder)); }};
+    auto server = run(with_routes("/mcp", {route}), [](Request, Responder responder) {
+        responder.complete(neomcp::http::make_response(200));
+    });
+    std::promise<int> status;
+    auto status_future = status.get_future();
+    const std::uint16_t port = server->port;
+    std::thread asker([&] {
+        auto result = make_client(port)->Get("/wait");
+        status.set_value(result ? result->status : -1);
+    });
+    struct Join {
+        std::thread& thread;
+        ~Join() {
+            if (thread.joinable()) thread.join();
+        }
+    } join{asker};
+    ASSERT_EQ(parked_future.wait_for(patience), std::future_status::ready);
+    Responder held = parked_future.get();
+    server->listener.stop();
+    ASSERT_EQ(status_future.wait_for(patience), std::future_status::ready);
+    EXPECT_EQ(status_future.get(), 503);
+}
+
+struct PathCase {
+    const char* path;
+    bool valid;
+};
+
+TEST(ListenerRoutePath, ARoutePathIsCheckedAtStart) {
+    const PathCase cases[] = {
+        {"/.well-known/oauth-protected-resource", true},
+        {"/.well-known/oauth-protected-resource/mcp", true},
+        {"/a.b/c-d_e~f", true},
+        {"/...", true},
+        {"/.a", true},
+        {"/a.", true},
+        {"/a..b", true},
+        {"/1.0/x", true},
+        {"/A/B", true},
+        {"", false},
+        {"/", false},
+        {"a", false},
+        {"a/b", false},
+        {"/a/", false},
+        {"//a", false},
+        {"/a//b", false},
+        {"/.", false},
+        {"/..", false},
+        {"/a/.", false},
+        {"/a/..", false},
+        {"/./a", false},
+        {"/../a", false},
+        {"/a/./b", false},
+        {"/a/../b", false},
+        {"/a/../../b", false},
+        {"/.well-known/../mcp", false},
+        {"/a b", false},
+        {"/a%2eb", false},
+        {"/a%2e%2e/b", false},
+        {"/a?b", false},
+        {"/a#b", false},
+        {"/a:b", false},
+        {"/a;b", false},
+        {"/a*", false},
+        {"/a\\b", false},
+        {"/a\tb", false},
+        {"/a\nb", false},
+        {"/caf\xc3\xa9", false},
+    };
+    for (const PathCase& c : cases) {
+        SCOPED_TRACE(c.path);
+        std::atomic<int> calls{0};
+        Listener listener(with_routes("/mcp", {text_route(c.path, "x", calls)}), [](Request, Responder) {});
+        auto started = listener.start();
+        EXPECT_EQ(static_cast<bool>(started), c.valid) << started.error;
+        if (!c.valid) {
+            EXPECT_NE(started.error.find("route path"), std::string::npos) << started.error;
+        }
+    }
+}
+
+TEST(ListenerRoutePath, TheMainPathStillRefusesADotAndEverythingItRefusedBefore) {
+    for (const char* path : {"/mcp.v1", "/.well-known/doc", "/.", "/..", "/a/../b", "/a/./b", "/a b", "/a%2e", "", "mcp"}) {
+        SCOPED_TRACE(path);
+        ListenerOptions options = defaults();
+        options.path = path;
+        Listener listener(options, [](Request, Responder) {});
+        auto started = listener.start();
+        EXPECT_FALSE(started);
+        EXPECT_NE(started.error.find("path"), std::string::npos) << started.error;
+    }
+    for (const char* path : {"/", "/mcp", "/a/b-c_d~e", "/A1"}) {
+        SCOPED_TRACE(path);
+        ListenerOptions options = defaults();
+        options.path = path;
+        Listener listener(options, [](Request, Responder) {});
+        EXPECT_TRUE(listener.start());
+    }
+}
+
+TEST(ListenerRoutePath, AParentSegmentIsRefusedInEveryPositionOfARoute) {
+    for (const char* path : {"/..", "/../x", "/x/..", "/x/../y", "/x/y/../.."}) {
+        SCOPED_TRACE(path);
+        std::atomic<int> calls{0};
+        Listener listener(with_routes("/mcp", {text_route(path, "x", calls)}), [](Request, Responder) {});
+        EXPECT_FALSE(listener.start());
+    }
+}
+
+TEST(ListenerRoutes, ARouteThatIsTheMainPathARepeatedRouteOrOneWithoutAHandlerFailsTheStart) {
+    std::atomic<int> calls{0};
+    {
+        Listener same(with_routes("/mcp", {text_route("/mcp", "x", calls)}), [](Request, Responder) {});
+        auto started = same.start();
+        EXPECT_FALSE(started);
+        EXPECT_NE(started.error.find("/mcp"), std::string::npos) << started.error;
+    }
+    {
+        Listener repeated(with_routes("/mcp", {text_route("/a", "x", calls), text_route("/b", "y", calls),
+                                               text_route("/a", "z", calls)}),
+                          [](Request, Responder) {});
+        auto started = repeated.start();
+        EXPECT_FALSE(started);
+        EXPECT_NE(started.error.find("repeated"), std::string::npos) << started.error;
+    }
+    {
+        Listener empty(with_routes("/mcp", {neomcp::http::Route{"/a", Handler{}}}), [](Request, Responder) {});
+        auto started = empty.start();
+        EXPECT_FALSE(started);
+        EXPECT_NE(started.error.find("handler"), std::string::npos) << started.error;
+    }
+}
+
+TEST(ListenerRoutes, SeveralRoutesAreServedEachByItsOwnHandler) {
+    std::atomic<int> first{0};
+    std::atomic<int> second{0};
+    auto server = run(with_routes("/mcp", {text_route("/one", "one", first), text_route("/two/three", "two", second)}),
+                      [](Request, Responder responder) { responder.complete(neomcp::http::make_response(200)); });
+    auto client = make_client(server->port);
+    auto one = client->Get("/one");
+    auto two = client->Get("/two/three");
+    ASSERT_TRUE(one);
+    ASSERT_TRUE(two);
+    EXPECT_EQ(one->body, "one|/one|");
+    EXPECT_EQ(two->body, "two|/two/three|");
+    EXPECT_EQ(first, 1);
+    EXPECT_EQ(second, 1);
+}
+
 }  // namespace
