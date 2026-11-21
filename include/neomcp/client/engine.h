@@ -27,7 +27,10 @@
 // - the rounds of a call that asks for input, through one seam (InputSupport, ServerAsked, InputRoundStarted), with
 //   the checks that need the revision: a request of a kind the client did not declare is refused, a form whose schema
 //   is outside the restricted form never reaches a handler, and accepted content that fails the form's schema is
-//   never sent. Running the handlers is the input dispatcher's (neomcp/client/input_dispatch.h).
+//   never sent. Running the handlers is the input dispatcher's (neomcp/client/input_dispatch.h);
+// - tasks, where the client takes them (EngineOptions::tasks): a tool call the server answers with a task is followed
+//   by reads of the task, each after a wait on a clock of its own, until the task ends; the requests a task waits on
+//   are a round of the call, with the same checks, whose answers go to the task; see "Tasks" below.
 //
 // Units. A transport that carries each message in an exchange of its own (one HTTP POST per message) has one unit per
 // exchange; the engine numbers them and says on every output which unit it opens or belongs to. The connection itself
@@ -199,6 +202,10 @@ enum class CallFailureKind {
     unsupported_method,  // the governing revision has no such client request, or the message is malformed
     header_value,        // an argument cannot be mirrored into a header (an integer out of range)
     input_timed_out,     // a round of input was not answered within input_handler_timeout
+    task_lost,           // a task the call followed is one the server does not know (it never had it, or no longer
+                         // has it); the request that created it is never sent again
+    task_cancelled,      // a task the call followed ended cancelled, not by this call
+    task_polls_exceeded,  // a task the call followed was read ClientTaskOptions::max_polls times without ending
     input_rounds_exceeded,  // the server asked for input more than max_input_rounds times
     input_requests_exceeded,  // one round asked for more than max_input_requests_per_round inputs
     server_asked_undeclared,  // a round asked for input of a kind the client did not declare (InputSupport); no
@@ -302,7 +309,9 @@ enum class DeadlineKind {
     wait,   // how long a request waits for its answer (the request's timeout); started again by progress when the
             // call asked for that
     total,  // the longest a call that is started again by progress may wait in all
-    input   // how long the client may take to answer the server: one server request, or one round of a call
+    input,  // how long the client may take to answer the server: one server request, or one round of a call
+    poll,   // a call that follows a task: the wait before the next read of the task
+    task    // a call that follows a task: the longest it follows it in all (ClientTaskOptions::max_wait)
 };
 
 // Whose clock it is.
@@ -421,11 +430,18 @@ struct OutgoingCall {
     // tools/call on a transport whose profile mirrors tool arguments into headers: the tool's input schema, from which
     // the marked arguments are mirrored. Null: no argument is mirrored.
     json input_schema = nullptr;
+    // Where the client takes tasks: a result that creates a task ends the call at once (Answered::task), rather than
+    // the call following the task to its end.
+    bool hand_over_task = false;
 };
 
 // How a call ended.
 struct Answered {
     json result;  // the result as the server sent it
+    // The task's state, when the call ended with it: a result that created a task the call hands over
+    // (OutgoingCall::hand_over_task), and a read of a task (ClientEngine::read_task). `result` is then the result that
+    // carried it.
+    std::optional<TaskState> task = std::nullopt;
 };
 struct ErrorAnswered {
     RequestError error;  // the server's error answer: its code, message and data
@@ -473,6 +489,8 @@ struct RequestEnded {
     RequestRef request;
     RequestOutcome outcome;
     profile::ProfilePtr profile;  // the profile it went out under last; null when it never went out
+    // The id of the task the call was about: one a result created, or the one it followed, read or cancelled.
+    std::optional<std::string> task = std::nullopt;
 };
 
 // The server reported progress of a call that asked for it.
@@ -608,6 +626,51 @@ struct ClientDefaults {
     static constexpr std::size_t max_subscription_reopens = 5;
     static constexpr std::chrono::milliseconds subscription_reopen_first_delay{1'000};
     static constexpr std::chrono::milliseconds subscription_reopen_max_delay{60'000};
+    // Tasks (ClientTaskOptions): the shortest and the longest wait between two reads of a task, whatever the server
+    // suggests; how long a call follows one task in all; as many reads as that allows at the shortest wait; the
+    // longest id of a task the client takes (it goes into a header on HTTP).
+    static constexpr std::chrono::milliseconds min_task_poll_interval{100};
+    static constexpr std::chrono::milliseconds max_task_poll_interval{60'000};
+    static constexpr std::chrono::milliseconds max_task_wait{3'600'000};
+    static constexpr std::size_t max_task_polls = static_cast<std::size_t>(max_task_wait / min_task_poll_interval);
+    static constexpr std::size_t max_task_id_bytes = 256;
+};
+
+// Tasks: a server that may answer a tool call with a task, which the client then follows by reading it. Only a
+// revision served with an extension that gives it such tasks has them; the engine composes each enabled profile with
+// the library's built-in extensions that do so when `accept` is set, and the client declares, under each profile so
+// composed, that it takes tasks.
+//
+// A call whose result creates a task follows it: after a wait on a clock of its own (DeadlineKind::poll), the engine
+// reads the task, and does so again until the task ends. The wait is the one the server suggests in its latest
+// answer, kept between min_poll_interval and max_poll_interval (min_poll_interval when it suggests none). The call's
+// own timeout bounds each read; max_wait bounds the whole task (DeadlineKind::task); and the call ends with the task:
+// - completed: Answered, with the result the task inlines (the result the request would have had);
+// - failed: ErrorAnswered, with the error the task inlines;
+// - cancelled: task_cancelled;
+// - a read the server answers as one of a task it does not know: task_lost.
+// A task that waits for input makes a round of the call (InputRoundStarted), with every check a round has and
+// counted against max_input_rounds; only the requests the call has not answered yet are in it, so a request the
+// server still lists while it takes in an answer is never asked twice. The answers go to the task, and the reads go
+// on. A call that ends any other way before its task ended (cancelled, timed out, any failure) cancels the task it
+// created, where contact is open; the follow_task form never cancels the task it was given.
+struct ClientTaskOptions {
+    // Whether the client takes tasks. Default off: a server may then never answer with a task, a result that says it
+    // created one is malformed, and the requests about tasks are unsupported_method, whatever profiles are enabled.
+    bool accept = false;
+    // The wait between two reads of a task is the server's suggestion kept within these bounds. Zero is an error, and
+    // the first must not exceed the second. Defaults 100 ms, 60 s.
+    std::chrono::milliseconds min_poll_interval = ClientDefaults::min_task_poll_interval;
+    std::chrono::milliseconds max_poll_interval = ClientDefaults::max_task_poll_interval;
+    // The longest a call follows one task; then the task is cancelled (where the call created it) and the call ends
+    // timed_out. Zero is an error. Default 1 hour.
+    std::chrono::milliseconds max_wait = ClientDefaults::max_task_wait;
+    // The most reads of one task a call makes; the call that would make one more ends task_polls_exceeded (and
+    // cancels the task it created). Zero is an error. Default 36 000, one hour of reads at the shortest wait.
+    std::size_t max_polls = ClientDefaults::max_task_polls;
+    // The longest id of a task, in bytes: a result that creates a task with a longer id, or an empty one, is
+    // malformed, and a longer id given to the engine is refused. Zero is an error. Default 256.
+    std::size_t max_id_bytes = ClientDefaults::max_task_id_bytes;
 };
 
 // When the client opens the stream on which a server speaks outside any request (the connection unit, where the
@@ -704,6 +767,9 @@ struct EngineOptions {
     // server lists its tools again, and not after a restart. It bounds the work a server can make the client do by
     // sending schemas. Zero is an error. Default 128.
     std::size_t max_peer_schema_compiles = ClientDefaults::max_peer_schema_compiles;
+
+    // Tasks: whether the client takes them, and the bounds of following one (see ClientTaskOptions).
+    ClientTaskOptions tasks;
 };
 
 // Why compile_peer_schema gave no validator.
@@ -800,15 +866,33 @@ public:
     // cancelled. Ignored for a call that ended.
     void cancel(RequestRef request, std::string reason = {});
 
+    // ---- Tasks (see ClientTaskOptions)
+
+    // Whether the governing revision lets a server answer with a task the client takes; false before contact opened.
+    bool takes_tasks() const;
+    // Calls about the task `id` under the governing profile, counted as calls of the application: one that follows the
+    // task until it ends, as a call whose result created it does (but never cancels it); one that reads it once and
+    // ends with Answered::task; one that cancels it and ends with Answered once the server acknowledged. Each ends
+    // task_lost when the server does not know the task. `timeout` bounds each request (empty: request_timeout). They
+    // fail as send() does, and with unsupported_method when the governing revision has no tasks the client takes,
+    // and for an id that is empty or longer than ClientTaskOptions::max_id_bytes.
+    std::variant<RequestRef, CallFailure> follow_task(std::string id,
+                                                      std::optional<std::chrono::milliseconds> timeout = std::nullopt);
+    std::variant<RequestRef, CallFailure> read_task(std::string id,
+                                                    std::optional<std::chrono::milliseconds> timeout = std::nullopt);
+    std::variant<RequestRef, CallFailure> cancel_task(std::string id,
+                                                      std::optional<std::chrono::milliseconds> timeout = std::nullopt);
+
     // The answer to a server's request a handler took (ServerAsked). An accepted form whose content fails the form's
     // schema is not sent: the request is answered with an internal error and a Diagnostic (answer_invalid) says so.
     // InputRefused is answered as the revision prescribes a user's refusal. Ignored once the request ended.
     void answer(InputRef request, InputReply reply);
 
     // The answers of a round (InputRoundStarted): the call goes out again, with a new id, the answers under the keys
-    // they answer and the state exactly as received. The call fails when the answers cannot be written, when the
-    // state cannot be sent back unchanged, and when an accepted form's content fails its schema (answer_invalid);
-    // then nothing is sent. Ignored unless the call waits for this round.
+    // they answer and the state exactly as received; for a round of a task, the answers go to the task and its reads
+    // go on. The call fails when the answers cannot be written, when the state cannot be sent back unchanged, and when
+    // an accepted form's content fails its schema (answer_invalid); then nothing is sent. Ignored unless the call
+    // waits for this round.
     void answer_round(RequestRef request, InputResponses answers);
 
     // Ends a call that waits for a round (InputRoundStarted) with `failure`, such as a handler that failed or a user

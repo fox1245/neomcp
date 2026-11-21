@@ -28,6 +28,7 @@ add_executable(neomcp_client_http_test
     oauth_security_origins_test.cpp
     sse_parser_test.cpp
     streams_test.cpp
+    tasks_test.cpp
     transfer_loop_test.cpp
     transport_test.cpp
     url_guard_auth_test.cpp

@@ -52,6 +52,10 @@ enum class ClientErrorKind {
     unsupported_method,      // the governing revision has no such client request, or the params are no object
     header_value,            // an argument cannot be mirrored into a header (an integer out of range)
     input_timed_out,         // a round of input was not answered within input_handler_timeout
+    task_lost,               // a task the call followed is one the server does not know (it never had it, or no
+                             // longer has it, as after a restart); the tool call is never sent again (`task`)
+    task_cancelled,          // a task the call followed ended cancelled, not by this call (`task`)
+    task_polls_exceeded,     // a task the call followed was read ClientTaskOptions::max_polls times without ending
     input_rounds_exceeded,   // the server asked for input more than max_input_rounds times
     input_requests_exceeded, // one round asked for more than max_input_requests_per_round inputs
     server_asked_undeclared, // a round asked for input of a kind the client declared no handler for
@@ -121,12 +125,16 @@ struct ClientError {
     // application that gives its own transport may. Empty otherwise.
     std::optional<profile::Transport> next_transport;
     // Whether the request went out to the server and the call ended without the server's answer, so that what the
-    // server did is not known: a tool may have run. Set for timed_out, cancelled, server_exited and stream_lost when
-    // the request had been sent; clear when the call failed before anything was sent, and for every other kind.
+    // server did is not known: a tool may have run. Set for timed_out, cancelled, server_exited and stream_lost, and
+    // for the ends of a task without its result (task_lost, task_cancelled, task_polls_exceeded), when the request had
+    // been sent; clear when the call failed before anything was sent, and for every other kind.
     bool may_have_run = false;
     // authorization_failed: what the authorizer met (the problem, the authorization server, the URL without its
     // query); never a secret.
     std::optional<AuthorizationFailure> authorization;
+    // The id of the task the call was about, when the server answered it with a task or it followed, read or
+    // cancelled one: an application that has it can follow the task again with Client::task.
+    std::optional<std::string> task;
 };
 
 // Thrown by the accessors of a Result that holds no value.

@@ -6,6 +6,8 @@ add_executable(neomcp_client_test
     driver_test.cpp
     feed_test.cpp
     schema_bounds_test.cpp
+    tasks_server_test.cpp
+    tasks_test.cpp
     typed_test.cpp)
 target_link_libraries(neomcp_client_test PRIVATE neomcp::client neomcp::client_in_process neomcp::server
     GTest::gtest_main Threads::Threads)

@@ -164,10 +164,41 @@ struct Speaker {
 };
 
 enum class Purpose {
-    call,       // the application's
-    probe,      // asks which revisions the server serves
-    handshake,  // opens the connection
-    level       // sets the level of the server's log messages
+    call,        // the application's
+    probe,       // asks which revisions the server serves
+    handshake,   // opens the connection
+    level,       // sets the level of the server's log messages
+    task_cancel  // cancels a task a call created and gave up on; its answer changes nothing
+};
+
+// What a call does with a task.
+enum class TaskMode {
+    follow,  // reads it until it ends, and answers the requests it waits on
+    read,    // reads it once
+    cancel   // cancels it
+};
+
+// Where a call about a task stands.
+enum class TaskStep {
+    waiting,    // its poll clock runs; nothing of it is on the wire
+    reading,    // a read of the task is on the wire
+    updating,   // answers to the task's requests are on the wire
+    cancelling  // the cancellation is on the wire
+};
+
+struct TaskWork {
+    std::string id;
+    TaskMode mode = TaskMode::follow;
+    TaskStep step = TaskStep::waiting;
+    // The call's own result created the task: when the call ends before the task did, it cancels the task.
+    bool owned = false;
+    // The task ended, or the server knows no such task: there is nothing to cancel.
+    bool settled = false;
+    std::size_t polls = 0;  // reads sent so far
+    // The wait between reads the server suggested last.
+    std::optional<std::chrono::milliseconds> suggested;
+    // The keys of the requests the call answered, or is answering: never presented to a handler again.
+    std::set<std::string> answered;
 };
 
 struct Clock {
@@ -202,9 +233,14 @@ struct Call {
     // wait clock runs only until the acknowledgement.
     bool subscription = false;
     ChangeFilter filter;
+    // Where the client takes tasks: a result that creates one ends the call (hand_over_task), or the call follows it.
+    bool hand_over_task = false;
+    std::optional<TaskWork> task;
     Clock wait;
     Clock total;
     Clock input;
+    Clock poll;        // the wait before the next read of its task
+    Clock task_clock;  // the whole of its task (ClientTaskOptions::max_wait)
 };
 
 struct Ask {
@@ -215,6 +251,12 @@ struct Ask {
     std::vector<RequestRef> paused;
     Clock input;
     std::optional<json_schema::Validator> form;  // a form's requested schema, compiled
+};
+
+// A request the client gave up on (cancelled or timed out) whose answer could still create a task.
+struct Abandoned {
+    const Speaker* speaker = nullptr;
+    std::string method;
 };
 
 struct WireEntry {
@@ -287,6 +329,54 @@ public:
     }
 
     std::variant<RequestRef, CallFailure> send(OutgoingCall call) { return send_call(std::move(call), nullptr); }
+
+    // ---- tasks
+
+    bool takes_tasks() const {
+        return !closed_ && contact_.phase == ContactPhase::open && governing_ != nullptr &&
+               tasks_of(*governing_) != nullptr;
+    }
+
+    // A call about the task `id` under the governing profile.
+    std::variant<RequestRef, CallFailure> task_call(std::string id, TaskMode mode,
+                                                    std::optional<std::chrono::milliseconds> timeout) {
+        if (closed_) return CallFailure{CallFailureKind::closed, "the engine is closed"};
+        if (contact_.phase == ContactPhase::failed) {
+            return CallFailure{CallFailureKind::contact_failed, "contact with the server could not be made"};
+        }
+        if (governing_ == nullptr) return CallFailure{CallFailureKind::contact_failed, "contact with the server is not open"};
+        const ClientTaskMechanism* half = tasks_of(*governing_);
+        if (half == nullptr) {
+            return CallFailure{CallFailureKind::unsupported_method,
+                               "the governing revision has no tasks the client takes"};
+        }
+        if (!task_id_fits(id)) {
+            return CallFailure{CallFailureKind::unsupported_method,
+                               "the id of a task must be neither empty nor longer than max_id_bytes"};
+        }
+        if (timeout && timeout->count() <= 0) {
+            return CallFailure{CallFailureKind::unsupported_method, "the timeout of a call must be positive"};
+        }
+        if (application_calls_ >= options_.max_pending_requests) {
+            return CallFailure{CallFailureKind::too_many_pending, "as many calls as the client allows are pending"};
+        }
+        Call& made = new_call(Purpose::call, ClientMessage{}, timeout.value_or(options_.request_timeout));
+        const RequestRef ref = made.ref;
+        made.speaker = governing_;
+        TaskWork work;
+        work.id = std::move(id);
+        work.mode = mode;
+        made.task = std::move(work);
+        ++application_calls_;
+        if (mode == TaskMode::follow) {
+            clock_start(ref, DeadlineKind::task, made.task_clock, options_.tasks.max_wait);
+            ++made.task->polls;
+        }
+        const std::string& task_id = made.task->id;
+        ClientMessage message = mode == TaskMode::cancel ? half->cancel(task_id) : half->read(task_id);
+        send_about_task(made, std::move(message), mode == TaskMode::cancel ? TaskStep::cancelling : TaskStep::reading);
+        return ref;
+    }
 
     // ---- change feeds
 
@@ -362,6 +452,7 @@ private:
         }
         Call& made = new_call(Purpose::call, std::move(call.message), call.timeout.value_or(options_.request_timeout));
         made.input_schema = std::move(call.input_schema);
+        made.hand_over_task = call.hand_over_task;
         if (filter != nullptr) {
             made.subscription = true;
             made.filter = *filter;
@@ -460,10 +551,15 @@ public:
             const auto found = calls_.find(*ref);
             if (found == calls_.end()) return;
             Call& call = found->second;
-            Clock& clock = deadline.kind == DeadlineKind::wait    ? call.wait
-                           : deadline.kind == DeadlineKind::total ? call.total
-                                                                  : call.input;
-            if (!live(clock, deadline)) return;
+            Clock* clock = &call.input;
+            switch (deadline.kind) {
+                case DeadlineKind::wait: clock = &call.wait; break;
+                case DeadlineKind::total: clock = &call.total; break;
+                case DeadlineKind::input: clock = &call.input; break;
+                case DeadlineKind::poll: clock = &call.poll; break;
+                case DeadlineKind::task: clock = &call.task_clock; break;
+            }
+            if (!live(*clock, deadline)) return;
             expire_call(call, deadline.kind);
             return;
         }
@@ -488,6 +584,7 @@ public:
         Call& call = found->second;
         // What the server still sends to end a subscription it was told to end is expected, not a defect.
         if (call.wire && call.subscription) remember_ended(*call.wire);
+        remember_abandoned(call);
         if (call.wire) cancel_on_wire(call, reason);
         end_call(ref, CallFailure{CallFailureKind::cancelled, "the call was cancelled"});
     }
@@ -518,6 +615,10 @@ public:
         const auto found = calls_.find(ref);
         if (found == calls_.end() || !found->second.in_round) return;
         Call& call = found->second;
+        if (call.task) {
+            answer_task_round(call, std::move(answers));
+            return;
+        }
         const ClientInputMechanism& input = *call.speaker->halves.server_input;
         const profile::Profile& profile = *call.speaker->halves.profile;
         for (const auto& [key, given] : answers) {
@@ -804,14 +905,283 @@ private:
         clock_stop(ref, DeadlineKind::wait, call.wait);
         clock_stop(ref, DeadlineKind::total, call.total);
         clock_stop(ref, DeadlineKind::input, call.input);
+        clock_stop(ref, DeadlineKind::poll, call.poll);
+        clock_stop(ref, DeadlineKind::task, call.task_clock);
         if (call.wire) wires_.erase(*call.wire);
         if (call.held) held_.erase(std::remove(held_.begin(), held_.end(), ref), held_.end());
         const bool application = call.purpose == Purpose::call;
         profile::ProfilePtr profile = call.speaker != nullptr ? call.speaker->halves.profile : nullptr;
+        std::optional<std::string> task_id;
+        const Speaker* task_speaker = nullptr;
+        if (call.task) {
+            task_id = call.task->id;
+            if (call.task->owned && !call.task->settled && gives_up(outcome)) task_speaker = call.speaker;
+        }
         calls_.erase(found);
+        // A call that gives up on the task it created cancels it; where the answer was lost, the task may be followed
+        // again by its id, and while contact is not open nothing can go out.
+        if (task_speaker != nullptr && !closed_ && contact_.phase == ContactPhase::open) {
+            if (const ClientTaskMechanism* half = tasks_of(*task_speaker)) {
+                internal(Purpose::task_cancel, half->cancel(*task_id), options_.request_timeout, *task_speaker, false);
+            }
+        }
         if (!application) return;
         --application_calls_;
-        push(RequestEnded{ref, std::move(outcome), std::move(profile)}, false);
+        push(RequestEnded{ref, std::move(outcome), std::move(profile), std::move(task_id)}, false);
+    }
+
+    // Whether a call that ends so gives up on its task (rather than having lost its answer or the connection).
+    static bool gives_up(const RequestOutcome& outcome) {
+        const auto* failure = std::get_if<CallFailure>(&outcome);
+        if (failure == nullptr) return true;
+        switch (failure->kind) {
+            case CallFailureKind::server_exited:
+            case CallFailureKind::stream_lost:
+            case CallFailureKind::send_failed:
+            case CallFailureKind::contact_failed:
+            case CallFailureKind::closed: return false;
+            default: return true;
+        }
+    }
+
+    // ---- tasks
+
+    // The tasks half of a speaker, when the client takes tasks under it.
+    const ClientTaskMechanism* tasks_of(const Speaker& speaker) const {
+        if (!options_.tasks.accept || speaker.halves.tasks == nullptr || !speaker.halves.tasks->takes_tasks()) {
+            return nullptr;
+        }
+        return speaker.halves.tasks.get();
+    }
+
+    bool task_id_fits(const std::string& id) const { return !id.empty() && id.size() <= options_.tasks.max_id_bytes; }
+
+    // A call whose result created the task `state` follows it.
+    void start_following(Call& call, TaskState state) {
+        const RequestRef ref = call.ref;
+        clock_stop(ref, DeadlineKind::wait, call.wait);
+        clock_stop(ref, DeadlineKind::total, call.total);
+        TaskWork work;
+        work.id = std::move(state.id);
+        work.owned = true;
+        work.suggested = state.poll_interval;
+        call.task = std::move(work);
+        clock_start(ref, DeadlineKind::task, call.task_clock, options_.tasks.max_wait);
+        schedule_read(call);
+    }
+
+    // The wait before the next read, or the end of the call when it read its task as often as it may.
+    void schedule_read(Call& call) {
+        const RequestRef ref = call.ref;
+        TaskWork& task = *call.task;
+        if (task.polls >= options_.tasks.max_polls) {
+            end_call(ref, CallFailure{CallFailureKind::task_polls_exceeded,
+                                      "the task was read as often as the client reads one, and has not ended"});
+            return;
+        }
+        task.step = TaskStep::waiting;
+        clock_stop(ref, DeadlineKind::wait, call.wait);
+        const std::chrono::milliseconds wait = std::clamp(task.suggested.value_or(options_.tasks.min_poll_interval),
+                                                          options_.tasks.min_poll_interval,
+                                                          options_.tasks.max_poll_interval);
+        clock_start(ref, DeadlineKind::poll, call.poll, wait);
+    }
+
+    // The poll clock lapsed: the task is read.
+    void read_due(Call& call) {
+        const ClientTaskMechanism* half = tasks_of(*call.speaker);
+        if (half == nullptr) {
+            end_call(call.ref, CallFailure{CallFailureKind::unsupported_method, "the revision has no tasks"});
+            return;
+        }
+        ++call.task->polls;
+        send_about_task(call, half->read(call.task->id), TaskStep::reading);
+    }
+
+    // Sends a request about the call's task, under the profile the call went out under, or keeps it until contact is
+    // open again. Its wait clock runs from now. Ends the call when the request cannot be written.
+    void send_about_task(Call& call, ClientMessage message, TaskStep step) {
+        const RequestRef ref = call.ref;
+        call.message = std::move(message);
+        call.round_params.reset();
+        call.progress = false;
+        call.reset_on_progress = false;
+        call.input_schema = nullptr;
+        call.task->step = step;
+        clock_stop(ref, DeadlineKind::poll, call.poll);
+        if (contact_.phase == ContactPhase::open && governing_ != nullptr) {
+            if (auto failure = build_and_send(call, *call.speaker)) {
+                end_call(ref, *failure);
+                return;
+            }
+        } else {
+            call.held = true;
+            held_.push_back(ref);
+            if (contact_.phase == ContactPhase::lost) request_restart();
+        }
+        const auto found = calls_.find(ref);
+        if (found != calls_.end()) clock_start(ref, DeadlineKind::wait, found->second.wait, found->second.timeout);
+    }
+
+    // The answer to a request about a task.
+    void on_task_answer(RequestRef ref, const Message& message) {
+        Call& call = calls_.at(ref);
+        TaskWork& task = *call.task;
+        const profile::Profile& profile = *call.speaker->halves.profile;
+        const ClientTaskMechanism* half = tasks_of(*call.speaker);
+        clock_stop(ref, DeadlineKind::wait, call.wait);
+        if (half == nullptr) {
+            end_call(ref, CallFailure{CallFailureKind::malformed_answer, "the revision has no tasks"});
+            return;
+        }
+        if (message.failed) {
+            auto error = read_error(message.outcome);
+            if (!error) {
+                end_call(ref, CallFailure{CallFailureKind::malformed_answer, "the error answer cannot be read"});
+                return;
+            }
+            if (half->says_unknown(*error)) {
+                task.settled = true;
+                end_call(ref, CallFailure{CallFailureKind::task_lost, "the server does not know the task"});
+                return;
+            }
+            note_defect(error->code, profile);
+            end_call(ref, ErrorAnswered{std::move(*error)});
+            return;
+        }
+        switch (task.step) {
+            case TaskStep::reading: break;
+            case TaskStep::updating:
+            case TaskStep::cancelling:
+                if (auto problem = half->read_acknowledgement(message.outcome, profile)) {
+                    end_call(ref, CallFailure{CallFailureKind::malformed_answer,
+                                              "the acknowledgement cannot be read: " + *problem});
+                    return;
+                }
+                if (task.step == TaskStep::cancelling) {
+                    end_call(ref, Answered{message.outcome});
+                } else {
+                    schedule_read(call);
+                }
+                return;
+            case TaskStep::waiting:
+                end_call(ref, CallFailure{CallFailureKind::malformed_answer, "an answer came while no request was out"});
+                return;
+        }
+        auto read = half->read_state(message.outcome, profile);
+        if (auto* problem = std::get_if<std::string>(&read)) {
+            end_call(ref, CallFailure{CallFailureKind::malformed_answer, "the state of the task cannot be read: " + *problem});
+            return;
+        }
+        TaskState state = std::get<TaskState>(std::move(read));
+        if (state.id != task.id) {
+            end_call(ref, CallFailure{CallFailureKind::malformed_answer, "the server answered with another task"});
+            return;
+        }
+        if (state.poll_interval) task.suggested = state.poll_interval;
+        if (task.mode == TaskMode::read) {
+            end_call(ref, Answered{message.outcome, std::move(state)});
+            return;
+        }
+        switch (state.status) {
+            case TaskStatus::completed:
+                task.settled = true;
+                end_call(ref, Answered{std::move(*state.result)});
+                return;
+            case TaskStatus::failed:
+                task.settled = true;
+                end_call(ref, ErrorAnswered{std::move(*state.error)});
+                return;
+            case TaskStatus::cancelled:
+                task.settled = true;
+                end_call(ref, CallFailure{CallFailureKind::task_cancelled, "the task was cancelled"});
+                return;
+            case TaskStatus::working: schedule_read(call); return;
+            case TaskStatus::input_required: break;
+        }
+        // The requests the call has not answered yet make a round; with none, the reads go on.
+        InputAsking asking;
+        for (AskedInput& one : state.requests) {
+            if (task.answered.count(one.key) == 0) asking.requests.push_back(std::move(one));
+        }
+        if (asking.requests.empty()) {
+            schedule_read(call);
+            return;
+        }
+        open_round(call, std::move(asking));
+    }
+
+    // The answers of a round of a task go to the task.
+    void answer_task_round(Call& call, InputResponses answers) {
+        const RequestRef ref = call.ref;
+        const ClientTaskMechanism* half = tasks_of(*call.speaker);
+        const profile::Profile& profile = *call.speaker->halves.profile;
+        for (const auto& [key, given] : answers) {
+            const auto form = call.forms.find(key);
+            if (form != call.forms.end() && !content_fits(given, form->second)) {
+                end_call(ref, CallFailure{CallFailureKind::answer_invalid,
+                                          "an accepted form's content does not fit its requested schema; nothing was sent"});
+                return;
+            }
+        }
+        if (half == nullptr) {
+            end_call(ref, CallFailure{CallFailureKind::answer_not_writable, "the revision has no tasks"});
+            return;
+        }
+        auto written = half->update(call.task->id, answers, profile);
+        if (auto* problem = std::get_if<std::string>(&written)) {
+            end_call(ref, CallFailure{CallFailureKind::answer_not_writable, *problem});
+            return;
+        }
+        for (const AskedInput& one : call.asking->requests) call.task->answered.insert(one.key);
+        call.in_round = false;
+        call.asking.reset();
+        call.forms.clear();
+        clock_stop(ref, DeadlineKind::input, call.input);
+        send_about_task(call, std::get<ClientMessage>(std::move(written)), TaskStep::updating);
+    }
+
+    // A round of the call: what it asks is checked as every round is (declared, bounded, forms restricted), and the
+    // call waits for the answers with its clocks paused. Ends the call when a check fails.
+    void open_round(Call& call, InputAsking asking) {
+        const RequestRef ref = call.ref;
+        const Speaker& speaker = *call.speaker;
+        for (const AskedInput& one : asking.requests) {
+            if (!declared(one.request, speaker)) {
+                end_call(ref, CallFailure{CallFailureKind::server_asked_undeclared,
+                                          "the server asked for " + kind_name(one.request) +
+                                              " in a way the client did not declare"});
+                return;
+            }
+        }
+        if (asking.requests.size() > options_.max_input_requests_per_round) {
+            end_call(ref, CallFailure{CallFailureKind::input_requests_exceeded,
+                                      "the server asked for more inputs in one round than the client allows"});
+            return;
+        }
+        if (call.round >= options_.max_input_rounds) {
+            end_call(ref, CallFailure{CallFailureKind::input_rounds_exceeded,
+                                      "the server asked for input more often than the client allows"});
+            return;
+        }
+        std::map<std::string, json_schema::Validator> forms;
+        for (const AskedInput& one : asking.requests) {
+            const auto* form = std::get_if<ElicitationForm>(&one.request);
+            if (form == nullptr) continue;
+            auto checked = check_form(*form, speaker);
+            if (auto* problem = std::get_if<std::string>(&checked)) {
+                end_call(ref, CallFailure{CallFailureKind::form_not_restricted, std::move(*problem)});
+                return;
+            }
+            forms.emplace(one.key, std::get<json_schema::Validator>(std::move(checked)));
+        }
+        ++call.round;
+        call.in_round = true;
+        call.asking = asking;
+        call.forms = std::move(forms);
+        pause_call(call);
+        clock_start(ref, DeadlineKind::input, call.input, options_.input_handler_timeout);
+        push(InputRoundStarted{ref, std::move(asking), call.round, speaker.halves.profile}, false);
     }
 
     void finish(RequestRef ref) { end_call(ref, Answered{}); }
@@ -1021,16 +1391,28 @@ private:
                 emit(Outgoing{std::string(), connection_unit, {}, OutgoingKind::close, nullptr});
                 return;
             case Purpose::level:
+            case Purpose::task_cancel:
                 if (call.wire) cancel_on_wire(call, timed_out_reason);
                 finish(ref);
                 return;
             case Purpose::call: break;
+        }
+        if (kind == DeadlineKind::poll) {
+            read_due(call);
+            return;
+        }
+        if (kind == DeadlineKind::task) {
+            if (call.wire) cancel_on_wire(call, timed_out_reason);
+            end_call(ref, CallFailure{CallFailureKind::timed_out,
+                                      "the task did not end within the longest the client follows one"});
+            return;
         }
         if (kind == DeadlineKind::input) {
             end_call(ref, CallFailure{CallFailureKind::input_timed_out, "a round of input was not answered in time"});
             return;
         }
         if (call.wire && call.subscription) remember_ended(*call.wire);
+        remember_abandoned(call);
         if (call.wire) cancel_on_wire(call, timed_out_reason);
         end_call(ref, CallFailure{CallFailureKind::timed_out, "the call was not answered in time"});
     }
@@ -1081,7 +1463,7 @@ private:
             return;
         }
         finish(ref);
-        if (purpose == Purpose::level) return;
+        if (purpose == Purpose::level || purpose == Purpose::task_cancel) return;
         step(ref, method, status ? failure.message + " (status " + std::to_string(*status) + ")" : failure.message);
         if (purpose == Purpose::probe && status && refusing_status(*status)) {
             fallback_handshake();
@@ -1522,6 +1904,14 @@ private:
         if (found == wires_.end()) {
             // The result that ends a subscription the server ended with a notice, or the client cancelled.
             if (ended_set_.erase(*number) > 0) return;
+            // A request the client gave up on was answered with a task after all: nobody follows it, so it is
+            // cancelled.
+            if (const auto abandoned = abandoned_map_.find(*number); abandoned != abandoned_map_.end()) {
+                const Abandoned given_up = std::move(abandoned->second);
+                abandoned_map_.erase(abandoned);
+                cancel_late_task(message, given_up);
+                return;
+            }
             if (answered_set_.count(*number) > 0) {
                 diagnose(DiagnosticKind::repeated_answer, "a second answer to a request was dropped", unit);
             } else {
@@ -1555,6 +1945,7 @@ private:
                 if (message.failed) diagnose(DiagnosticKind::level_refused, "the server refused the log level");
                 finish(ref);
                 return;
+            case Purpose::task_cancel: finish(ref); return;
             case Purpose::call: on_call_answer(ref, message, *number); return;
         }
     }
@@ -1579,6 +1970,32 @@ private:
         }
     }
 
+    // A request on the wire whose answer could create a task the call would follow (a call of the application that
+    // follows no task yet, under a speaker whose tasks the client takes): an answer that comes after the call gave it
+    // up is read for a task to cancel. As many are kept as calls may be pending.
+    void remember_abandoned(const Call& call) {
+        if (!call.wire || call.task || call.subscription || call.speaker == nullptr) return;
+        if (tasks_of(*call.speaker) == nullptr) return;
+        abandoned_.push_back(*call.wire);
+        abandoned_map_[*call.wire] = Abandoned{call.speaker, call.message.method};
+        while (abandoned_.size() > options_.max_pending_requests) {
+            abandoned_map_.erase(abandoned_.front());
+            abandoned_.pop_front();
+        }
+    }
+
+    // The late answer of a request the client gave up on: when it created a task, the task is cancelled.
+    void cancel_late_task(const Message& message, const Abandoned& given_up) {
+        if (message.failed || closed_ || contact_.phase != ContactPhase::open) return;
+        const ClientTaskMechanism* half = tasks_of(*given_up.speaker);
+        if (half == nullptr) return;
+        auto created = half->read_created(message.outcome, given_up.method, *given_up.speaker->halves.profile);
+        if (!created || std::holds_alternative<std::string>(*created)) return;
+        const TaskState& state = std::get<TaskState>(*created);
+        if (!task_id_fits(state.id)) return;
+        internal(Purpose::task_cancel, half->cancel(state.id), options_.request_timeout, *given_up.speaker, false);
+    }
+
     void on_call_answer(RequestRef ref, const Message& message, std::uint64_t wire) {
         Call& call = calls_.at(ref);
         const Speaker& speaker = *call.speaker;
@@ -1591,6 +2008,10 @@ private:
                 return;
             }
             end_call(ref, Answered{message.outcome});
+            return;
+        }
+        if (call.task) {
+            on_task_answer(ref, message);
             return;
         }
         if (message.failed) {
@@ -1634,6 +2055,31 @@ private:
             end_call(ref, ErrorAnswered{std::move(*error)});
             return;
         }
+        if (const ClientTaskMechanism* tasks = tasks_of(speaker)) {
+            if (auto created = tasks->read_created(message.outcome, call.message.method, profile)) {
+                if (auto* problem = std::get_if<std::string>(&*created)) {
+                    end_call(ref, CallFailure{CallFailureKind::malformed_answer,
+                                              "the result that creates a task cannot be read: " + *problem});
+                    return;
+                }
+                TaskState state = std::get<TaskState>(std::move(*created));
+                if (!task_id_fits(state.id)) {
+                    end_call(ref, CallFailure{CallFailureKind::malformed_answer,
+                                              "the result creates a task whose id is empty or longer than the client "
+                                              "takes"});
+                    return;
+                }
+                if (call.hand_over_task) {
+                    TaskWork work;
+                    work.id = state.id;
+                    call.task = std::move(work);
+                    end_call(ref, Answered{message.outcome, std::move(state)});
+                    return;
+                }
+                start_following(call, std::move(state));
+                return;
+            }
+        }
         const ClientInputMechanism& input = *speaker.halves.server_input;
         if (input.delivery() == InputDelivery::result) {
             auto read = input.read_result(message.outcome, call.message.method, profile);
@@ -1643,42 +2089,7 @@ private:
             }
             auto& asking = std::get<std::optional<InputAsking>>(read);
             if (asking) {
-                for (const AskedInput& one : asking->requests) {
-                    if (!declared(one.request, speaker)) {
-                        end_call(ref, CallFailure{CallFailureKind::server_asked_undeclared,
-                                                  "the server asked for " + kind_name(one.request) +
-                                                      " in a way the client did not declare"});
-                        return;
-                    }
-                }
-                if (asking->requests.size() > options_.max_input_requests_per_round) {
-                    end_call(ref, CallFailure{CallFailureKind::input_requests_exceeded,
-                                              "the server asked for more inputs in one round than the client allows"});
-                    return;
-                }
-                if (call.round >= options_.max_input_rounds) {
-                    end_call(ref, CallFailure{CallFailureKind::input_rounds_exceeded,
-                                              "the server asked for input more often than the client allows"});
-                    return;
-                }
-                std::map<std::string, json_schema::Validator> forms;
-                for (const AskedInput& one : asking->requests) {
-                    const auto* form = std::get_if<ElicitationForm>(&one.request);
-                    if (form == nullptr) continue;
-                    auto checked = check_form(*form, speaker);
-                    if (auto* problem = std::get_if<std::string>(&checked)) {
-                        end_call(ref, CallFailure{CallFailureKind::form_not_restricted, std::move(*problem)});
-                        return;
-                    }
-                    forms.emplace(one.key, std::get<json_schema::Validator>(std::move(checked)));
-                }
-                ++call.round;
-                call.in_round = true;
-                call.asking = *asking;
-                call.forms = std::move(forms);
-                pause_call(call);
-                clock_start(ref, DeadlineKind::input, call.input, options_.input_handler_timeout);
-                push(InputRoundStarted{ref, std::move(*asking), call.round, speaker.halves.profile}, false);
+                open_round(call, std::move(*asking));
                 return;
             }
         }
@@ -2182,6 +2593,10 @@ private:
     std::set<std::uint64_t> answered_set_;
     std::deque<std::uint64_t> ended_;     // subscriptions that ended without their result (remember_ended)
     std::set<std::uint64_t> ended_set_;
+    // Requests the client gave up on while their answer could still create a task (remember_abandoned), with the
+    // speaker each went out under.
+    std::deque<std::uint64_t> abandoned_;
+    std::map<std::uint64_t, Abandoned> abandoned_map_;
     std::size_t application_calls_ = 0;
     std::size_t peer_compiles_ = 0;     // schemas of the server compiled or refused (compile_peer_schema)
     bool budget_reported_ = false;
@@ -2237,6 +2652,35 @@ std::variant<std::unique_ptr<ClientEngine>, ClientMechanismsError> ClientEngine:
     if (options.peer_max_evaluations == 0) problem("peer_max_evaluations is zero");
     if (options.peer_patterns_per_schema == 0) problem("peer_patterns_per_schema is zero");
     if (options.max_peer_schema_compiles == 0) problem("max_peer_schema_compiles is zero");
+    if (options.tasks.min_poll_interval.count() <= 0 || options.tasks.max_poll_interval.count() <= 0) {
+        problem("the waits between the reads of a task are not positive");
+    } else if (options.tasks.min_poll_interval > options.tasks.max_poll_interval) {
+        problem("tasks.min_poll_interval exceeds tasks.max_poll_interval");
+    }
+    if (options.tasks.max_wait.count() <= 0) problem("tasks.max_wait is not positive");
+    if (options.tasks.max_polls == 0) problem("tasks.max_polls is zero");
+    if (options.tasks.max_id_bytes == 0) problem("tasks.max_id_bytes is zero");
+    // A client that takes tasks speaks each revision with the built-in extensions that give it tasks.
+    if (options.tasks.accept) {
+        for (profile::ProfilePtr& entry : profiles) {
+            std::vector<profile::ExtensionPtr> extensions;
+            const auto composed_already = entry->extensions();
+            for (const std::string& id : profile::builtin_extensions()) {
+                profile::ExtensionPtr extension = profile::builtin_extension(id, entry->revision());
+                if (!extension || !extension->mechanism(profile::Slot::tasks)) continue;
+                if (std::find(composed_already.begin(), composed_already.end(), id) != composed_already.end()) continue;
+                extensions.push_back(std::move(extension));
+            }
+            if (extensions.empty()) continue;
+            auto composed = profile::compose(*entry, extensions);
+            if (const auto* failed = std::get_if<profile::Error>(&composed)) {
+                problem("revision " + entry->revision() + " cannot be spoken with the extensions that give it tasks: " +
+                        failed->pointer + ": " + failed->message);
+                continue;
+            }
+            entry = std::get<profile::ProfilePtr>(std::move(composed));
+        }
+    }
 
     const ClientMechanismRegistry& registry =
         options.mechanisms != nullptr ? *options.mechanisms : builtin_client_mechanisms();
@@ -2261,6 +2705,7 @@ std::variant<std::unique_ptr<ClientEngine>, ClientMechanismsError> ClientEngine:
         speaker.self.info = options.client_info;
         speaker.self.log_level = options.log_level;
         speaker.self.capabilities = client_capabilities(options.input, *half.profile);
+        if (options.tasks.accept && half.tasks->takes_tasks()) half.tasks->declare(speaker.self.capabilities);
         speaker.halves = std::move(half);
         speakers.push_back(std::move(speaker));
     }
@@ -2284,6 +2729,22 @@ void ClientEngine::open() {
 std::variant<RequestRef, CallFailure> ClientEngine::send(OutgoingCall call) {
     core_->guard();
     return core_->send(std::move(call));
+}
+bool ClientEngine::takes_tasks() const { return core_->takes_tasks(); }
+std::variant<RequestRef, CallFailure> ClientEngine::follow_task(std::string id,
+                                                                std::optional<std::chrono::milliseconds> timeout) {
+    core_->guard();
+    return core_->task_call(std::move(id), detail::TaskMode::follow, timeout);
+}
+std::variant<RequestRef, CallFailure> ClientEngine::read_task(std::string id,
+                                                              std::optional<std::chrono::milliseconds> timeout) {
+    core_->guard();
+    return core_->task_call(std::move(id), detail::TaskMode::read, timeout);
+}
+std::variant<RequestRef, CallFailure> ClientEngine::cancel_task(std::string id,
+                                                                std::optional<std::chrono::milliseconds> timeout) {
+    core_->guard();
+    return core_->task_call(std::move(id), detail::TaskMode::cancel, timeout);
 }
 std::optional<CallFailure> ClientEngine::notify(ClientMessage message) {
     core_->guard();

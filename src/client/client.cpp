@@ -75,7 +75,9 @@ ClientError own_thread_error() {
 // The failures after which what the server did is not known, when the request had gone out.
 bool unknown_outcome(CallFailureKind kind) noexcept {
     return kind == CallFailureKind::timed_out || kind == CallFailureKind::cancelled ||
-           kind == CallFailureKind::server_exited || kind == CallFailureKind::stream_lost;
+           kind == CallFailureKind::server_exited || kind == CallFailureKind::stream_lost ||
+           kind == CallFailureKind::task_lost || kind == CallFailureKind::task_cancelled ||
+           kind == CallFailureKind::task_polls_exceeded;
 }
 
 // The failures whose answer was lost, after which a read may be sent again.
@@ -312,7 +314,12 @@ struct CallOutcome {
     std::optional<json> result;
     profile::ProfilePtr profile;
     std::optional<ClientError> error;
+    // The task's state, when the call ended with one (Answered::task).
+    std::optional<TaskState> task;
 };
+
+// What a call about a task does with it (the engine's follow_task, read_task and cancel_task).
+enum class TaskAction { follow, read, cancel };
 
 struct OpenOutcome {
     std::optional<ClientError> error;
@@ -465,6 +472,7 @@ public:
         RequestRef ref;
         OutgoingCall call;  // kept for sending it again
         bool resent = false;
+        bool about_task = false;  // a call about a task, never sent again as a read
         std::function<void(const Progress&)> on_progress;
         std::optional<RequestEnded> ended;
         asio::steady_timer wake;
@@ -473,7 +481,7 @@ public:
 
     // Sends a call, or says why it cannot go out.
     std::optional<ClientError> begin_call(const std::shared_ptr<Waiter>& waiter, ClientMessage message,
-                                          RequestOptions options, json input_schema) {
+                                          RequestOptions options, json input_schema, bool hand_over_task = false) {
         if (closing_) return closed_error();
         if (options.timeout && options.timeout->count() <= 0) {
             return error_of(ClientErrorKind::invalid_options, "the timeout of a call must be positive");
@@ -487,9 +495,42 @@ public:
         call.reset_timeout_on_progress = options.reset_timeout_on_progress;
         call.progress = static_cast<bool>(options.on_progress);
         call.input_schema = std::move(input_schema);
+        call.hand_over_task = hand_over_task;
         waiter->call = call;
         waiter->on_progress = std::move(options.on_progress);
         auto sent = engine_->send(std::move(call));
+        return track(waiter, std::move(sent), options.stop);
+    }
+
+    // Sends a call about the task `id`, or says why it cannot go out.
+    std::optional<ClientError> begin_task_call(const std::shared_ptr<Waiter>& waiter, TaskAction action,
+                                               std::string id, RequestOptions options) {
+        if (closing_) return closed_error();
+        if (options.timeout && options.timeout->count() <= 0) {
+            return error_of(ClientErrorKind::invalid_options, "the timeout of a call must be positive");
+        }
+        if (options.stop.stop_requested()) {
+            return error_of(ClientErrorKind::cancelled, "the call was cancelled before it was sent");
+        }
+        waiter->about_task = true;
+        std::variant<RequestRef, CallFailure> sent;
+        switch (action) {
+            case TaskAction::follow: sent = engine_->follow_task(std::move(id), options.timeout); break;
+            case TaskAction::read: sent = engine_->read_task(std::move(id), options.timeout); break;
+            case TaskAction::cancel: sent = engine_->cancel_task(std::move(id), options.timeout); break;
+        }
+        return track(waiter, std::move(sent), options.stop);
+    }
+
+    // Whether an id of a task is one the client takes.
+    bool task_id_fits(const std::string& id) const {
+        return !id.empty() && id.size() <= options_.tasks.max_id_bytes;
+    }
+
+    // A call the engine took is awaited by its waiter, and cancelled when `stop` is requested; one it refused gives
+    // its error.
+    std::optional<ClientError> track(const std::shared_ptr<Waiter>& waiter, std::variant<RequestRef, CallFailure> sent,
+                                     const std::stop_token& stop) {
         if (auto* failure = std::get_if<CallFailure>(&sent)) {
             ClientError error = call_error(*failure, false, engine_->contact());
             pump();
@@ -497,7 +538,7 @@ public:
         }
         waiter->ref = std::get<RequestRef>(sent);
         waiters_.emplace(waiter->ref, waiter);
-        if (options.stop.stop_possible()) {
+        if (stop.stop_possible()) {
             std::function<void()> on_stop = [weak = weak_from_this(), held = std::weak_ptr<Waiter>(waiter),
                                              runtime = std::weak_ptr<Runtime>(runtime_)] {
                 post_to(runtime, [weak, held] {
@@ -506,7 +547,7 @@ public:
                     if (core && one) core->cancel_call(*one);
                 });
             };
-            waiter->stop.emplace(options.stop, std::move(on_stop));
+            waiter->stop.emplace(stop, std::move(on_stop));
         }
         pump();
         return std::nullopt;
@@ -540,6 +581,7 @@ public:
         if (auto* answered = std::get_if<Answered>(&ended.outcome)) {
             outcome.result = std::move(answered->result);
             outcome.profile = ended.profile;
+            outcome.task = std::move(answered->task);
         } else if (auto* refusal = std::get_if<ErrorAnswered>(&ended.outcome)) {
             ClientError error = error_of(ClientErrorKind::server_error, std::move(refusal->error.message));
             error.code = refusal->error.code;
@@ -549,6 +591,7 @@ public:
             outcome.error = call_error(std::get<CallFailure>(ended.outcome), ended.profile != nullptr,
                                        engine_->contact());
         }
+        if (outcome.error) outcome.error->task = std::move(ended.task);
         return outcome;
     }
 
@@ -959,6 +1002,7 @@ private:
         engine.peer_max_evaluations = options_.peer_max_evaluations;
         engine.peer_patterns_per_schema = options_.peer_patterns_per_schema;
         engine.max_peer_schema_compiles = options_.max_peer_schema_compiles;
+        engine.tasks = options_.tasks;
         auto made = ClientEngine::create(std::move(engine), transport_->kind(),
                                          [this](Outgoing outgoing) { outbox_.push_back(std::move(outgoing)); });
         if (auto* error = std::get_if<ClientMechanismsError>(&made)) {
@@ -1294,7 +1338,7 @@ private:
         const std::shared_ptr<Waiter> waiter = found->second;
         waiters_.erase(found);
         if (const auto* failure = std::get_if<CallFailure>(&ended.outcome);
-            failure != nullptr && lost_answer(failure->kind) && !waiter->resent && !closing_ &&
+            failure != nullptr && lost_answer(failure->kind) && !waiter->resent && !waiter->about_task && !closing_ &&
             options_.resent_methods.count(waiter->call.message.method) != 0) {
             // The answer of a read was lost: it is asked for once more, under a new request and a clock of its own.
             waiter->resent = true;
@@ -1541,12 +1585,9 @@ private:
 // ---- Children: coroutines on the client's thread. Each holds the state by value.
 
 // One request, from its sending to its end; on the client's thread, inside an admitted operation.
-asio::awaitable<CallOutcome> perform_call(std::shared_ptr<ClientCore> core, ClientMessage message,
-                                          RequestOptions options, json input_schema) {
-    co_await asio::this_coro::throw_if_cancelled(false);
-    auto waiter = std::make_shared<ClientCore::Waiter>(core->io());
-    std::optional<ClientError> refused =
-        core->begin_call(waiter, std::move(message), std::move(options), std::move(input_schema));
+// Waits for the end of a call the waiter tracks (unless it was refused), and cancels it when the awaiter is cancelled.
+asio::awaitable<CallOutcome> await_call(std::shared_ptr<ClientCore> core, std::shared_ptr<ClientCore::Waiter> waiter,
+                                        std::optional<ClientError> refused) {
     if (!refused && !waiter->ended) {
         const asio::cancellation_state state = co_await asio::this_coro::cancellation_state;
         if (state.cancelled() == asio::cancellation_type::none) {
@@ -1557,6 +1598,26 @@ asio::awaitable<CallOutcome> perform_call(std::shared_ptr<ClientCore> core, Clie
         if (!waiter->ended) core->cancel_call(*waiter);
     }
     CallOutcome outcome = core->finish_call(*waiter, std::move(refused));
+    co_return outcome;
+}
+
+asio::awaitable<CallOutcome> perform_call(std::shared_ptr<ClientCore> core, ClientMessage message,
+                                          RequestOptions options, json input_schema, bool hand_over_task = false) {
+    co_await asio::this_coro::throw_if_cancelled(false);
+    auto waiter = std::make_shared<ClientCore::Waiter>(core->io());
+    std::optional<ClientError> refused =
+        core->begin_call(waiter, std::move(message), std::move(options), std::move(input_schema), hand_over_task);
+    CallOutcome outcome = co_await await_call(core, waiter, std::move(refused));
+    co_return outcome;
+}
+
+// A call about the task `id`.
+asio::awaitable<CallOutcome> perform_task_call(std::shared_ptr<ClientCore> core, TaskAction action, std::string id,
+                                               RequestOptions options) {
+    co_await asio::this_coro::throw_if_cancelled(false);
+    auto waiter = std::make_shared<ClientCore::Waiter>(core->io());
+    std::optional<ClientError> refused = core->begin_task_call(waiter, action, std::move(id), std::move(options));
+    CallOutcome outcome = co_await await_call(core, waiter, std::move(refused));
     co_return outcome;
 }
 
@@ -1694,6 +1755,12 @@ asio::awaitable<std::optional<ClientError>> open_watches(std::shared_ptr<ClientC
 }  // namespace
 
 // Builds a Subscription for the client's code.
+struct TaskAccess {
+    static TaskHandle make(std::shared_ptr<ClientCore> core, TaskState state, std::optional<std::string> tool) {
+        return TaskHandle(std::move(core), std::move(state), std::move(tool));
+    }
+};
+
 struct SubscriptionAccess {
     static Subscription make(std::shared_ptr<ClientCore> core, const ClientCore::Feed& feed) {
         return Subscription(std::move(core), feed.id, feed.asked, feed.honoured, feed.delivery);
@@ -2050,12 +2117,13 @@ asio::awaitable<Result<Listing<T>>> list_all(std::shared_ptr<ClientCore> core, R
 // A tool call: the tool listed first when the call needs its definition and the client has none (a typed call, which
 // checks the result, and a transport that mirrors marked arguments into headers), then the call, then the check of
 // its structured content.
-asio::awaitable<Result<ToolCall>> perform_tool_call(std::shared_ptr<ClientCore> core, std::string name,
-                                                    json arguments, RequestOptions options, bool typed) {
+asio::awaitable<CallOutcome> send_tool_call(std::shared_ptr<ClientCore> core, std::string name, json arguments,
+                                            RequestOptions options, bool typed, bool hand_over_task) {
+    CallOutcome outcome;
     if (typed && !core->structured_results()) {
-        Result<ToolCall> refused(error_of(ClientErrorKind::no_structured_results,
-                                          "the governing revision's tool results carry no structured content"));
-        co_return refused;
+        outcome.error = error_of(ClientErrorKind::no_structured_results,
+                                 "the governing revision's tool results carry no structured content");
+        co_return outcome;
     }
     if (!core->tool_known(name) && (typed || core->mirrors_arguments())) {
         RequestOptions listing;
@@ -2063,8 +2131,8 @@ asio::awaitable<Result<ToolCall>> perform_tool_call(std::shared_ptr<ClientCore> 
         listing.stop = options.stop;
         Result<Listing<ToolDefinition>> listed = co_await list_all<ToolDefinition>(core, std::move(listing));
         if (!listed) {
-            Result<ToolCall> failed(std::move(listed).error());
-            co_return failed;
+            outcome.error = std::move(listed).error();
+            co_return outcome;
         }
     }
     json input_schema = core->tool_input_schema(name);
@@ -2072,18 +2140,90 @@ asio::awaitable<Result<ToolCall>> perform_tool_call(std::shared_ptr<ClientCore> 
     params[std::string(name_member)] = name;
     params[std::string(arguments_member)] = std::move(arguments);
     ClientMessage message{std::string(client_method::tools_call), std::move(params)};
-    CallOutcome outcome =
-        co_await perform_call(core, std::move(message), std::move(options), std::move(input_schema));
+    outcome = co_await perform_call(core, std::move(message), std::move(options), std::move(input_schema),
+                                    hand_over_task);
+    co_return outcome;
+}
+
+// The tool's result a call ended with, checked against the output schema of the tool `name` (none: not listed).
+Result<ToolCall> tool_call_of(ClientCore& core, const std::string& name, CallOutcome outcome) {
     Result<ToolResult> read = tool_result(std::move(outcome));
-    if (!read) {
-        Result<ToolCall> failed(std::move(read).error());
-        co_return failed;
-    }
+    if (!read) return std::move(read).error();
     ToolCall call;
     static_cast<ToolResult&>(call) = std::move(read).value();
-    call.check = core->check_output(name, call);
-    Result<ToolCall> called(std::move(call));
+    call.check = core.check_output(name, call);
+    return call;
+}
+
+asio::awaitable<Result<ToolCall>> perform_tool_call(std::shared_ptr<ClientCore> core, std::string name,
+                                                    json arguments, RequestOptions options, bool typed) {
+    CallOutcome outcome = co_await send_tool_call(core, name, std::move(arguments), std::move(options), typed, false);
+    Result<ToolCall> called = tool_call_of(*core, name, std::move(outcome));
     co_return called;
+}
+
+// ---- Tasks
+
+asio::awaitable<Result<ToolStart>> perform_start_tool(std::shared_ptr<ClientCore> core, std::string name,
+                                                      json arguments, RequestOptions options) {
+    CallOutcome outcome = co_await send_tool_call(core, name, std::move(arguments), std::move(options), false, true);
+    if (!outcome.error && outcome.task) {
+        Result<ToolStart> started(ToolStart(TaskAccess::make(core, std::move(*outcome.task), std::move(name))));
+        co_return started;
+    }
+    Result<ToolCall> called = tool_call_of(*core, name, std::move(outcome));
+    if (!called) {
+        Result<ToolStart> failed(std::move(called).error());
+        co_return failed;
+    }
+    Result<ToolStart> started(ToolStart(std::move(called).value()));
+    co_return started;
+}
+
+// One read of a task: its state.
+asio::awaitable<Result<TaskState>> perform_task_read(std::shared_ptr<ClientCore> core, std::string id,
+                                                     RequestOptions options) {
+    CallOutcome outcome = co_await perform_task_call(core, TaskAction::read, std::move(id), std::move(options));
+    if (outcome.error) {
+        Result<TaskState> failed(std::move(*outcome.error));
+        co_return failed;
+    }
+    if (!outcome.task) {
+        Result<TaskState> failed(error_of(ClientErrorKind::malformed_answer, "the read of the task gave no task"));
+        co_return failed;
+    }
+    Result<TaskState> read(std::move(*outcome.task));
+    co_return read;
+}
+
+asio::awaitable<Result<TaskHandle>> perform_task(std::shared_ptr<ClientCore> core, std::string id,
+                                                 RequestOptions options) {
+    if (!core->task_id_fits(id)) {
+        Result<TaskHandle> refused(error_of(ClientErrorKind::invalid_options,
+                                            "the id of a task must be neither empty nor longer than max_id_bytes"));
+        co_return refused;
+    }
+    Result<TaskState> read = co_await perform_task_read(core, std::move(id), std::move(options));
+    if (!read) {
+        Result<TaskHandle> failed(std::move(read).error());
+        co_return failed;
+    }
+    Result<TaskHandle> handle(TaskAccess::make(core, std::move(read).value(), std::nullopt));
+    co_return handle;
+}
+
+asio::awaitable<Result<ToolCall>> perform_task_wait(std::shared_ptr<ClientCore> core, std::string id,
+                                                    std::optional<std::string> tool, RequestOptions options) {
+    CallOutcome outcome = co_await perform_task_call(core, TaskAction::follow, std::move(id), std::move(options));
+    Result<ToolCall> called = tool_call_of(*core, tool.value_or(std::string()), std::move(outcome));
+    co_return called;
+}
+
+asio::awaitable<Result<void>> perform_task_cancel(std::shared_ptr<ClientCore> core, std::string id,
+                                                  RequestOptions options) {
+    CallOutcome outcome = co_await perform_task_call(core, TaskAction::cancel, std::move(id), std::move(options));
+    Result<void> result = void_result(std::move(outcome));
+    co_return result;
 }
 
 // ---- Resources, prompts, completion
@@ -2318,6 +2458,59 @@ asio::awaitable<Result<CompletionResult>> Client::async_complete(CompletionRef r
                                                                  RequestOptions options) {
     return detail::work_on(core_, detail::perform_complete(core_, std::move(ref), std::move(argument),
                                                            std::move(value), std::move(resolved), std::move(options)));
+}
+
+// ---- Tasks
+
+Result<ToolStart> Client::start_tool(std::string name, json arguments, RequestOptions options) {
+    if (core_ && core_->here()) return detail::own_thread_error();
+    return detail::block_on(async_start_tool(std::move(name), std::move(arguments), std::move(options)));
+}
+
+asio::awaitable<Result<ToolStart>> Client::async_start_tool(std::string name, json arguments,
+                                                            RequestOptions options) {
+    return detail::work_on(core_, detail::perform_start_tool(core_, std::move(name), std::move(arguments),
+                                                             std::move(options)));
+}
+
+Result<TaskHandle> Client::task(std::string id, RequestOptions options) {
+    if (core_ && core_->here()) return detail::own_thread_error();
+    return detail::block_on(async_task(std::move(id), std::move(options)));
+}
+
+asio::awaitable<Result<TaskHandle>> Client::async_task(std::string id, RequestOptions options) {
+    return detail::work_on(core_, detail::perform_task(core_, std::move(id), std::move(options)));
+}
+
+TaskHandle::TaskHandle(std::shared_ptr<detail::ClientCore> core, TaskState state,
+                       std::optional<std::string> tool) noexcept
+    : core_(std::move(core)), state_(std::move(state)), tool_(std::move(tool)) {}
+
+Result<TaskState> TaskHandle::status(RequestOptions options) const {
+    if (core_ && core_->here()) return detail::own_thread_error();
+    return detail::block_on(async_status(std::move(options)));
+}
+
+asio::awaitable<Result<TaskState>> TaskHandle::async_status(RequestOptions options) const {
+    return detail::work_on(core_, detail::perform_task_read(core_, state_.id, std::move(options)));
+}
+
+Result<ToolCall> TaskHandle::wait(RequestOptions options) const {
+    if (core_ && core_->here()) return detail::own_thread_error();
+    return detail::block_on(async_wait(std::move(options)));
+}
+
+asio::awaitable<Result<ToolCall>> TaskHandle::async_wait(RequestOptions options) const {
+    return detail::work_on(core_, detail::perform_task_wait(core_, state_.id, tool_, std::move(options)));
+}
+
+Result<void> TaskHandle::cancel(RequestOptions options) const {
+    if (core_ && core_->here()) return detail::own_thread_error();
+    return detail::block_on(async_cancel(std::move(options)));
+}
+
+asio::awaitable<Result<void>> TaskHandle::async_cancel(RequestOptions options) const {
+    return detail::work_on(core_, detail::perform_task_cancel(core_, state_.id, std::move(options)));
 }
 
 // ---- Changes

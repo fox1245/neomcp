@@ -76,6 +76,7 @@
 #include "neomcp/client/options.h"
 #include "neomcp/client/result.h"
 #include "neomcp/client/subscription.h"
+#include "neomcp/client/task.h"
 #include "neomcp/client/timers.h"
 #include "neomcp/client/transport.h"
 #include "neomcp/describe.h"
@@ -155,7 +156,8 @@ public:
     // Any request of the governing revision, by its method and params (null, or an object): the server's result as it
     // sent it. The client adds what the revision puts on every request; the engine refuses a method the revision has
     // no client request for (unsupported_method). A result that asks for input is answered through the handlers and
-    // the request sent again, as for every call.
+    // the request sent again, as for every call; a tool call the server answers with a task the client takes is
+    // followed, and gives the result the task ended with.
     Result<json> request(std::string method, json params = nullptr, RequestOptions options = {});
     asio::awaitable<Result<json>> async_request(std::string method, json params = nullptr,
                                                 RequestOptions options = {});
@@ -169,7 +171,9 @@ public:
     // returned as sent, with the outcome of its check against the tool's output schema (ToolCall::check), which never
     // fails the call. The tool's definition is the one of the latest list of tools; on a transport that mirrors
     // arguments into headers, a tool the client has not seen listed makes it list the tools first (list_all_tools),
-    // and a failure of that list fails the call.
+    // and a failure of that list fails the call. Where the client takes tasks (ClientOptions::tasks) and the server
+    // answers with one, the call follows the task and returns the result it ended with (neomcp/client/task.h); stop
+    // then cancels the task as well.
     Result<ToolCall> call_tool(std::string name, json arguments = json::object(), RequestOptions options = {});
     asio::awaitable<Result<ToolCall>> async_call_tool(std::string name, json arguments = json::object(),
                                                       RequestOptions options = {});
@@ -193,6 +197,22 @@ public:
     Result<TypedCall<R>> call(std::string name, Args args, RequestOptions options = {});
     template <class R, class Args>
     asio::awaitable<Result<TypedCall<R>>> async_call(std::string name, Args args, RequestOptions options = {});
+
+    // ---- Tasks (neomcp/client/task.h)
+
+    // Calls a tool as call_tool does, but when the server answers with a task, returns at once with a handle of the
+    // task instead of following it. A result the server gave at once is a ToolCall, checked as call_tool checks it.
+    // Where the client takes no tasks this is call_tool, and always gives a ToolCall.
+    Result<ToolStart> start_tool(std::string name, json arguments = json::object(), RequestOptions options = {});
+    asio::awaitable<Result<ToolStart>> async_start_tool(std::string name, json arguments = json::object(),
+                                                        RequestOptions options = {});
+
+    // A handle of the task `id` (one an application kept from an earlier handle or error), once a read of it found
+    // it: task_lost when the server does not know it; unsupported_method where the client takes no tasks (the option
+    // is off, or the governing revision has none); invalid_options for an id that is empty or longer than
+    // ClientTaskOptions::max_id_bytes.
+    Result<TaskHandle> task(std::string id, RequestOptions options = {});
+    asio::awaitable<Result<TaskHandle>> async_task(std::string id, RequestOptions options = {});
 
     // ---- Lists
     //

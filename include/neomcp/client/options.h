@@ -160,6 +160,12 @@ struct ClientOptions {
     std::chrono::milliseconds subscription_reopen_first_delay = ClientDefaults::subscription_reopen_first_delay;
     std::chrono::milliseconds subscription_reopen_max_delay = ClientDefaults::subscription_reopen_max_delay;
 
+    // ---- Tasks (neomcp/client/task.h)
+
+    // Whether the client takes a task for the answer to a tool call, and the bounds of following one
+    // (ClientTaskOptions). Default: it takes none.
+    ClientTaskOptions tasks;
+
     // ---- Lost answers
 
     // The methods whose request is sent again once, with a new id and a clock of its own, when its answer was lost

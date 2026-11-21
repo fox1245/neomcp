@@ -23,6 +23,9 @@ std::string_view to_string(ClientErrorKind kind) noexcept {
         case ClientErrorKind::unsupported_method: return "unsupported_method";
         case ClientErrorKind::header_value: return "header_value";
         case ClientErrorKind::input_timed_out: return "input_timed_out";
+        case ClientErrorKind::task_lost: return "task_lost";
+        case ClientErrorKind::task_cancelled: return "task_cancelled";
+        case ClientErrorKind::task_polls_exceeded: return "task_polls_exceeded";
         case ClientErrorKind::input_rounds_exceeded: return "input_rounds_exceeded";
         case ClientErrorKind::input_requests_exceeded: return "input_requests_exceeded";
         case ClientErrorKind::server_asked_undeclared: return "server_asked_undeclared";
@@ -74,6 +77,9 @@ std::optional<ClientErrorKind> error_kind(CallFailureKind kind) noexcept {
         case CallFailureKind::unsupported_method: return ClientErrorKind::unsupported_method;
         case CallFailureKind::header_value: return ClientErrorKind::header_value;
         case CallFailureKind::input_timed_out: return ClientErrorKind::input_timed_out;
+        case CallFailureKind::task_lost: return ClientErrorKind::task_lost;
+        case CallFailureKind::task_cancelled: return ClientErrorKind::task_cancelled;
+        case CallFailureKind::task_polls_exceeded: return ClientErrorKind::task_polls_exceeded;
         case CallFailureKind::input_rounds_exceeded: return ClientErrorKind::input_rounds_exceeded;
         case CallFailureKind::input_requests_exceeded: return ClientErrorKind::input_requests_exceeded;
         case CallFailureKind::server_asked_undeclared: return ClientErrorKind::server_asked_undeclared;
