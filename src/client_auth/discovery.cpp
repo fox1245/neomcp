@@ -90,8 +90,10 @@ std::variant<ProtectedResource, FlowFailure> read_protected_resource(const json&
     if (resource == nullptr || entries == nullptr || entries->empty()) {
         return failure(AuthorizationProblem::discovery_failed, candidate.url);
     }
-    for (const json& entry : *entries) {
-        if (!entry.is_string()) return failure(AuthorizationProblem::discovery_failed, candidate.url);
+    // Only the entries within the bound are read, so only they must be strings: what lies past it is ignored.
+    const std::size_t checked = std::min(entries->size(), bounds.max_authorization_servers);
+    for (std::size_t i = 0; i < checked; ++i) {
+        if (!(*entries)[i].is_string()) return failure(AuthorizationProblem::discovery_failed, candidate.url);
     }
 
     bool identical = false;

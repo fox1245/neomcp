@@ -414,6 +414,19 @@ TEST(OAuthFlowResourceMetadata, OnlyTheBoundedNumberOfServersIsRead) {
     EXPECT_TRUE(done_of(edge.run(unauthorized())));
 }
 
+TEST(OAuthFlowResourceMetadata, AnEntryPastTheBoundIsIgnoredWhateverItIs) {
+    Rig rig;
+    rig.config.bounds.max_authorization_servers = 1;
+    rig.world.documents[rig.world.resource_metadata_path_url()] = json_answer(
+        json{{"resource", rig.world.endpoint}, {"authorization_servers", json::array({rig.world.issuer, 7})}});
+    EXPECT_TRUE(done_of(rig.run(unauthorized())));
+
+    Rig within;
+    within.config.bounds.max_authorization_servers = 2;
+    within.world.documents = rig.world.documents;
+    EXPECT_EQ(problem_of(within.run(unauthorized())), AuthorizationProblem::discovery_failed);
+}
+
 TEST(OAuthFlowResourceMetadata, ALoopbackAuthorizationServerOnlyForALoopbackEndpoint) {
     Rig rig;
     rig.config.endpoint_url = "https://mcp.example/mcp";
