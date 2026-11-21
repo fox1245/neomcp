@@ -85,7 +85,7 @@ struct Limits {
     // counts once) `compile` accepts in one schema. Each one costs a compile bounded by max_pattern_memory, so this
     // bounds the work of compiling a schema someone else wrote. The default sets no bound: the schemas a program
     // declares for itself need none.
-    std::size_t max_patterns = std::numeric_limits<std::size_t>::max();
+    std::size_t max_patterns = (std::numeric_limits<std::size_t>::max)();
 };
 
 // Why a schema was refused or a value was rejected.

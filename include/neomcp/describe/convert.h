@@ -128,26 +128,26 @@ constexpr std::string_view kind_name() {
 
 template <class T>
 bool fits_unsigned(std::uint64_t value) {
-    return value <= static_cast<std::uint64_t>(std::numeric_limits<T>::max());
+    return value <= static_cast<std::uint64_t>((std::numeric_limits<T>::max)());
 }
 
 template <class T>
 bool fits_signed(std::int64_t value) {
     if constexpr (std::is_signed_v<T>) {
-        return value >= static_cast<std::int64_t>(std::numeric_limits<T>::min()) &&
-               value <= static_cast<std::int64_t>(std::numeric_limits<T>::max());
+        return value >= static_cast<std::int64_t>((std::numeric_limits<T>::min)()) &&
+               value <= static_cast<std::int64_t>((std::numeric_limits<T>::max)());
     } else {
-        return value >= 0 && static_cast<std::uint64_t>(value) <= static_cast<std::uint64_t>(std::numeric_limits<T>::max());
+        return value >= 0 && static_cast<std::uint64_t>(value) <= static_cast<std::uint64_t>((std::numeric_limits<T>::max)());
     }
 }
 
 template <class T>
 std::string integer_range() {
     if constexpr (std::is_signed_v<T>) {
-        return "integer from " + std::to_string(static_cast<long long>(std::numeric_limits<T>::min())) + " to " +
-               std::to_string(static_cast<long long>(std::numeric_limits<T>::max()));
+        return "integer from " + std::to_string(static_cast<long long>((std::numeric_limits<T>::min)())) + " to " +
+               std::to_string(static_cast<long long>((std::numeric_limits<T>::max)()));
     } else {
-        return "integer from 0 to " + std::to_string(static_cast<unsigned long long>(std::numeric_limits<T>::max()));
+        return "integer from 0 to " + std::to_string(static_cast<unsigned long long>((std::numeric_limits<T>::max)()));
     }
 }
 
@@ -253,7 +253,7 @@ T decode(const json& value, const PathNode* path) {
         }
         const double number = value.get<double>();
         if constexpr (std::is_same_v<T, float>) {
-            if (std::fabs(number) > static_cast<double>(std::numeric_limits<float>::max())) {
+            if (std::fabs(number) > static_cast<double>((std::numeric_limits<float>::max)())) {
                 fail(path, "number that a float can hold");
             }
         }

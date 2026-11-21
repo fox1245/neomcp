@@ -146,8 +146,8 @@ json integer_schema() {
     json schema = json::object();
     set_keyword(schema, "type", json("integer"));
     if constexpr (sizeof(T) < 8) {
-        set_keyword(schema, "minimum", number_json(std::numeric_limits<T>::min()));
-        set_keyword(schema, "maximum", number_json(std::numeric_limits<T>::max()));
+        set_keyword(schema, "minimum", number_json((std::numeric_limits<T>::min)()));
+        set_keyword(schema, "maximum", number_json((std::numeric_limits<T>::max)()));
     } else if constexpr (std::is_unsigned_v<T>) {
         set_keyword(schema, "minimum", number_json(std::uint64_t{0}));
     }
@@ -162,7 +162,7 @@ json floating_schema() {
     set_keyword(schema, "type", json("number"));
     if constexpr (std::is_same_v<T, float>) {
         set_keyword(schema, "minimum", number_json(std::numeric_limits<T>::lowest()));
-        set_keyword(schema, "maximum", number_json(std::numeric_limits<T>::max()));
+        set_keyword(schema, "maximum", number_json((std::numeric_limits<T>::max)()));
     }
     return schema;
 }

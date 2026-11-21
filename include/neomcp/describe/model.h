@@ -110,7 +110,7 @@ template <class V>
 constexpr bool is_finite_number(V value) {
     if constexpr (std::is_floating_point_v<V>) {
         const double wide = static_cast<double>(value);
-        return wide >= std::numeric_limits<double>::lowest() && wide <= std::numeric_limits<double>::max();
+        return wide >= std::numeric_limits<double>::lowest() && wide <= (std::numeric_limits<double>::max)();
     } else {
         static_cast<void>(value);
         return true;
