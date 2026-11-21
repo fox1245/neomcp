@@ -19,6 +19,15 @@ json tokens_with_refresh(std::string access, std::string refresh) {
 
 std::size_t authorizations(const Rig& rig) { return rig.world.prompts.size(); }
 
+// The document padded with one member so that its text is exactly `size` bytes long.
+std::string document_of_size(json document, std::size_t size) {
+    document["pad"] = "";
+    const std::size_t base = document.dump().size();
+    EXPECT_LE(base, size);
+    document["pad"] = std::string(size > base ? size - base : 0, 'p');
+    return document.dump();
+}
+
 // A metadata request follows as many redirects as the transport's own requests do by default.
 static_assert(OAuthDefaults::max_redirects == neomcp::HttpClientDefaults::max_redirects);
 
@@ -481,6 +490,24 @@ TEST(OAuthFlowRun, NoFailureOrDiagnosticCarriesASecret) {
             }
         }
     }
+}
+
+// The size check follows the answer, not its status: an oversized refusal of a refresh ends the flow with the bound's
+// problem and keeps the refresh token, instead of counting as the server's refusal of it.
+TEST(OAuthFlowRefresh, AnOversizedRefusalOfARefreshKeepsTheRefreshToken) {
+    const std::string body = document_of_size(json{{"error", "invalid_grant"}}, 300);
+    Rig rig;
+    rig.world.token_answers = {
+        json_answer(json{{"access_token", "AccessOne"}, {"token_type", "Bearer"}, {"refresh_token", "RefreshOne"}}),
+        answer(400, body)};
+    ASSERT_TRUE(done_of(rig.run(unauthorized())));
+    rig.config.bounds.max_token_response_bytes = body.size() - 1;
+    const std::size_t prompts = rig.world.prompts.size();
+    const FlowStep step = rig.run(unauthorized({}, true));
+    EXPECT_EQ(problem_of(step), AuthorizationProblem::document_too_large);
+    EXPECT_EQ(rig.world.prompts.size(), prompts) << "a new sign-in was started";
+    ASSERT_EQ(rig.lookup.tokens_by_key.size(), 1u);
+    EXPECT_EQ(rig.lookup.tokens_by_key.begin()->second.refresh_token, "RefreshOne");
 }
 
 // A refresh token is held to the same bound as the access token. One over it is a token answer that cannot be used:

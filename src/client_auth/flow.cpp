@@ -334,11 +334,12 @@ FlowStep OAuthFlow::on_refresh(const FetchResult& result) {
         stage_ = Stage::finished;
         return FlowDone{key_, std::move(updates_), true};
     }
-    const bool refused = result.outcome == FetchOutcome::response && is_client_error_status(result.status);
+    const FlowFailure& failure = std::get<FlowFailure>(outcome);
+    const bool refused = result.outcome == FetchOutcome::response && is_client_error_status(result.status) &&
+                         failure.problem == AuthorizationProblem::token_request_failed;
     if (!refused) return fail(std::get<FlowFailure>(std::move(outcome)));
     // The refresh token is no longer good: it is erased with the tokens, and the full flow follows.
     updates_.erase_tokens.push_back(key_);
-    const FlowFailure& failure = std::get<FlowFailure>(outcome);
     if (failure.error_code == error_invalid_client &&
         (client_.source == RegistrationSource::dynamic_stored || client_.source == RegistrationSource::dynamic_new)) {
         drop_client(server_.issuer);
