@@ -1,0 +1,1 @@
+The JWT access token validator (neomcp::server_auth_jwt): the reading of a token, of the metadata and of a key set, the validator against a scripted key set endpoint, and the validator behind the endpoint's gate. Built only with NEOMCP_JWT.
