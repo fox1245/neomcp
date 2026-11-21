@@ -105,6 +105,36 @@ std::vector<std::string> argument_keywords(const std::vector<profile::ProfilePtr
     return keywords;
 }
 
+// The profiles `named` (every built-in one when none is named), each composed with the built-in extensions that give
+// its revision tasks, unless it was composed with them already. Throws std::invalid_argument for a profile that cannot
+// be composed with them.
+std::vector<profile::ProfilePtr> with_task_extensions(const std::vector<profile::ProfilePtr>& named) {
+    std::vector<profile::ProfilePtr> served = named;
+    if (served.empty()) {
+        for (const std::string_view revision : profile::builtin_revisions()) served.push_back(profile::builtin(revision));
+    }
+    for (profile::ProfilePtr& entry : served) {
+        if (!entry) continue;
+        std::vector<profile::ExtensionPtr> extensions;
+        const auto composed_already = entry->extensions();
+        for (const std::string& id : profile::builtin_extensions()) {
+            profile::ExtensionPtr extension = profile::builtin_extension(id, entry->revision());
+            if (!extension || !extension->mechanism(profile::Slot::tasks)) continue;
+            if (std::find(composed_already.begin(), composed_already.end(), id) != composed_already.end()) continue;
+            extensions.push_back(std::move(extension));
+        }
+        if (extensions.empty()) continue;
+        auto composed = profile::compose(*entry, extensions);
+        if (const auto* error = std::get_if<profile::Error>(&composed)) {
+            throw std::invalid_argument("neomcp: revision " + entry->revision() +
+                                        " cannot be served with the extensions that give it tasks: " + error->pointer +
+                                        ": " + error->message);
+        }
+        entry = std::get<profile::ProfilePtr>(std::move(composed));
+    }
+    return served;
+}
+
 ToolResult error_result(std::string text) {
     ToolResult result;
     result.content.push_back(text_block(std::move(text)));
@@ -261,6 +291,7 @@ class ServerCore final : public ToolHost,
                          public ResourceHost,
                          public PromptHost,
                          public CompletionHost,
+                         public TaskHost,
                          public std::enable_shared_from_this<ServerCore> {
 public:
     explicit ServerCore(ServerOptions options);
@@ -345,12 +376,17 @@ public:
 
     // Tasks.
     void set_task_support(std::size_t index, TaskSupport mode);
-    TaskSupport task_support(std::size_t index) const { return entries_.at(index)->task_support; }
-    TaskStartResult start_task(const CallRequest& request, CallControl origin, TaskStart start);
-    std::optional<TaskRecord> task(std::string_view id, const TaskOwner& owner);
-    TaskCancelResult cancel_task(std::string_view id, const TaskOwner& owner);
-    AnswersResult answer_task(std::string_view id, const TaskOwner& owner, json answers, InputResponses responses);
-    TaskWatchStart watch_task(std::string_view id, const TaskOwner& owner, std::weak_ptr<TaskListener> listener);
+    // Not null when the server has a store and a tool declares that it may run as a task.
+    TaskHost* task_host() noexcept override;
+    TaskSupport task_support(std::size_t index) const override { return entries_.at(index)->task_support; }
+    TaskPreparation prepare_task(const CallRequest& request, const CallControl& origin) override;
+    TaskStartResult start_task(const CallRequest& request, CallControl origin, TaskStart start) override;
+    std::optional<TaskRecord> task(std::string_view id, const TaskOwner& owner) override;
+    TaskCancelResult cancel_task(std::string_view id, const TaskOwner& owner) override;
+    AnswersResult answer_task(std::string_view id, const TaskOwner& owner, json answers,
+                              InputResponses responses) override;
+    TaskWatchStart watch_task(std::string_view id, const TaskOwner& owner,
+                              std::weak_ptr<TaskListener> listener) override;
 
     // A call waits for its client's answers: its time-out starts.
     void awaiting_input(InputWait wait) override;
@@ -511,6 +547,10 @@ private:
     // Tasks: null when the server has no task store. The sweep's timer is used on the io thread only.
     std::unique_ptr<TaskRunner> tasks_;
     std::optional<asio::steady_timer> sweep_timer_;
+    // The profiles the sessions serve while tasks are on: those of the options composed with the extensions that give
+    // their revisions tasks. Made once, at the first session.
+    std::once_flag composed_once_;
+    std::vector<profile::ProfilePtr> composed_;
 };
 
 void CancelPoster::operator()() const noexcept { core->post_cancel(record); }
@@ -964,6 +1004,11 @@ SessionOptions ServerCore::session_options(profile::Transport transport, IdleCal
     SessionOptions session;
     session.transport = transport;
     session.profiles = options_.profiles;
+    if (task_host() != nullptr) {
+        // Registration has ended: which tools declare tasks is fixed, and so is the profile they are served under.
+        std::call_once(composed_once_, [this] { composed_ = with_task_extensions(options_.profiles); });
+        session.profiles = composed_;
+    }
     session.server_info.name = options_.name;
     session.server_info.version = options_.version;
     session.server_info.title = options_.title;
@@ -1267,12 +1312,41 @@ TaskStartResult ServerCore::start_task(const CallRequest& request, CallControl o
         return *refused;
     }
     auto& made = std::get<TaskRunner::Created>(created);
-    const Launch launched = launch(made.run, Answers{}, true);
+    // The first entry gets what the call came with: the answers and the state of the inputs asked before the task.
+    const Launch launched = launch(made.run, Answers{request.input_responses, request.request_state}, true);
     if (launched != Launch::started) {
         tasks_->fail_to_run(made.run, launched == Launch::busy);
         return launched == Launch::busy ? TaskRefusal::busy : TaskRefusal::shut_down;
     }
     return std::move(made.record);
+}
+
+TaskHost* ServerCore::task_host() noexcept {
+    if (!tasks_) return nullptr;
+    const bool declared = std::any_of(entries_.begin(), entries_.end(), [](const std::unique_ptr<ToolEntry>& entry) {
+        return entry->task_support != TaskSupport::forbidden;
+    });
+    return declared ? this : nullptr;
+}
+
+TaskPreparation ServerCore::prepare_task(const CallRequest& request, const CallControl& origin) {
+    serving_.store(true);
+    const auto found = by_name_.find(request.name);
+    if (found == by_name_.end()) return std::monostate{};  // start_task refuses it
+    ToolEntry& entry = *entries_[found->second];
+    // Only the question functions run: nothing of the handler, so no stop can concern them.
+    const std::stop_source unused;
+    const Context context(origin, request.meta, unused.get_token(), request.input_responses, request.request_state);
+    try {
+        std::optional<InputRequired> pending =
+            std::visit([&](auto& body) { return body->pending_inputs(request.arguments, context); }, entry.body);
+        if (pending) return std::move(*pending);
+    } catch (const AnswerRefused& refused) {
+        return InvalidRequest{refused.what()};
+    } catch (...) {
+        // What else fails here fails the handler's first entry the same way, and the task ends with it.
+    }
+    return std::monostate{};
 }
 
 ServerCore::Launch ServerCore::launch(const std::shared_ptr<TaskRun>& run, Answers answers, bool reserved) {
@@ -2070,6 +2144,8 @@ std::span<const std::string> Server::tool_scopes(std::size_t index) const { retu
 bool Server::declares_scopes() const { return core_->declares_scopes(); }
 
 TaskSupport Server::task_support(std::size_t index) const { return core_->task_support(index); }
+
+TaskHost* Server::task_host() noexcept { return core_->task_host(); }
 
 TaskStartResult Server::start_task(const CallRequest& request, CallControl origin, TaskStart start) {
     return core_->start_task(request, std::move(origin), std::move(start));

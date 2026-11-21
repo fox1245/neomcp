@@ -192,6 +192,7 @@ add_library(neomcp_core
     src/core/input.cpp
     src/core/request_state.cpp
     src/core/session.cpp
+    src/core/tasks.cpp
     src/core/peer.cpp)
 add_library(neomcp::core ALIAS neomcp_core)
 target_include_directories(neomcp_core

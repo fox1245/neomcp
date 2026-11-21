@@ -162,6 +162,7 @@ private:
 class ResourceHost;
 class PromptHost;
 class CompletionHost;
+class TaskHost;  // neomcp/task_host.h
 
 class ToolHost {
 public:
@@ -173,6 +174,9 @@ public:
     virtual ResourceHost* resource_host() noexcept { return nullptr; }
     virtual PromptHost* prompt_host() noexcept { return nullptr; }
     virtual CompletionHost* completion_host() noexcept { return nullptr; }
+    // The tasks the host runs (neomcp/task_host.h); null when it runs none. A session answers a call with a task only
+    // through it, and only where the revision it serves has tasks; with null every call is an ordinary one.
+    virtual TaskHost* task_host() noexcept { return nullptr; }
 
     // The tools, in a stable order. The span stays valid and its contents unchanged while a session uses the host.
     virtual std::span<const ToolDefinition> tools() const = 0;

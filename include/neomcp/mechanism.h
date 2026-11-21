@@ -3,7 +3,7 @@
 // A profile names one mechanism per slot (profile.h); a session asks the mechanism of the slot, never the revision
 // string or the era, how to behave. The registry maps (slot, name) to a factory; the built-in registry has an
 // implementation for every name the library declares for the slots (open, state, server_input, change_feed, batch and
-// the cancellation mechanism of a transport).
+// the cancellation mechanism of a transport, and tasks).
 #pragma once
 
 #include <functional>
@@ -22,6 +22,7 @@
 #include "neomcp/jsonrpc.h"
 #include "neomcp/model.h"
 #include "neomcp/profile.h"
+#include "neomcp/server/task_store.h"
 
 namespace neomcp {
 
@@ -218,8 +219,67 @@ public:
     virtual std::string_view ending_result_type() const = 0;
 };
 
+// What a request of the requests of tasks asks.
+struct TaskRequest {
+    enum class Action {
+        get,     // the task's state, with what it ended with or waits for
+        update,  // answers to the task's requests for input
+        cancel   // stop the task
+    };
+    Action action = Action::get;
+    std::string task_id;
+    json responses = json::object();  // update: the answers by key, an object
+};
+
+// Slot `tasks`: whether a call may be answered with a task the requester then asks about, and how tasks look on the
+// wire. The session asks the mechanism; the tasks themselves are the host's (neomcp/task_host.h).
+class TaskMechanism {
+public:
+    virtual ~TaskMechanism() = default;
+
+    // Why the mechanism cannot serve the profile; empty when it can.
+    virtual std::optional<std::string> check(const profile::Profile& profile) const = 0;
+    // Whether a call may be answered with a task at all. False: every call is an ordinary one, the server declares
+    // nothing about tasks, and no request is the mechanism's.
+    virtual bool answers_with_tasks() const = 0;
+
+    // Whether the requester of a request takes a task for an answer, from what the request (or the connection's
+    // handshake) says about its client.
+    virtual bool requester_takes_tasks(const ClientIdentity& client) const = 0;
+    // What a requester that does not take tasks lacks, as the `requiredCapabilities` of the error for a missing client
+    // capability.
+    virtual json required_capabilities() const = 0;
+    // Adds to the server's capabilities object that it answers with tasks.
+    virtual void declare(json& capabilities) const = 0;
+
+    // Whether a client request of `method` is one of the mechanism's, and what such a request asks (or why it is
+    // malformed). The session asks only about requests the profile has.
+    virtual bool serves(std::string_view method) const = 0;
+    virtual std::variant<TaskRequest, RequestError> read(const Message& request) const = 0;
+
+    // The body of the result that answers a call with the task `record`.
+    virtual json created(const TaskRecord& record) const = 0;
+    // The body of the answer to a read of the task: its state, with what it ended with or the requests it waits on.
+    virtual json detailed(const TaskRecord& record) const = 0;
+    // The body of the answer to an update or a cancellation that was taken.
+    virtual json acknowledgement() const = 0;
+    // Whether a cancellation of a task that has ended is taken (and changes nothing); otherwise it is refused as one of
+    // a task that does not exist.
+    virtual bool acknowledges_ended_cancel() const = 0;
+
+    // How a task started under the mechanism keeps its record (see TaskStart in neomcp/task_host.h).
+    virtual bool error_result_fails() const = 0;
+    virtual bool round_keys() const = 0;
+    // A request for input as the record keeps it, from its method and its params as the revision writes them (null:
+    // it has none); and the method of such an entry, empty when it is not one.
+    virtual json input_entry(std::string method, json params) const = 0;
+    virtual std::optional<std::string> input_method(const json& entry) const = 0;
+    // Whether the progress and the log messages of a task's handler reach the requester.
+    virtual bool task_notifications() const = 0;
+};
+
 // The slots of the registry.
-enum class MechanismSlot { open, state, batch, cancel, server_input, change_feed };
+enum class MechanismSlot { open, state, batch, cancel, server_input, change_feed, tasks };
 std::string_view to_string(MechanismSlot slot) noexcept;
 
 class MechanismRegistry {
@@ -234,6 +294,7 @@ public:
     void add_cancel(std::string name, Factory<CancelMechanism> factory);
     void add_input(std::string name, Factory<InputMechanism> factory);
     void add_feed(std::string name, Factory<ChangeFeedMechanism> factory);
+    void add_tasks(std::string name, Factory<TaskMechanism> factory);
     // Removes a name; returns whether it was there.
     bool remove(MechanismSlot slot, std::string_view name);
 
@@ -248,11 +309,13 @@ public:
     std::unique_ptr<CancelMechanism> make_cancel(std::string_view name) const;
     std::unique_ptr<InputMechanism> make_input(std::string_view name) const;
     std::unique_ptr<ChangeFeedMechanism> make_feed(std::string_view name) const;
+    std::unique_ptr<TaskMechanism> make_tasks(std::string_view name) const;
 
 private:
     using Key = std::pair<MechanismSlot, std::string>;
     using AnyFactory = std::variant<Factory<OpenMechanism>, Factory<StateMechanism>, Factory<BatchMechanism>,
-                                    Factory<CancelMechanism>, Factory<InputMechanism>, Factory<ChangeFeedMechanism>>;
+                                    Factory<CancelMechanism>, Factory<InputMechanism>, Factory<ChangeFeedMechanism>,
+                                    Factory<TaskMechanism>>;
 
     template <typename Interface>
     void put(MechanismSlot slot, std::string name, Factory<Interface> factory);
@@ -263,7 +326,7 @@ private:
 };
 
 // The mechanisms of the library: every name profile::declared_mechanisms declares for open, state, server_input,
-// change_feed and batch, and every name profile::declared_cancel declares for a transport.
+// change_feed, batch and tasks, and every name profile::declared_cancel declares for a transport.
 const MechanismRegistry& builtin_mechanisms();
 
 }  // namespace neomcp

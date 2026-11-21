@@ -178,6 +178,15 @@
 // (the code that ran it is gone); when it is destroyed, the tasks it still runs are stopped and failed. Tools that do
 // not declare it never run as tasks, and without a store nothing of this is active.
 //
+// On the wire, a revision that has tasks only through an extension (2026-07-28 and io.modelcontextprotocol/tasks) is
+// served with the built-in extension profiles that give it tasks, once the server has a store and a tool that
+// declares it; the server's sessions then declare the extension in their capabilities. Under such a revision the
+// server decides: a call of a tool that declares `optional` or `required` becomes a task exactly when the request
+// declares the extension, and a `required` tool called by a request that does not is refused with the revision's
+// error for a missing client capability. Inputs a tool declares (neomcp/server/inputs.h) are asked before the task is
+// created, as for an ordinary call; what the handler asks for itself while it runs as a task is asked through the
+// task. A task's handler sends no progress and no log message under such a revision.
+//
 // Threads. Plain-function handlers run on a pool of worker threads the server owns, bounded by
 // ServerOptions::max_concurrent_calls and max_pending_calls. Coroutine handlers run on one thread the server owns,
 // which drives an asio::io_context, and are bounded by max_coroutine_calls; a coroutine handler must not block, or
@@ -213,19 +222,13 @@
 #include "neomcp/server/inputs.h"
 #include "neomcp/server/task_store.h"
 #include "neomcp/session.h"
+#include "neomcp/task_host.h"
 #include "neomcp/tool_host.h"
 
 namespace neomcp {
 
 // ---- Tasks: a tool call answered at once with the id of a task, whose handler runs on after the request (and its
 // session) ended, and which the requester asks about by that id.
-
-// Whether a tool may run as a task. Only a tool that declares it ever does; the default is forbidden.
-enum class TaskSupport {
-    forbidden,  // never a task
-    optional,   // a task when the requester takes one, an ordinary call otherwise
-    required    // only as a task
-};
 
 // The defaults of TaskOptions. The numbers are the library's choice, not the protocol's.
 struct TaskDefaults {
@@ -255,47 +258,6 @@ struct TaskOptions {
     TaskClock clock{};
 };
 
-// How a task is started: what the requester asked for, and how the revision it is served under reads the outcome.
-struct TaskStart {
-    // The lifetime asked for; empty: the store's default.
-    std::optional<std::chrono::milliseconds> ttl{};
-    // Whether a result marked as an error (a tool execution error) ends the task failed; otherwise it ends it
-    // completed, with that result. An error that is not a result (the call could not run) always fails it.
-    bool error_result_fails = false;
-    // Writes one request for input as the task's record keeps it (the form the revision carries it in). Empty, or
-    // empty for a request: the task cannot ask, and a handler that asks fails it.
-    std::function<std::optional<json>(const InputRequest&)> write_input{};
-};
-
-// Why a task was not started. No record exists for a task that was refused, except one whose start the server's
-// shutdown overtook, or whose coroutine could not be started, after the record was made: that one is failed.
-enum class TaskRefusal {
-    off,            // the server has no task store
-    unknown_tool,   // no tool of that name is on
-    not_declared,   // the tool does not declare that it may run as a task
-    not_permitted,  // the call's authorization lacks a scope the tool needs
-    busy,           // no capacity: the pools of handlers, or the store's bounds
-    no_id,          // the store could not draw an id
-    shut_down       // the server is shutting down
-};
-
-using TaskStartResult = std::variant<TaskRecord, TaskRefusal>;
-
-enum class TaskCancelOutcome {
-    cancelled,  // the task is now cancelled, and its handler was asked to stop; `record` is the task
-    ended,      // the task had ended already, and stays as it ended; `record` is the task
-    not_found   // no such task for that owner (or it expired)
-};
-
-struct TaskCancelResult {
-    TaskCancelOutcome outcome = TaskCancelOutcome::not_found;
-    std::optional<TaskRecord> record;
-};
-
-// The owner of the tasks a request with `authorization` starts and may see: its principal, or the empty owner when it
-// carries none.
-TaskOwner task_owner_of(const Authorization* authorization);
-
 struct ServerOptions {
     // Who the server is (the members of Implementation), so that `{.name = "calc", .version = "1.0.0"}` works.
     std::string name{};
@@ -307,7 +269,8 @@ struct ServerOptions {
     // Sent in the handshake and in server/discover.
     std::optional<std::string> instructions{};
 
-    // The revisions served; empty: every built-in profile.
+    // The revisions served; empty: every built-in profile. With tasks (see "Tasks" above), each one is served with the
+    // built-in extensions that give its revision tasks, unless it was composed with them already.
     std::vector<profile::ProfilePtr> profiles{};
 
     // Worker threads that run plain-function handlers, and so the plain-function calls that run at once. Zero is an
@@ -610,6 +573,8 @@ public:
     void call(const CallRequest& request, CallControl control, Completion done) override;
     ChangeSupport change_support() const override;
     ChangeRegistration watch(std::weak_ptr<ChangeListener> listener) override;
+    // The server's tasks: not null when it has a task store and at least one tool declares that it may run as a task.
+    TaskHost* task_host() noexcept override;
 
     // The content of the resource at `uri` changed: the clients that watch it are told. Thread-safe; it returns at
     // once (the sessions are told on the server's own thread), and a change reported again before the sessions were

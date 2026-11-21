@@ -43,11 +43,6 @@ json recorded_call(const CallRequest& request) {
 
 }  // namespace
 
-TaskOwner task_owner_of(const Authorization* authorization) {
-    if (authorization == nullptr) return TaskOwner{};
-    return TaskOwner{principal_of(*authorization).text()};
-}
-
 std::optional<std::string_view> Context::task_id() const noexcept {
     if (task_ == nullptr) return std::nullopt;
     return std::string_view(task_->id);
@@ -171,7 +166,8 @@ std::optional<TaskResume> TaskRunner::settle(const std::shared_ptr<TaskRun>& run
         TaskUpdate update;
         update.status =
             result->is_error && run->start.error_result_fails ? TaskStatus::failed : TaskStatus::completed;
-        update.result = to_wire(*result, run->origin.profile());
+        update.result =
+            run->start.write_result ? run->start.write_result(*result) : to_wire(*result, run->origin.profile());
         // Only a running task takes its outcome: one that was cancelled, or whose lifetime ended, stays as it is.
         const Transition ended = options_.store->transition(run->id, working_only, std::move(update));
         if (ended.outcome == TransitionOutcome::too_large || ended.outcome == TransitionOutcome::over_budget) {
@@ -200,10 +196,11 @@ std::optional<TaskResume> TaskRunner::settle(const std::shared_ptr<TaskRun>& run
 
 std::optional<TaskResume> TaskRunner::ask(const std::shared_ptr<TaskRun>& run, InputRequired asked) {
     bool too_many = false;
+    std::size_t round = 0;
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         too_many = run->rounds >= max_input_rounds_;
-        if (!too_many) ++run->rounds;
+        if (!too_many) round = ++run->rounds;
     }
     if (too_many) {
         end(run, failure(error_code::internal_error, too_many_rounds_text));
@@ -213,18 +210,22 @@ std::optional<TaskResume> TaskRunner::ask(const std::shared_ptr<TaskRun>& run, I
     if (asked.requests.empty()) return TaskResume{InputResponses{}, std::move(asked.state)};
 
     json written = json::object();
+    std::map<std::string, std::string, std::less<>> keys;  // the record's key -> the handler's
     for (const auto& [key, request] : asked.requests) {
         std::optional<json> one = run->start.write_input ? run->start.write_input(request) : std::nullopt;
         if (!one) {
             end(run, failure(error_code::internal_error, cannot_ask_text));
             return std::nullopt;
         }
-        written[key] = std::move(*one);
+        std::string kept = run->start.round_keys ? std::to_string(round) + "." + key : key;
+        written[kept] = std::move(*one);
+        keys.emplace(std::move(kept), key);
     }
     // The run waits before the record says so, so that a cancellation that comes in between finds it waiting.
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         run->asked = std::move(asked);
+        run->keys = std::move(keys);
         run->answers.clear();
         run->deadline = Clock::now() + input_timeout_;
         run->running = false;
@@ -277,10 +278,10 @@ TaskRunner::Answered TaskRunner::answer(std::string_view id, const TaskOwner& ow
         if (run->asked) {
             for (const std::string& key : keys) {
                 const auto response = responses.find(key);
-                if (response == responses.end() || run->asked->requests.count(key) == 0 || run->answers.count(key) != 0) {
-                    continue;
-                }
-                run->answers.emplace(key, std::move(response->second));
+                const auto own = run->keys.find(key);
+                if (response == responses.end() || own == run->keys.end()) continue;
+                if (run->asked->requests.count(own->second) == 0 || run->answers.count(own->second) != 0) continue;
+                run->answers.emplace(own->second, std::move(response->second));
             }
         }
     }
@@ -291,6 +292,7 @@ TaskRunner::Answered TaskRunner::answer(std::string_view id, const TaskOwner& ow
         answered.resume = TaskResume{std::move(run->answers), std::move(run->asked->state)};
         run->answers.clear();
         run->asked.reset();
+        run->keys.clear();
         run->running = true;
     }
     answered.run = std::move(run);

@@ -802,6 +802,12 @@ public:
         }
     }
 
+    std::optional<InputRequired> pending_inputs(const json& arguments, const Context& context) override {
+        const Args args = decode_arguments<Args>(arguments);
+        AnswersOf<Decls...> answers;
+        return settle_inputs(set_, args, context, answers);
+    }
+
 private:
     F handler_;
     InputSet<Decls...> set_;
@@ -844,6 +850,12 @@ public:
             R produced = co_await std::move(started);
             co_return to_tool_outcome<R>(std::move(produced));
         }
+    }
+
+    std::optional<InputRequired> pending_inputs(const json& arguments, const Context& context) override {
+        const Args args = decode_arguments<Args>(arguments);
+        AnswersOf<Decls...> answers;
+        return settle_inputs(set_, args, context, answers);
     }
 
 private:
