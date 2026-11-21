@@ -17,6 +17,9 @@ Usage:
   summarize_checks.py --list-runs EXPECTATIONS
       Print the single runs of the client gate, one per line: profile mode, revision, scenario.
 
+  summarize_checks.py --list-backcompat EXPECTATIONS
+      Print the single runs of the scenarios the requirement sets do not list, one per line: profile mode, scenario.
+
   summarize_checks.py --client EXPECTATIONS ROOT
       Judge the single runs of the client gate. ROOT/<mode>/<revision>/<scenario>/ holds the runner's exit status in
       `exit-code` and the one result folder the runner wrote there. A run passes when the runner exited 0, its
@@ -24,6 +27,8 @@ Usage:
       there with a SUCCESS, every row they name is a SUCCESS (not SKIPPED), and the fixture's last line on standard
       output says it completed. A run listed as expected to fail must fail, and every other run must pass. Every
       check of every run is printed with its id, name and status, so that a failure can be read in the job's log.
+      The scenarios under `backcompat` are judged the same way, from ROOT/<mode>/backcompat/<scenario>/, with the
+      check ids they name, and none of them may fail.
 """
 
 import json
@@ -39,6 +44,8 @@ NOT_SCORED_SECTION = "Run and reported, but never scored:"
 ITEM_PREFIX = "- "
 LEG_SEPARATOR = " ["
 CLIENT_LEG = "client"
+BACKCOMPAT = "backcompat"
+BACKCOMPAT_FOLDER = "backcompat"
 
 
 def summarize(root):
@@ -155,6 +162,23 @@ def list_runs(expectations_path):
     return 0
 
 
+def backcompat_runs(expectations):
+    """(profile mode, scenario, check ids) of the scenarios no requirement set lists."""
+    section = expectations.get(BACKCOMPAT, {})
+    mode = section.get("profiles")
+    if not section.get("scenarios"):
+        return []
+    if mode not in MODES:
+        raise ValueError(f"{BACKCOMPAT}.profiles must be one of {MODES}, not {mode!r}")
+    return [(mode, scenario, ids) for scenario, ids in section["scenarios"].items()]
+
+
+def list_backcompat(expectations_path):
+    for mode, scenario, _ in backcompat_runs(load(expectations_path)):
+        print(f"{mode} {scenario}")
+    return 0
+
+
 def result_checks(folder):
     """The checks of the one result folder in `folder`, or why there are none."""
     # The runner names a result folder after the scenario and the time, so a scenario named with a group
@@ -264,6 +288,17 @@ def client_gate(expectations_path, root):
                         print(f"      {problem}")
                     status = 1
                 print_checks(folder)
+    for mode, scenario, ids in backcompat_runs(expectations):
+        folder = os.path.join(root, mode, BACKCOMPAT_FOLDER, scenario)
+        problems = judge({"checks": {scenario: ids}}, folder, scenario)
+        if problems:
+            print(f"FAIL  {mode} {BACKCOMPAT} {scenario}")
+            for problem in problems:
+                print(f"      {problem}")
+            status = 1
+        else:
+            print(f"pass  {mode} {BACKCOMPAT} {scenario}")
+        print_checks(folder)
     return status
 
 
@@ -272,6 +307,8 @@ def main(argv):
         return check_listing(argv[2], argv[3:])
     if len(argv) == 3 and argv[1] == "--list-runs":
         return list_runs(argv[2])
+    if len(argv) == 3 and argv[1] == "--list-backcompat":
+        return list_backcompat(argv[2])
     if len(argv) == 4 and argv[1] == "--client":
         return client_gate(argv[2], argv[3])
     for root in argv[1:]:

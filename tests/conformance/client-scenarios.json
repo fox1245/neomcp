@@ -561,5 +561,32 @@
   "expected_to_fail": {
     "run": [],
     "all": []
+  },
+  "backcompat": {
+    "comment": [
+      "Scenarios that neither requirement set lists, for the authorization flow of the 2025-03-26 revision (no protected resource metadata; the authorization server on the server's origin). The job runs each one alone, without --spec-version (the runner would skip them at any revision after theirs), with the profile mode named in profiles.",
+      "Only every revision enabled can pass them: discovery on the server's origin is declared by the 2025-03-26 revision alone, and the connection itself goes on at the newest revision the server speaks.",
+      "scenarios: the scenario, then the check ids a passing run must report, each with a SUCCESS. Any FAILURE or WARNING fails the run."
+    ],
+    "profiles": "all",
+    "scenarios": {
+      "auth/2025-03-26-oauth-metadata-backcompat": [
+        "authorization-server-metadata",
+        "client-registration",
+        "authorization-request",
+        "pkce-code-challenge-sent",
+        "pkce-s256-method-used",
+        "token-request",
+        "pkce-code-verifier-sent",
+        "pkce-verifier-matches-challenge",
+        "valid-bearer-token"
+      ],
+      "auth/2025-03-26-oauth-endpoint-fallback": [
+        "client-registration",
+        "authorization-request",
+        "token-request",
+        "valid-bearer-token"
+      ]
+    }
   }
 }

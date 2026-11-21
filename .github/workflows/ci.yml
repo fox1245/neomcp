@@ -263,6 +263,23 @@ jobs:
             echo "$status" > "$folder/exit-code"
             echo "$mode $revision $scenario: runner exited $status"
           done < "$RUNNER_TEMP/runs.txt"
+      # The authorization flow of the 2025-03-26 revision: two scenarios that neither requirement set lists, each run
+      # alone with every built-in revision enabled and without a spec version (the runner skips them at the later
+      # revisions). They are judged with the rest in gate (c).
+      - name: Single runs of the 2025-03-26 authorization scenarios
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -I tests/conformance/summarize_checks.py --list-backcompat tests/conformance/client-scenarios.json \
+            > "$RUNNER_TEMP/backcompat-runs.txt"
+          while read -r mode scenario; do
+            folder="$RUNNER_TEMP/single/$mode/backcompat/$scenario"
+            mkdir -p "$folder"
+            status=0
+            npx --yes "$RUNNER_PACKAGE" client --command "$FIXTURE --profiles=$mode" --scenario "$scenario" \
+              --output-dir "$folder" > "$folder/runner.log" 2>&1 < /dev/null || status=$?
+            echo "$status" > "$folder/exit-code"
+            echo "$mode $scenario: runner exited $status"
+          done < "$RUNNER_TEMP/backcompat-runs.txt"
       # Gate (c): what each single run reported, against the checks a passing run must have and the runs listed as
       # expected to fail.
       - name: Judge the single runs
