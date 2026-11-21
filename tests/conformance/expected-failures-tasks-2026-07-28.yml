@@ -1,0 +1,6 @@
+# The scenarios of the tasks extension io.modelcontextprotocol/tasks (revision 2026-07-28) that the fixture server
+# started with --tasks cannot pass yet. The runner keeps these scenarios pending and never scores them; CI runs each one
+# against that fixture and reads the result without gating on it. The status notifications through
+# subscriptions/listen (notifications/tasks) are not served yet.
+# An entry that starts to pass fails the run, so a scenario is listed here only while it cannot pass.
+server: []
