@@ -706,7 +706,7 @@ ToolHandle Server::tool(std::string tool_name, std::string tool_description, Han
         definition.description = std::move(tool_description);
         definition.input_schema = schema_of<Args>();
         definition.output_schema = detail::output_schema_of<detail::handler_value_t<detail::Input::typed, F>>();
-        auto inputs = detail::make_input_set("tool '" + definition.name + "'", options().schema_limits,
+        auto inputs = detail::make_input_set("tool '" + definition.name + "'", options().schema_limits, options().profiles,
                                              options().max_declared_state_bytes, std::forward<First>(first),
                                              std::forward<Rest>(rest)...);
         return add(std::move(definition),
@@ -731,7 +731,7 @@ ToolHandle Server::tool(std::string tool_name, std::string tool_description, Han
         definition.description = std::move(tool_description);
         definition.input_schema = detail::empty_object_schema();
         definition.output_schema = detail::output_schema_of<detail::handler_value_t<detail::Input::none, F>>();
-        auto inputs = detail::make_input_set("tool '" + definition.name + "'", options().schema_limits,
+        auto inputs = detail::make_input_set("tool '" + definition.name + "'", options().schema_limits, options().profiles,
                                              options().max_declared_state_bytes, std::forward<First>(first),
                                              std::forward<Rest>(rest)...);
         return add(std::move(definition),
@@ -753,7 +753,7 @@ ResourceHandle Server::resource(std::string resource_uri, std::string resource_n
         ResourceDefinition definition;
         definition.uri = std::move(resource_uri);
         definition.name = std::move(resource_name);
-        auto inputs = detail::make_input_set("resource '" + definition.uri + "'", options().schema_limits,
+        auto inputs = detail::make_input_set("resource '" + definition.uri + "'", options().schema_limits, options().profiles,
                                              options().max_declared_state_bytes, std::forward<First>(first),
                                              std::forward<Rest>(rest)...);
         return add_resource(std::move(definition),
@@ -794,7 +794,7 @@ ResourceTemplateHandle Server::resource_template(std::string template_text, std:
             }
         };
         auto inputs = detail::make_input_set("resource template '" + definition.uri_template + "'",
-                                             options().schema_limits, options().max_declared_state_bytes,
+                                             options().schema_limits, options().profiles, options().max_declared_state_bytes,
                                              std::forward<First>(first), std::forward<Rest>(rest)...);
         return add_resource_template(std::move(definition),
                                      detail::make_declared_feature_body<detail::TemplateKind<Params>, Params, F>(
@@ -827,7 +827,7 @@ PromptHandle Server::prompt(std::string prompt_name, std::string prompt_descript
         definition.name = std::move(prompt_name);
         definition.description = std::move(prompt_description);
         definition.arguments = detail::prompt_arguments_of<Args>();
-        auto inputs = detail::make_input_set("prompt '" + definition.name + "'", options().schema_limits,
+        auto inputs = detail::make_input_set("prompt '" + definition.name + "'", options().schema_limits, options().profiles,
                                              options().max_declared_state_bytes, std::forward<First>(first),
                                              std::forward<Rest>(rest)...);
         return add_prompt(std::move(definition), detail::make_declared_feature_body<detail::PromptKind<Args>, Args, F>(
@@ -849,7 +849,7 @@ PromptHandle Server::prompt(std::string prompt_name, std::string prompt_descript
         PromptDefinition definition;
         definition.name = std::move(prompt_name);
         definition.description = std::move(prompt_description);
-        auto inputs = detail::make_input_set("prompt '" + definition.name + "'", options().schema_limits,
+        auto inputs = detail::make_input_set("prompt '" + definition.name + "'", options().schema_limits, options().profiles,
                                              options().max_declared_state_bytes, std::forward<First>(first),
                                              std::forward<Rest>(rest)...);
         return add_prompt(std::move(definition), detail::make_declared_feature_body<detail::PromptNoArgumentsKind, None, F>(

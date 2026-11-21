@@ -216,6 +216,12 @@ target_link_libraries(neomcp_server_bounds_test PRIVATE neomcp::server GTest::gt
 neomcp_configure_target(neomcp_server_bounds_test)
 gtest_discover_tests(neomcp_server_bounds_test DISCOVERY_TIMEOUT 120)
 
+# The form of an elicitation as the revision's profile defines it: at its building, its registration and its asking.
+add_executable(neomcp_server_form_test server_form_test.cpp)
+target_link_libraries(neomcp_server_form_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_server_form_test)
+gtest_discover_tests(neomcp_server_form_test DISCOVERY_TIMEOUT 120)
+
 # ---- The stdio transport ---------------------------------------------------------------------------------------------
 
 add_executable(neomcp_stdio_test stdio_test.cpp)

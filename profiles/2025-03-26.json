@@ -318,6 +318,9 @@
           "data",
           "mimeType",
           "type"
+        ],
+        "type_values": [
+          "audio"
         ]
       },
       "BlobResourceContents": {
@@ -421,6 +424,9 @@
         "required": [
           "resource",
           "type"
+        ],
+        "type_values": [
+          "resource"
         ]
       },
       "EmptyResult": {
@@ -460,6 +466,9 @@
           "data",
           "mimeType",
           "type"
+        ],
+        "type_values": [
+          "image"
         ]
       },
       "Implementation": {
@@ -763,6 +772,9 @@
         "required": [
           "name",
           "type"
+        ],
+        "type_values": [
+          "ref/prompt"
         ]
       },
       "ReadResourceRequest": {
@@ -833,6 +845,9 @@
         "required": [
           "type",
           "uri"
+        ],
+        "type_values": [
+          "ref/resource"
         ]
       },
       "ResourceTemplate": {
@@ -932,6 +947,9 @@
         "required": [
           "text",
           "type"
+        ],
+        "type_values": [
+          "text"
         ]
       },
       "TextResourceContents": {

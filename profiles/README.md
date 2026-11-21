@@ -48,5 +48,5 @@ tools/profile_wire.py path/to/schema/2026-07-28/schema.json --check profiles/202
 | `requests`, `notifications` | Each method with who sends it (`client`, `server` or both), its message type, its parameter type and that type's required members. |
 | `input_requests` | The requests a server may place in a result for the client to answer. |
 | `unlisted_message_types` | Message types the schema defines but assigns to no sender. It is empty for every profile here, and a new entry needs a decision. |
-| `types` | Every object type with its properties and its required properties. A type the schema composes from others (allOf) or defines as a reference has the combined members. |
+| `types` | Every object type with its properties and its required properties. A type the schema composes from others (allOf) or defines as a reference has the combined members. `type_values`, present only when the schema lists them (a constant or an enumeration of strings), holds the values of the type's `type` property: the member tells which alternative of a union an object is, for example which primitive schema definition of a form a property has. |
 | `unions` | Every type that is a union of other types, with its alternatives. A message whose parameters are a union lists as required the members every alternative requires. |

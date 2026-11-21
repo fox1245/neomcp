@@ -66,6 +66,10 @@ bool Type::is_required(std::string_view property) const {
     return std::binary_search(required.begin(), required.end(), property);
 }
 
+bool Type::has_type_value(std::string_view value) const {
+    return std::binary_search(type_values.begin(), type_values.end(), value);
+}
+
 bool Profile::error_response_may_omit_id() const {
     // The members of a JSON-RPC error response (JSON-RPC 2.0, section 5.1), not data of a revision.
     constexpr std::string_view error_member = "error";
@@ -520,11 +524,17 @@ private:
     }
 
     void types(const Node& node) {
+        // The property of an object type that says which type of a union the object is, and the member that lists the
+        // values the schema gives it.
+        static constexpr std::string_view type_property = "type";
+        static constexpr std::string_view type_values_member = "type_values";
         for_each_entry(node, [&](const std::string& name, const Node& value) {
-            const Object object(value, {{"properties", true}, {"required", true}});
+            const Object object(value, {{"properties", true}, {"required", true}, {type_values_member, false}});
             Type type;
             type.name = name;
             type.properties = strings_of(object.at("properties"), true);
+            std::vector<std::string> sorted_properties = type.properties;
+            std::sort(sorted_properties.begin(), sorted_properties.end());
             const Node required = object.at("required");
             type.required = strings_of(required, true);
             const auto& items = array_of(required);
@@ -535,8 +545,17 @@ private:
                          "'" + type.required[i] + "' is not a property of " + name);
                 }
             }
-            std::sort(type.properties.begin(), type.properties.end());
+            if (const std::optional<Node> values = object.find(type_values_member)) {
+                type.type_values = strings_of(*values, true);
+                if (type.type_values.empty()) fail(values->pointer(), "at least one value", "an empty list");
+                if (!std::binary_search(sorted_properties.begin(), sorted_properties.end(), type_property)) {
+                    fail(values->pointer(), "no member, because " + name + " has no property '" + std::string(type_property) + "'",
+                         "a list of values");
+                }
+            }
             std::sort(type.required.begin(), type.required.end());
+            std::sort(type.type_values.begin(), type.type_values.end());
+            type.properties = std::move(sorted_properties);
             profile_.types_.push_back(std::move(type));
         });
         std::sort(profile_.types_.begin(), profile_.types_.end(),

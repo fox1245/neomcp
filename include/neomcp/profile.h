@@ -205,9 +205,13 @@ struct Type {
     std::string name;
     std::vector<std::string> properties;  // sorted
     std::vector<std::string> required;    // sorted, each one also a property
+    // The values the type's `type` property may have, where the schema lists them (a constant or an enumeration of
+    // strings); empty when it does not. When not empty, `type` is one of the properties.
+    std::vector<std::string> type_values;  // sorted
 
     bool has_property(std::string_view property) const;
     bool is_required(std::string_view property) const;
+    bool has_type_value(std::string_view value) const;
 };
 
 // A type that is a union of other types: each alternative names an entry of the types or of the unions.

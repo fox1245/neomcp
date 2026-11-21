@@ -759,6 +759,50 @@ TEST(Rejects, RequiredMemberThatIsNotAProperty) {
                                               std::to_string(document["wire"]["types"]["CallToolResult"]["required"].size() - 1));
 }
 
+TEST(Wire, TheTypeValuesOfThePrimitiveSchemaTypesAreRecorded) {
+    // The `type` values the schema fixes: one for a string and a boolean, two for a number.
+    for (const std::string_view revision : {last_legacy_revision, modern_revision}) {
+        SCOPED_TRACE(std::string(revision));
+        const auto profile = builtin(revision);
+        const Type* text = profile->type("StringSchema");
+        ASSERT_NE(text, nullptr);
+        EXPECT_EQ(text->type_values, std::vector<std::string>{"string"});
+        EXPECT_TRUE(text->has_type_value("string"));
+        EXPECT_FALSE(text->has_type_value("number"));
+        EXPECT_EQ(profile->type("BooleanSchema")->type_values, std::vector<std::string>{"boolean"});
+        EXPECT_EQ(profile->type("NumberSchema")->type_values, (std::vector<std::string>{"integer", "number"}));
+        // A type whose `type` the schema does not fix records none.
+        const Type* implementation = profile->type("Implementation");
+        ASSERT_NE(implementation, nullptr);
+        EXPECT_TRUE(implementation->type_values.empty());
+    }
+    EXPECT_EQ(builtin("2025-11-25")->type("UntitledMultiSelectEnumSchema")->type_values, std::vector<std::string>{"array"});
+}
+
+TEST(Rejects, TypeValuesThatAreEmpty) {
+    json document = builtin_document(modern_revision);
+    document["wire"]["types"]["StringSchema"]["type_values"] = json::array();
+    EXPECT_EQ(rejected(document).pointer, "/wire/types/StringSchema/type_values");
+}
+
+TEST(Rejects, TypeValuesThatRepeat) {
+    json document = builtin_document(modern_revision);
+    document["wire"]["types"]["StringSchema"]["type_values"] = json::array({"string", "string"});
+    EXPECT_EQ(rejected(document).pointer, "/wire/types/StringSchema/type_values/1");
+}
+
+TEST(Rejects, TypeValuesThatAreNotStrings) {
+    json document = builtin_document(modern_revision);
+    document["wire"]["types"]["StringSchema"]["type_values"] = json::array({1});
+    EXPECT_EQ(rejected(document).pointer, "/wire/types/StringSchema/type_values/0");
+}
+
+TEST(Rejects, TypeValuesOfATypeWithoutATypeProperty) {
+    json document = builtin_document(modern_revision);
+    document["wire"]["types"]["Implementation"]["type_values"] = json::array({"implementation"});
+    EXPECT_EQ(rejected(document).pointer, "/wire/types/Implementation/type_values");
+}
+
 TEST(Rejects, SenderThatRepeats) {
     json document = builtin_document(last_legacy_revision);
     document["wire"]["requests"]["ping"]["from"] = json::array({"client", "client"});

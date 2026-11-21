@@ -84,15 +84,13 @@ times in a row at most; certificate verification cannot be switched off; libcurl
 
 ## Open items in what exists
 
-- The keywords a form of elicitation may use are written out in `src/server/form_schema.cpp` for the newest
-  revision; they should come from the profile's types, so that a revision whose types differ (2025-06-18 has no
-  `default` for strings) gets the form it defines.
 - `lastModified` of a resource is written under 2024-11-05, whose types have no annotations.
 - Sampling messages of 2025-11-25 and 2026-07-28 may hold tool use and tool result blocks (`ToolUseContent`,
   `ToolResultContent`); the content model has no such blocks, so a server cannot write them and the reader of a
   sampling request refuses a request that holds them.
-- The client checks the restricted form of an elicitation by member names only, because the profiles do not carry
-  the `type` values of the primitive schema types; accepted content is still validated against the schema.
+- The client checks the restricted form of an elicitation by member names only; the profiles now carry the `type`
+  values of the primitive schema types (`type_values`), which that check could use. Accepted content is still
+  validated against the schema.
 - Change notifications: many distinct updated URIs in a burst can delay a list change.
 - A request of 2026-07-28 that carries a session header is routed to that session; the pages say to ignore the
   header.

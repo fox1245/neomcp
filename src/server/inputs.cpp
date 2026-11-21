@@ -13,6 +13,7 @@
 #include <functional>
 #include <map>
 #include <set>
+#include <stdexcept>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -162,7 +163,8 @@ bool same_kind(InputKind kind, const InputResponse& response) noexcept {
 
 }  // namespace
 
-void prepare_inputs(std::span<DeclaredInput> inputs, const std::string& label, const json_schema::Limits& limits) {
+void prepare_inputs(std::span<DeclaredInput> inputs, const std::string& label, const json_schema::Limits& limits,
+                    std::span<const profile::ProfilePtr> revisions) {
     std::set<std::string, std::less<>> keys;
     for (DeclaredInput& declared : inputs) {
         if (declared.key.empty()) throw std::invalid_argument("neomcp: " + label + ": a declared input needs a key");
@@ -170,7 +172,7 @@ void prepare_inputs(std::span<DeclaredInput> inputs, const std::string& label, c
             throw std::invalid_argument("neomcp: " + label + ": two declared inputs have the key '" + declared.key + "'");
         }
         if (declared.kind != InputKind::form) continue;
-        if (const auto problem = form_schema_problem(declared.form_schema)) {
+        if (const auto problem = form_schema_problem(declared.form_schema, revisions)) {
             throw std::invalid_argument("neomcp: " + label + ": the form of the input '" + declared.key +
                                         "' cannot be built from its struct: " + *problem);
         }
@@ -223,6 +225,25 @@ InputRound::InputRound(const Context& context, std::size_t max_state_bytes)
 }
 
 Settlement InputRound::settle(const DeclaredInput& input, InputRequest question) {
+    // A form is for the revision of this call: it is asked without the annotations that revision's types lack, and one
+    // that revision does not define cannot be asked. An optional input is then not asked, as when the client cannot take
+    // its request; a required one ends the call.
+    if (input.kind == InputKind::form) {
+        if (auto* form = std::get_if<ElicitationForm>(&question)) {
+            const profile::Profile& revision = context_.control_.profile();
+            auto written = form_schema_in(form->requested_schema, revision);
+            if (auto* problem = std::get_if<std::string>(&written)) {
+                Settlement refused;
+                if (input.is_optional) {
+                    refused.not_asked = true;
+                    return refused;
+                }
+                throw std::runtime_error("the form of the input '" + input.key + "' is not one that revision " +
+                                         revision.revision() + " defines: " + *problem);
+            }
+            form->requested_schema = std::get<json>(std::move(written));
+        }
+    }
     const std::string digest = arguments_digest(question_json(question, context_.control_.profile()));
     Settlement found;
     // An outcome an earlier round recorded for exactly this question.

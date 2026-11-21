@@ -3,8 +3,8 @@
 
 The `wire` member holds what the published schema states about a revision: its
 requests and notifications with their senders, the requests a server may ask of
-a client inside a result, the properties of every object type, and the unions
-of types. A profile's
+a client inside a result, the properties of every object type (with the values of
+its `type` property where the schema lists them), and the unions of types. A profile's
 other members are written by hand from the specification's prose.
 
     profile_wire.py SCHEMA                  print the wire member
@@ -27,6 +27,8 @@ SENDER_UNIONS = (
 )
 # The union of requests a server places in a result for the client to answer.
 INPUT_REQUEST_UNION = "InputRequest"
+# The property that says which of the types of a union an object is: its values are recorded per type.
+DISCRIMINATOR = "type"
 
 
 def ref_name(node):
@@ -95,6 +97,37 @@ def object_shape(definitions, node, seen=()):
         properties |= shape[0]
         required |= shape[1]
     return properties, required
+
+
+def property_schema(definitions, node, name, seen=()):
+    """The schema of the property `name` of an object type, or None. The type is
+    written with `properties`, as a reference or as an allOf of object types."""
+    properties = node.get("properties")
+    if isinstance(properties, dict):
+        return properties.get(name)
+    target = ref_name(node)
+    if target:
+        if target in seen:
+            raise SystemExit(f"{target} refers to itself")
+        return property_schema(definitions, definitions[target], name, (*seen, target))
+    for part in node.get("allOf", []):
+        found = property_schema(definitions, part, name, seen)
+        if found is not None:
+            return found
+    return None
+
+
+def fixed_strings(node):
+    """The strings a property schema allows when it lists them (a const or an
+    enum of strings), sorted; None for any other schema."""
+    if node is None:
+        return None
+    if isinstance(node.get("const"), str):
+        return [node["const"]]
+    values = node.get("enum")
+    if isinstance(values, list) and values and all(isinstance(value, str) for value in values):
+        return sorted(set(values))
+    return None
 
 
 def union_of_types(node):
@@ -185,6 +218,9 @@ def derive(schema_path):
         shape = object_shape(definitions, definition)
         if shape is not None:
             types[name] = {"properties": sorted(shape[0]), "required": sorted(shape[1])}
+            values = fixed_strings(property_schema(definitions, definition, DISCRIMINATOR))
+            if values is not None:
+                types[name]["type_values"] = values
             continue
         members = union_of_types(definition)
         if members is not None:

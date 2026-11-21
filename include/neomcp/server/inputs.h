@@ -277,9 +277,11 @@ struct DeclaredInput {
 };
 
 // Checks the declared inputs of `label` (a tool, a prompt, a resource or a template, as "tool 'x'") and compiles the
-// checks of their forms with `limits`: every key is given and unique, every form fits the restricted form. Throws
-// std::invalid_argument naming the thing, the input and what is wrong.
-void prepare_inputs(std::span<DeclaredInput> inputs, const std::string& label, const json_schema::Limits& limits);
+// checks of their forms with `limits`: every key is given and unique, every form fits the restricted form of one of
+// the `revisions` served (empty: every built-in one; see form_schema_problem). Throws std::invalid_argument naming the
+// thing, the input and what is wrong.
+void prepare_inputs(std::span<DeclaredInput> inputs, const std::string& label, const json_schema::Limits& limits,
+                    std::span<const profile::ProfilePtr> revisions);
 
 // Thrown while a call with declared inputs is entered, for answers that cannot be used: an answer of another kind than
 // its input's, a form's content that its schema refuses, outcomes too large to keep. The call is answered with Invalid
@@ -600,11 +602,12 @@ void describe_inputs(InputSet<Decls...>& set, std::index_sequence<I...>) {
 // The declarations of a handler, checked and prepared for `label`.
 template <class... Decls>
 InputSet<std::decay_t<Decls>...> make_input_set(const std::string& label, const json_schema::Limits& limits,
+                                                std::span<const profile::ProfilePtr> revisions,
                                                 std::size_t max_state_bytes, Decls&&... declarations) {
     InputSet<std::decay_t<Decls>...> set{std::tuple<std::decay_t<Decls>...>(std::forward<Decls>(declarations)...), {},
                                          max_state_bytes};
     describe_inputs(set, std::index_sequence_for<Decls...>{});
-    prepare_inputs(std::span<DeclaredInput>(set.inputs), label, limits);
+    prepare_inputs(std::span<DeclaredInput>(set.inputs), label, limits, revisions);
     return set;
 }
 

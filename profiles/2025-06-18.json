@@ -327,6 +327,9 @@
           "data",
           "mimeType",
           "type"
+        ],
+        "type_values": [
+          "audio"
         ]
       },
       "BaseMetadata": {
@@ -359,6 +362,9 @@
         ],
         "required": [
           "type"
+        ],
+        "type_values": [
+          "boolean"
         ]
       },
       "CallToolRequest": {
@@ -474,6 +480,9 @@
         "required": [
           "resource",
           "type"
+        ],
+        "type_values": [
+          "resource"
         ]
       },
       "EmptyResult": {
@@ -493,6 +502,9 @@
         "required": [
           "enum",
           "type"
+        ],
+        "type_values": [
+          "string"
         ]
       },
       "GetPromptRequest": {
@@ -527,6 +539,9 @@
           "data",
           "mimeType",
           "type"
+        ],
+        "type_values": [
+          "image"
         ]
       },
       "Implementation": {
@@ -759,6 +774,10 @@
         ],
         "required": [
           "type"
+        ],
+        "type_values": [
+          "integer",
+          "number"
         ]
       },
       "PaginatedRequest": {
@@ -847,6 +866,9 @@
         "required": [
           "name",
           "type"
+        ],
+        "type_values": [
+          "ref/prompt"
         ]
       },
       "ReadResourceRequest": {
@@ -919,6 +941,9 @@
           "name",
           "type",
           "uri"
+        ],
+        "type_values": [
+          "resource_link"
         ]
       },
       "ResourceListChangedNotification": {
@@ -953,6 +978,9 @@
         "required": [
           "type",
           "uri"
+        ],
+        "type_values": [
+          "ref/resource"
         ]
       },
       "ResourceUpdatedNotification": {
@@ -1032,6 +1060,9 @@
         ],
         "required": [
           "type"
+        ],
+        "type_values": [
+          "string"
         ]
       },
       "SubscribeRequest": {
@@ -1054,6 +1085,9 @@
         "required": [
           "text",
           "type"
+        ],
+        "type_values": [
+          "text"
         ]
       },
       "TextResourceContents": {

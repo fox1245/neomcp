@@ -393,6 +393,9 @@
           "data",
           "mimeType",
           "type"
+        ],
+        "type_values": [
+          "audio"
         ]
       },
       "BaseMetadata": {
@@ -425,6 +428,9 @@
         ],
         "required": [
           "type"
+        ],
+        "type_values": [
+          "boolean"
         ]
       },
       "CallToolRequest": {
@@ -693,6 +699,9 @@
         "required": [
           "resource",
           "type"
+        ],
+        "type_values": [
+          "resource"
         ]
       },
       "EmptyResult": {
@@ -828,6 +837,9 @@
           "data",
           "mimeType",
           "type"
+        ],
+        "type_values": [
+          "image"
         ]
       },
       "Implementation": {
@@ -955,6 +967,9 @@
         "required": [
           "enum",
           "type"
+        ],
+        "type_values": [
+          "string"
         ]
       },
       "ListPromptsRequest": {
@@ -1159,6 +1174,10 @@
         ],
         "required": [
           "type"
+        ],
+        "type_values": [
+          "integer",
+          "number"
         ]
       },
       "PaginatedRequest": {
@@ -1280,6 +1299,9 @@
         "required": [
           "name",
           "type"
+        ],
+        "type_values": [
+          "ref/prompt"
         ]
       },
       "ReadResourceRequest": {
@@ -1381,6 +1403,9 @@
           "name",
           "type",
           "uri"
+        ],
+        "type_values": [
+          "resource_link"
         ]
       },
       "ResourceListChangedNotification": {
@@ -1427,6 +1452,9 @@
         "required": [
           "type",
           "uri"
+        ],
+        "type_values": [
+          "ref/resource"
         ]
       },
       "ResourceUpdatedNotification": {
@@ -1535,6 +1563,9 @@
         ],
         "required": [
           "type"
+        ],
+        "type_values": [
+          "string"
         ]
       },
       "SubscribeRequest": {
@@ -1632,6 +1663,9 @@
         "required": [
           "text",
           "type"
+        ],
+        "type_values": [
+          "text"
         ]
       },
       "TextResourceContents": {
@@ -1659,6 +1693,9 @@
         "required": [
           "items",
           "type"
+        ],
+        "type_values": [
+          "array"
         ]
       },
       "TitledSingleSelectEnumSchema": {
@@ -1672,6 +1709,9 @@
         "required": [
           "oneOf",
           "type"
+        ],
+        "type_values": [
+          "string"
         ]
       },
       "Tool": {
@@ -1737,6 +1777,9 @@
           "content",
           "toolUseId",
           "type"
+        ],
+        "type_values": [
+          "tool_result"
         ]
       },
       "ToolUseContent": {
@@ -1752,6 +1795,9 @@
           "input",
           "name",
           "type"
+        ],
+        "type_values": [
+          "tool_use"
         ]
       },
       "URLElicitationRequiredError": {
@@ -1801,6 +1847,9 @@
         "required": [
           "items",
           "type"
+        ],
+        "type_values": [
+          "array"
         ]
       },
       "UntitledSingleSelectEnumSchema": {
@@ -1814,6 +1863,9 @@
         "required": [
           "enum",
           "type"
+        ],
+        "type_values": [
+          "string"
         ]
       }
     },
