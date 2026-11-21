@@ -1,0 +1,1 @@
+The optional loopback receiver of the client's OAuth sign-in: the redirect URI and the one request it waits for, what does not end the wait, the bounds, the closing of the port, and a whole sign-in with the authorizer against a scripted authorization server. Built only with NEOMCP_HTTP_CLIENT and NEOMCP_CLIENT_OAUTH_LOOPBACK.
