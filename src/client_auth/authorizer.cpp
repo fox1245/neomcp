@@ -444,8 +444,13 @@ struct OAuthAuthorizer::Impl : std::enable_shared_from_this<OAuthAuthorizer::Imp
         trigger.carried_token = current_tokens().has_value();
         trigger.operation = operation_of(request);
         trigger.resource_headers = version_lines(request.profile);
-        const profile::ProfilePtr profiles[] = {request.profile};
-        config.origin_metadata = oauth::origin_metadata_of(profiles);
+        // What a revision decides about discovery comes from every profile the client enabled: the refused request
+        // may be a probe of a newer revision while the server speaks an older one.
+        const profile::ProfilePtr refused_profile[] = {request.profile};
+        const std::span<const profile::ProfilePtr> enabled =
+            host != nullptr && !host->profiles().empty() ? host->profiles()
+                                                          : std::span<const profile::ProfilePtr>(refused_profile);
+        config.origin_metadata = oauth::origin_metadata_of(enabled);
 
         if (!admission) {
             oauth::FlowFailure failure;

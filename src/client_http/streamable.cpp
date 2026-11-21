@@ -936,7 +936,7 @@ Result<std::unique_ptr<Transport>> make_http_transport(HttpEndpoint endpoint, Ht
     if (auto* error = std::get_if<ClientError>(&prepared)) return std::move(*error);
     HttpParts parts = std::get<HttpParts>(std::move(prepared));
     SessionRules rules = session_rules(settings);
-    auto gate = AuthorizationGate::make(endpoint, parts.guard);
+    auto gate = AuthorizationGate::make(endpoint, parts.guard, settings.profiles);
     if (auto* error = std::get_if<ClientError>(&gate)) return std::move(*error);
     std::unique_ptr<Transport> transport = std::make_unique<StreamableTransport>(
         std::move(endpoint), std::move(parts.guard), std::move(rules), std::move(parts.limits), std::move(parts.global),

@@ -14,6 +14,7 @@
 #include <asio/use_awaitable.hpp>
 
 #include "neomcp/http/headers.h"
+#include "neomcp/profile.h"
 
 namespace neomcp {
 
@@ -122,6 +123,8 @@ struct AuthorizationGate::State final : AuthorizationHost, std::enable_shared_fr
     asio::any_io_executor executor() const override { return client_executor; }
 
     const std::string& endpoint_url() const override { return endpoint; }
+
+    std::span<const profile::ProfilePtr> profiles() const override { return enabled; }
 
     asio::awaitable<AuthorizationFetchResult> fetch(AuthorizationFetch request) override {
         return run_fetch(weak_from_this(), std::move(request));
@@ -367,6 +370,7 @@ struct AuthorizationGate::State final : AuthorizationHost, std::enable_shared_fr
 
     std::shared_ptr<HttpAuthorizer> authorizer;
     std::string endpoint;
+    std::vector<profile::ProfilePtr> enabled;  // the client's enabled profiles, in its order
     UrlGuard guard;
     std::size_t max_holds = HttpClientDefaults::max_authorizations_per_request;
     bool claimed = false;
@@ -389,10 +393,14 @@ struct AuthorizationGate::State final : AuthorizationHost, std::enable_shared_fr
 
 AuthorizationGate::AuthorizationGate(std::shared_ptr<State> state) : state_(std::move(state)) {}
 
-std::variant<std::unique_ptr<AuthorizationGate>, ClientError> AuthorizationGate::make(const HttpEndpoint& endpoint,
-                                                                                      const UrlGuard& guard) {
+std::variant<std::unique_ptr<AuthorizationGate>, ClientError> AuthorizationGate::make(
+    const HttpEndpoint& endpoint, const UrlGuard& guard, std::vector<profile::ProfilePtr> profiles) {
     auto state = std::make_shared<State>(endpoint.authorizer, endpoint.url, guard,
                                          endpoint.max_authorizations_per_request);
+    if (profiles.empty()) {
+        for (const auto revision : profile::builtin_revisions()) profiles.push_back(profile::builtin(revision));
+    }
+    state->enabled = std::move(profiles);
     if (endpoint.authorizer) {
         if (!AuthorizerClaim::take(*endpoint.authorizer)) {
             ClientError error;

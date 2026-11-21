@@ -87,8 +87,10 @@ class AuthorizationGate {
 public:
     // A gate for `endpoint`, which claims its authorizer (none: a gate that only lets requests through). Fails with
     // invalid_options when another transport holds the authorizer.
-    static std::variant<std::unique_ptr<AuthorizationGate>, ClientError> make(const HttpEndpoint& endpoint,
-                                                                              const UrlGuard& guard);
+    // `profiles` are the client's enabled profiles (empty: every built-in one), which the authorizer reads through
+    // AuthorizationHost::profiles().
+    static std::variant<std::unique_ptr<AuthorizationGate>, ClientError> make(
+        const HttpEndpoint& endpoint, const UrlGuard& guard, std::vector<profile::ProfilePtr> profiles = {});
     ~AuthorizationGate();
     AuthorizationGate(const AuthorizationGate&) = delete;
     AuthorizationGate& operator=(const AuthorizationGate&) = delete;

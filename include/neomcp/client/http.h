@@ -180,6 +180,10 @@ public:
     virtual asio::awaitable<AuthorizationFetchResult> fetch(AuthorizationFetch request) = 0;
     // Hands a report to the application (ClientOptions::on_diagnostic, kind authorization). Never pass a secret.
     virtual void diagnostic(std::string message) = 0;
+    // The profiles the client has enabled, in its order of preference. Authorization starts before a revision is
+    // agreed, so what an authorizer does that a revision decides (the older discovery on the server's origin) is read
+    // from all of them, not only from the refused request's profile. Empty when the host does not know them.
+    virtual std::span<const profile::ProfilePtr> profiles() const { return {}; }
 };
 
 // Gives the requests of an HTTP transport the authorization a server asks for, and answers every refusal for want of

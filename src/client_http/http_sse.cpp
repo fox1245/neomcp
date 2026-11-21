@@ -684,7 +684,7 @@ Result<std::unique_ptr<Transport>> make_http_sse_transport(HttpEndpoint endpoint
     auto prepared = prepare_http(endpoint, settings);
     if (auto* error = std::get_if<ClientError>(&prepared)) return std::move(*error);
     HttpParts parts = std::get<HttpParts>(std::move(prepared));
-    auto gate = AuthorizationGate::make(endpoint, parts.guard);
+    auto gate = AuthorizationGate::make(endpoint, parts.guard, settings.profiles);
     if (auto* error = std::get_if<ClientError>(&gate)) return std::move(*error);
     std::unique_ptr<Transport> transport = std::make_unique<SseTransport>(
         std::move(endpoint), std::move(parts), std::get<EventNames>(std::move(names)),
