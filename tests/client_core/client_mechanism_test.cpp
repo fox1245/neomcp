@@ -250,7 +250,8 @@ TEST(ClientMechanismRegistry, HasAClientHalfForEveryDeclaredName) {
                  {profile::Slot::state, neomcp::MechanismSlot::state},
                  {profile::Slot::server_input, neomcp::MechanismSlot::server_input},
                  {profile::Slot::change_feed, neomcp::MechanismSlot::change_feed},
-                 {profile::Slot::batch, neomcp::MechanismSlot::batch}};
+                 {profile::Slot::batch, neomcp::MechanismSlot::batch},
+                 {profile::Slot::tasks, neomcp::MechanismSlot::tasks}};
     for (const auto& entry : slots) {
         for (const auto name : profile::declared_mechanisms(entry.slot)) {
             EXPECT_TRUE(registry.contains(entry.mechanism_slot, name)) << name;
@@ -274,6 +275,7 @@ TEST(ClientMechanismRegistry, HasAClientHalfForEveryDeclaredName) {
     for (const auto name : profile::declared_mechanisms(profile::Slot::change_feed)) {
         EXPECT_NE(registry.make_feed(name), nullptr);
     }
+    for (const auto name : profile::declared_mechanisms(profile::Slot::tasks)) EXPECT_NE(registry.make_tasks(name), nullptr);
 }
 
 TEST(ClientMechanismRegistry, TheStateAndInputHalvesAgreeWithTheServerHalves) {

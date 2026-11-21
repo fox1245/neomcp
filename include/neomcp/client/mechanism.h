@@ -8,9 +8,10 @@
 // answers).
 //
 // The registry maps (slot, name) to a factory, exactly as the server's does; the built-in registry has a client half
-// for every name profile::declared_mechanisms declares for open, state, server_input, change_feed and batch, and for
-// every name profile::declared_cancel declares for a transport. A profile that names a mechanism the registry has no
-// client half for cannot be spoken: select_client_mechanisms reports it with the revision, the slot and the name.
+// for every name profile::declared_mechanisms declares for open, state, server_input, change_feed, batch and tasks,
+// and for every name profile::declared_cancel declares for a transport. A profile that names a mechanism the registry
+// has no client half for cannot be spoken: select_client_mechanisms reports it with the revision, the slot and the
+// name.
 //
 // Every half is stateless and every method is const, so that one instance can serve every request of a profile from
 // any thread. What a server sends is not trusted: a reader never throws for a malformed message. It returns the value
@@ -22,6 +23,7 @@
 // client (ClientOpenMechanism::annotate).
 #pragma once
 
+#include <chrono>
 #include <functional>
 #include <map>
 #include <memory>
@@ -348,6 +350,61 @@ public:
                                                 const profile::Profile& profile) const = 0;
 };
 
+// The state of a task, as a server reports it when it creates the task and in each answer to a read of it.
+struct TaskState {
+    std::string id;
+    TaskStatus status = TaskStatus::working;
+    std::optional<std::string> message;  // the server's status message, as sent
+    std::string created_at;              // when the task was created, as sent
+    std::string updated_at;              // when it last changed, as sent
+    // How long the server keeps the task from its creation; empty: without limit.
+    std::optional<std::chrono::milliseconds> ttl;
+    // How long the server asks the client to wait between two reads; empty when it suggests nothing.
+    std::optional<std::chrono::milliseconds> poll_interval;
+    // completed: the result of the request the task carries out, as sent (for a tool call, its CallToolResult).
+    std::optional<json> result;
+    // failed: the error the request ended with.
+    std::optional<RequestError> error;
+    // input_required: every request the task waits on, sorted by key.
+    std::vector<AskedInput> requests;
+};
+
+// Slot `tasks`: whether a server may answer a request with a task, which the client then follows by asking about it,
+// and how tasks look on the wire. A half that takes no tasks (takes_tasks() false) declares nothing, reads every result
+// as the request's own and writes no request about a task.
+class ClientTaskMechanism {
+public:
+    virtual ~ClientTaskMechanism() = default;
+
+    // Why the half cannot speak the profile; empty when it can.
+    virtual std::optional<std::string> check(const profile::Profile& profile) const = 0;
+    // Whether a server may answer a request with a task under the mechanism.
+    virtual bool takes_tasks() const = 0;
+    // Adds to a ClientCapabilities object, written for the profile, that the client takes tasks.
+    virtual void declare(json& capabilities) const = 0;
+
+    // What a result of a request of `method` is: empty when it is the request's own result; the task's first state
+    // when it creates a task; an error when it creates one for a request that a task cannot answer, or is malformed.
+    virtual std::optional<WireRead<TaskState>> read_created(const json& result, std::string_view method,
+                                                            const profile::Profile& profile) const = 0;
+
+    // The requests about the task `id`: a read of its state, the answers to the requests it waits on, its
+    // cancellation. An error when an answer cannot be written for the revision.
+    virtual ClientMessage read(std::string_view id) const = 0;
+    virtual WireRead<ClientMessage> update(std::string_view id, const InputResponses& answers,
+                                           const profile::Profile& profile) const = 0;
+    virtual ClientMessage cancel(std::string_view id) const = 0;
+
+    // The result of a read: the task's state, or what is wrong with it.
+    virtual WireRead<TaskState> read_state(const json& result, const profile::Profile& profile) const = 0;
+    // The result of an update or a cancellation: empty when it is the acknowledgement, else what is wrong with it.
+    virtual std::optional<std::string> read_acknowledgement(const json& result,
+                                                            const profile::Profile& profile) const = 0;
+    // Whether an error answer to a request about a task says that the server knows no such task (it never had it,
+    // or no longer has it).
+    virtual bool says_unknown(const RequestError& error) const = 0;
+};
+
 class ClientMechanismRegistry {
 public:
     template <typename Interface>
@@ -360,6 +417,7 @@ public:
     void add_cancel(std::string name, Factory<ClientCancelMechanism> factory);
     void add_input(std::string name, Factory<ClientInputMechanism> factory);
     void add_feed(std::string name, Factory<ClientFeedMechanism> factory);
+    void add_tasks(std::string name, Factory<ClientTaskMechanism> factory);
     // Removes a name; returns whether it was there.
     bool remove(MechanismSlot slot, std::string_view name);
 
@@ -374,12 +432,14 @@ public:
     std::unique_ptr<ClientCancelMechanism> make_cancel(std::string_view name) const;
     std::unique_ptr<ClientInputMechanism> make_input(std::string_view name) const;
     std::unique_ptr<ClientFeedMechanism> make_feed(std::string_view name) const;
+    std::unique_ptr<ClientTaskMechanism> make_tasks(std::string_view name) const;
 
 private:
     using Key = std::pair<MechanismSlot, std::string>;
     using AnyFactory =
         std::variant<Factory<ClientOpenMechanism>, Factory<ClientStateMechanism>, Factory<ClientBatchMechanism>,
-                     Factory<ClientCancelMechanism>, Factory<ClientInputMechanism>, Factory<ClientFeedMechanism>>;
+                     Factory<ClientCancelMechanism>, Factory<ClientInputMechanism>, Factory<ClientFeedMechanism>,
+                     Factory<ClientTaskMechanism>>;
 
     template <typename Interface>
     void put(MechanismSlot slot, std::string name, Factory<Interface> factory);
@@ -390,7 +450,9 @@ private:
 };
 
 // The client halves of the library: every name profile::declared_mechanisms declares for open, state, server_input,
-// change_feed and batch, and every name profile::declared_cancel declares for a transport.
+// change_feed, batch and tasks, and every name profile::declared_cancel declares for a transport. Of the tasks halves
+// only `server_directed` takes tasks; `none` and `augmented_request` (where the requester would ask for a task in the
+// request) take none, so a client never asks for a task under a revision that has tasks only that way.
 const ClientMechanismRegistry& builtin_client_mechanisms();
 
 // The client halves one profile selects for one transport, each never null.
@@ -402,6 +464,7 @@ struct ClientMechanisms {
     std::unique_ptr<ClientCancelMechanism> cancel;  // the one the profile's entry for the transport names
     std::unique_ptr<ClientInputMechanism> server_input;
     std::unique_ptr<ClientFeedMechanism> change_feed;
+    std::unique_ptr<ClientTaskMechanism> tasks;
 };
 
 // A mechanism a profile names that the registry has no client half for.

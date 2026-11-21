@@ -8,6 +8,7 @@
 #include "neomcp/client/mechanism.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <iterator>
 #include <limits>
@@ -16,6 +17,7 @@
 #include <utility>
 
 #include "core/input.h"
+#include "neomcp/client/methods.h"
 #include "neomcp/wire.h"
 
 namespace neomcp {
@@ -1010,6 +1012,293 @@ private:
     std::unique_ptr<ChangeFeedMechanism> server_;
 };
 
+// ---- tasks
+
+// The server half of a tasks mechanism, which the client half asks what the two must agree on.
+std::unique_ptr<TaskMechanism> server_tasks(std::string_view name) {
+    auto half = builtin_mechanisms().make_tasks(name);
+    if (half == nullptr) {
+        throw std::logic_error("the library has no server half of the tasks mechanism " + std::string(name));
+    }
+    return half;
+}
+
+// Merges the members of `more` into `into`, one level of objects deep.
+void merge_members(json& into, const json& more) {
+    if (!into.is_object()) into = json::object();
+    const auto* members = more.get_ptr<const json::object_t*>();
+    if (members == nullptr) return;
+    for (const auto& [key, value] : *members) {
+        json& slot = into[key];
+        if (slot.is_object() && value.is_object()) {
+            for (const auto& [inner, entry] : value.get_ref<const json::object_t&>()) slot[inner] = entry;
+        } else {
+            slot = value;
+        }
+    }
+}
+
+// `none`: no request is answered with a task.
+class NoTasks : public ClientTaskMechanism {
+public:
+    static constexpr std::string_view name = "none";
+
+    std::optional<std::string> check(const profile::Profile&) const override { return std::nullopt; }
+    bool takes_tasks() const override { return false; }
+    void declare(json&) const override {}
+    std::optional<WireRead<TaskState>> read_created(const json&, std::string_view,
+                                                    const profile::Profile&) const override {
+        return std::nullopt;
+    }
+    ClientMessage read(std::string_view) const override { return ClientMessage{}; }
+    WireRead<ClientMessage> update(std::string_view, const InputResponses&, const profile::Profile&) const override {
+        return std::string("under this mechanism there are no tasks");
+    }
+    ClientMessage cancel(std::string_view) const override { return ClientMessage{}; }
+    WireRead<TaskState> read_state(const json&, const profile::Profile&) const override {
+        return std::string("under this mechanism there are no tasks");
+    }
+    std::optional<std::string> read_acknowledgement(const json&, const profile::Profile&) const override {
+        return std::string("under this mechanism there are no tasks");
+    }
+    bool says_unknown(const RequestError&) const override { return false; }
+};
+
+// `augmented_request`: the requester asks for a task in the request. The client never asks, so under it the client
+// takes no tasks either.
+class AugmentedRequestTasks final : public NoTasks {
+public:
+    static constexpr std::string_view name = "augmented_request";
+};
+
+// `server_directed`: the extension io.modelcontextprotocol/tasks. The client declares, in the capabilities of every
+// request, what the server half requires of a requester that takes tasks; the server then decides, per tool call,
+// whether to answer with a result of `resultType` "task". The client reads the task with tasks/get, gives the answers
+// to the requests it waits on with tasks/update, and cancels it with tasks/cancel; a read of a task that has ended
+// inlines what it ended with, and an update or a cancellation is acknowledged with an empty result.
+class ServerDirectedTasks final : public ClientTaskMechanism {
+public:
+    static constexpr std::string_view name = "server_directed";
+    static constexpr std::string_view read_method = "tasks/get";
+    static constexpr std::string_view update_method = "tasks/update";
+    static constexpr std::string_view cancel_method = "tasks/cancel";
+    static constexpr std::string_view task_id_member = "taskId";
+    static constexpr std::string_view responses_member = "inputResponses";
+    static constexpr std::string_view result_type_member = "resultType";
+    static constexpr std::string_view task_kind = "task";
+    static constexpr std::string_view complete_kind = "complete";
+    static constexpr std::string_view status_member = "status";
+    static constexpr std::string_view message_member = "statusMessage";
+    static constexpr std::string_view created_member = "createdAt";
+    static constexpr std::string_view updated_member = "lastUpdatedAt";
+    static constexpr std::string_view ttl_member = "ttlMs";
+    static constexpr std::string_view poll_member = "pollIntervalMs";
+    static constexpr std::string_view result_member = "result";
+    static constexpr std::string_view error_member = "error";
+    static constexpr std::string_view error_message_member = "message";
+    static constexpr std::string_view requests_member = "inputRequests";
+    static constexpr std::string_view method_member = "method";
+    static constexpr std::string_view params_member = "params";
+    static constexpr std::string_view created_type = "CreateTaskResult";
+    static constexpr std::string_view task_type = "Task";
+    // The only request a task may answer.
+    static constexpr std::string_view task_request = client_method::tools_call;
+
+    ServerDirectedTasks() : server_(server_tasks(name)) {}
+
+    std::optional<std::string> check(const profile::Profile& profile) const override {
+        if (auto problem = server_->check(profile)) return problem;
+        if (builtin_mechanisms().make_input(profile.mechanism(profile::Slot::server_input)) == nullptr) {
+            return std::string("the library has no server half of the profile's server_input mechanism");
+        }
+        return std::nullopt;
+    }
+    bool takes_tasks() const override { return true; }
+    void declare(json& capabilities) const override { merge_members(capabilities, server_->required_capabilities()); }
+
+    std::optional<WireRead<TaskState>> read_created(const json& result, std::string_view method,
+                                                    const profile::Profile& profile) const override {
+        const json* kind = member(result, result_type_member);
+        const auto* text = kind == nullptr ? nullptr : kind->get_ptr<const std::string*>();
+        if (text == nullptr || *text != task_kind) return std::nullopt;
+        if (method != task_request) {
+            return WireRead<TaskState>(std::string("$: creates a task for a request that a task cannot answer"));
+        }
+        if (!has_required(result, profile.type(created_type))) {
+            return WireRead<TaskState>("$: lacks a member the revision's " + std::string(created_type) + " requires");
+        }
+        TaskState state;
+        if (auto problem = read_task(result, state)) return WireRead<TaskState>(std::move(*problem));
+        return WireRead<TaskState>(std::move(state));
+    }
+
+    ClientMessage read(std::string_view id) const override { return about(read_method, id); }
+
+    WireRead<ClientMessage> update(std::string_view id, const InputResponses& answers,
+                                   const profile::Profile& profile) const override {
+        const auto input = server_input(profile.mechanism(profile::Slot::server_input));
+        json written = json::object();
+        for (const auto& [key, answer] : answers) {
+            auto one = detail::write_answer(answer, profile, *input);
+            if (auto* problem = std::get_if<std::string>(&one)) return std::move(*problem);
+            written[key] = std::move(std::get<json>(one));
+        }
+        ClientMessage message = about(update_method, id);
+        message.params[std::string(responses_member)] = std::move(written);
+        return message;
+    }
+
+    ClientMessage cancel(std::string_view id) const override { return about(cancel_method, id); }
+
+    WireRead<TaskState> read_state(const json& result, const profile::Profile& profile) const override {
+        if (!result.is_object()) return std::string("$: is not an object");
+        if (auto problem = complete_or_absent(result)) return std::move(*problem);
+        if (!has_required(result, profile.type(task_type))) {
+            return "$: lacks a member the revision's " + std::string(task_type) + " requires";
+        }
+        TaskState state;
+        if (auto problem = read_task(result, state)) return std::move(*problem);
+        switch (state.status) {
+            case TaskStatus::completed: {
+                const json* inlined = member(result, result_member);
+                if (inlined == nullptr || !inlined->is_object()) {
+                    return "$." + std::string(result_member) + ": is required and must be an object";
+                }
+                state.result = *inlined;
+                break;
+            }
+            case TaskStatus::failed: {
+                const json* inlined = member(result, error_member);
+                const auto code = inlined == nullptr ? std::nullopt : error_code_of(*inlined);
+                const json* text = inlined == nullptr ? nullptr : member(*inlined, error_message_member);
+                if (!code || text == nullptr || !text->is_string()) {
+                    return "$." + std::string(error_member) + ": is required and must be an error with a code and a message";
+                }
+                RequestError error;
+                error.code = *code;
+                error.message = text->get<std::string>();
+                if (const json* data = member(*inlined, error_data_member)) error.data = *data;
+                state.error = std::move(error);
+                break;
+            }
+            case TaskStatus::input_required: {
+                const json* requests = member(result, requests_member);
+                const auto* entries = requests == nullptr ? nullptr : requests->get_ptr<const json::object_t*>();
+                if (entries == nullptr) return "$." + std::string(requests_member) + ": is required and must be an object";
+                const auto input = server_input(profile.mechanism(profile::Slot::server_input));
+                for (const auto& [key, entry] : *entries) {
+                    const std::string at =
+                        "$." + std::string(requests_member) + "[" + std::to_string(state.requests.size()) + "]";
+                    const json* asked = member(entry, method_member);
+                    const auto* asked_method = asked == nullptr ? nullptr : asked->get_ptr<const std::string*>();
+                    if (asked_method == nullptr) {
+                        return at + "." + std::string(method_member) + ": is required and must be a string";
+                    }
+                    if (!input->carries(profile, *asked_method)) {
+                        return at + "." + std::string(method_member) + ": is no request the revision lets a server ask with";
+                    }
+                    const json* params = member(entry, params_member);
+                    auto request = detail::read_request(*asked_method, params == nullptr ? json() : *params, profile, *input);
+                    if (auto* problem = std::get_if<std::string>(&request)) return at + ": " + *problem;
+                    state.requests.push_back(AskedInput{key, *asked_method, std::move(std::get<InputRequest>(request))});
+                }
+                std::sort(state.requests.begin(), state.requests.end(),
+                          [](const AskedInput& a, const AskedInput& b) { return a.key < b.key; });
+                break;
+            }
+            case TaskStatus::working:
+            case TaskStatus::cancelled: break;
+        }
+        return state;
+    }
+
+    std::optional<std::string> read_acknowledgement(const json& result, const profile::Profile&) const override {
+        if (!result.is_object()) return std::string("$: is not an object");
+        return complete_or_absent(result);
+    }
+
+    bool says_unknown(const RequestError& error) const override { return error.code == error_code::invalid_params; }
+
+private:
+    static ClientMessage about(std::string_view method, std::string_view id) {
+        json params = json::object();
+        params[std::string(task_id_member)] = std::string(id);
+        return ClientMessage{std::string(method), std::move(params)};
+    }
+
+    // A result whose kind, when it names one, is the complete kind.
+    static std::optional<std::string> complete_or_absent(const json& result) {
+        const json* kind = member(result, result_type_member);
+        if (kind == nullptr) return std::nullopt;
+        const auto* text = kind->get_ptr<const std::string*>();
+        if (text == nullptr || *text != complete_kind) {
+            return "$." + std::string(result_type_member) + ": is not " + std::string(complete_kind);
+        }
+        return std::nullopt;
+    }
+
+    // A non-negative integer number of milliseconds; a value beyond what the duration holds is held as its largest.
+    static std::optional<std::chrono::milliseconds> milliseconds_of(const json& value) {
+        if (!value.is_number_integer()) return std::nullopt;
+        using Count = std::chrono::milliseconds::rep;
+        if (value.is_number_unsigned()) {
+            const auto count = value.get<std::uint64_t>();
+            if (count > static_cast<std::uint64_t>((std::numeric_limits<Count>::max)())) {
+                return std::chrono::milliseconds((std::numeric_limits<Count>::max)());
+            }
+            return std::chrono::milliseconds(static_cast<Count>(count));
+        }
+        const auto count = value.get<std::int64_t>();
+        if (count < 0) return std::nullopt;
+        return std::chrono::milliseconds(static_cast<Count>(count));
+    }
+
+    static std::optional<TaskStatus> status_of(std::string_view text) {
+        for (const TaskStatus status : {TaskStatus::working, TaskStatus::input_required, TaskStatus::completed,
+                                        TaskStatus::failed, TaskStatus::cancelled}) {
+            if (to_string(status) == text) return status;
+        }
+        return std::nullopt;
+    }
+
+    // The members every state of a task has: its id, its status and the optional ones beside them.
+    static std::optional<std::string> read_task(const json& result, TaskState& state) {
+        const json* id = member(result, task_id_member);
+        const auto* id_text = id == nullptr ? nullptr : id->get_ptr<const std::string*>();
+        if (id_text == nullptr) return "$." + std::string(task_id_member) + ": is required and must be a string";
+        state.id = *id_text;
+        const json* status = member(result, status_member);
+        const auto* status_text = status == nullptr ? nullptr : status->get_ptr<const std::string*>();
+        const auto read_status = status_text == nullptr ? std::nullopt : status_of(*status_text);
+        if (!read_status) return "$." + std::string(status_member) + ": is required and must be a status of a task";
+        state.status = *read_status;
+        for (const auto& [field, out] : {std::pair<std::string_view, std::string*>{created_member, &state.created_at},
+                                         std::pair<std::string_view, std::string*>{updated_member, &state.updated_at}}) {
+            if (const json* value = member(result, field)) {
+                const auto* text = value->get_ptr<const std::string*>();
+                if (text == nullptr) return "$." + std::string(field) + ": is not a string";
+                *out = *text;
+            }
+        }
+        if (const json* message = member(result, message_member)) {
+            const auto* text = message->get_ptr<const std::string*>();
+            if (text == nullptr) return "$." + std::string(message_member) + ": is not a string";
+            state.message = *text;
+        }
+        if (const json* ttl = member(result, ttl_member); ttl != nullptr && !ttl->is_null()) {
+            state.ttl = milliseconds_of(*ttl);
+            if (!state.ttl) return "$." + std::string(ttl_member) + ": is not a number of milliseconds";
+        }
+        if (const json* poll = member(result, poll_member)) {
+            state.poll_interval = milliseconds_of(*poll);
+            if (!state.poll_interval) return "$." + std::string(poll_member) + ": is not a number of milliseconds";
+        }
+        return std::nullopt;
+    }
+
+    std::unique_ptr<TaskMechanism> server_;
+};
+
 // ---- the built-in registry
 
 template <typename Interface, typename Implementation>
@@ -1033,6 +1322,9 @@ ClientMechanismRegistry make_builtin() {
     add<ClientInputMechanism, ServerRequest>(registry, &ClientMechanismRegistry::add_input);
     add<ClientFeedMechanism, ConnectionNotifications>(registry, &ClientMechanismRegistry::add_feed);
     add<ClientFeedMechanism, SubscriptionsListen>(registry, &ClientMechanismRegistry::add_feed);
+    add<ClientTaskMechanism, NoTasks>(registry, &ClientMechanismRegistry::add_tasks);
+    add<ClientTaskMechanism, AugmentedRequestTasks>(registry, &ClientMechanismRegistry::add_tasks);
+    add<ClientTaskMechanism, ServerDirectedTasks>(registry, &ClientMechanismRegistry::add_tasks);
     return registry;
 }
 
@@ -1088,6 +1380,9 @@ void ClientMechanismRegistry::add_input(std::string name, Factory<ClientInputMec
 void ClientMechanismRegistry::add_feed(std::string name, Factory<ClientFeedMechanism> factory) {
     put(MechanismSlot::change_feed, std::move(name), std::move(factory));
 }
+void ClientMechanismRegistry::add_tasks(std::string name, Factory<ClientTaskMechanism> factory) {
+    put(MechanismSlot::tasks, std::move(name), std::move(factory));
+}
 
 bool ClientMechanismRegistry::remove(MechanismSlot slot, std::string_view name) {
     return factories_.erase(Key(slot, std::string(name))) > 0;
@@ -1122,6 +1417,9 @@ std::unique_ptr<ClientInputMechanism> ClientMechanismRegistry::make_input(std::s
 }
 std::unique_ptr<ClientFeedMechanism> ClientMechanismRegistry::make_feed(std::string_view name) const {
     return make<ClientFeedMechanism>(MechanismSlot::change_feed, name);
+}
+std::unique_ptr<ClientTaskMechanism> ClientMechanismRegistry::make_tasks(std::string_view name) const {
+    return make<ClientTaskMechanism>(MechanismSlot::tasks, name);
 }
 
 const ClientMechanismRegistry& builtin_client_mechanisms() {
@@ -1193,6 +1491,13 @@ std::variant<std::vector<ClientMechanisms>, ClientMechanismsError> select_client
             missing(revision, MechanismSlot::change_feed, feed_name);
         } else {
             unable(revision, MechanismSlot::change_feed, feed_name, halves.change_feed->check(*profile));
+        }
+        const std::string_view tasks_name = profile->mechanism(profile::Slot::tasks);
+        halves.tasks = registry.make_tasks(tasks_name);
+        if (halves.tasks == nullptr) {
+            missing(revision, MechanismSlot::tasks, tasks_name);
+        } else {
+            unable(revision, MechanismSlot::tasks, tasks_name, halves.tasks->check(*profile));
         }
         selected.push_back(std::move(halves));
     }
