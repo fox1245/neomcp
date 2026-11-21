@@ -343,6 +343,21 @@ TEST_F(ServerAuthorization, BeingToldOfAResourcesUpdatesNeedsWhatReadingItNeeds)
     expect_result(rig.send(request(6, "resources/unsubscribe", "res://secret"), grant({"secret:read"})));
 }
 
+// A subscription that names resources needs what reading each of them needs (one that names none is told of no
+// resource's updates). Only refusals are checked here: an accepted subscription has no last output until it ends.
+TEST_F(ServerAuthorization, ASubscriptionThatNamesResourcesNeedsWhatReadingThemNeeds) {
+    Rig rig(server);
+    const auto listen_to = [&](int id, json uris) {
+        return Peer::make_request(*modern, id, "subscriptions/listen",
+                                  json{{"notifications", json{{"resourceSubscriptions", std::move(uris)}}}});
+    };
+    expect_scope_refusal(rig.send(listen_to(1, {"res://secret", "doc://a", "res://secret"}), grant({})),
+                         {"secret:read", "docs:read"});
+    expect_scope_refusal(rig.send(listen_to(2, {"doc://a", "res://secret"}), grant({"secret:read"})), {"docs:read"});
+    EXPECT_EQ(counts.secret, 0);
+    EXPECT_EQ(counts.doc, 0);
+}
+
 TEST_F(ServerAuthorization, ABatchThatLacksAScopeForOneRequestRunsNoneAndNamesWhatEachLacks) {
     Rig rig(server);
     const auto legacy = builtin("2025-03-26");

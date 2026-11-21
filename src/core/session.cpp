@@ -1983,6 +1983,24 @@ std::optional<Answer> SessionCore::on_listen(const Message& request, const FeedR
                                             std::to_string(options_.max_watched_bytes) + " bytes"),
                              served);
     }
+    // Being told of a resource's updates needs what reading it needs: a subscription that names a resource its
+    // authorization cannot read is refused, naming what the resources it names need and it lacks. A subscription that
+    // names none is told of no resource's updates, so it reveals nothing about one it cannot read.
+    if (ResourceHost* readable = host_.resource_host(); readable != nullptr) {
+        if (auto refusal = scope_refusal(id, place, served, [&] {
+                std::vector<std::string> required;
+                for (const auto& uri : asked.filter.resources) {
+                    for (const std::string& scope : readable->read_scopes(uri)) {
+                        if (std::find(required.begin(), required.end(), scope) == required.end()) {
+                            required.push_back(scope);
+                        }
+                    }
+                }
+                return required;
+            })) {
+            return refusal;
+        }
+    }
     // What is honoured: the kinds of change the server reports and the revision has a notification for, and of the
     // resources asked for those the host offers now. The rest is left out of the acknowledgement and never sent.
     const auto has = [&](ChangeKind kind) {
