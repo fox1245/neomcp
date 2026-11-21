@@ -146,6 +146,51 @@ public:
         return access_issued_;
     }
 
+    // What a token the server issued stands for, as a resource server would learn it from the server.
+    struct Grant {
+        std::vector<std::string> scopes;
+        std::string audience;  // the `resource` the request named, or the audience the test chose
+        std::string client_id;
+        std::string subject;
+        std::chrono::system_clock::time_point expires;
+    };
+    // The grant behind an access token this server issued.
+    std::optional<Grant> grant_of(const std::string& access_token) const {
+        std::lock_guard lock(mutex_);
+        const auto found = grants_.find(access_token);
+        if (found == grants_.end()) return std::nullopt;
+        return found->second;
+    }
+    // The owner every token of this server is issued for.
+    static constexpr std::string_view subject_name = "alice";
+    // The seconds an issued access token lives (its `expires_in`, and the end the resource server learns).
+    void token_lifetime(std::chrono::seconds lifetime) {
+        std::lock_guard lock(mutex_);
+        lifetime_ = lifetime;
+    }
+    // Only these scopes are ever granted: a request for others gets a token without them (the token answer does not say).
+    void grant_only(std::vector<std::string> scopes) {
+        std::lock_guard lock(mutex_);
+        grantable_ = std::move(scopes);
+    }
+    // Every token is issued for this audience, whatever resource the request named.
+    void issue_for_audience(std::string audience) {
+        std::lock_guard lock(mutex_);
+        audience_ = std::move(audience);
+    }
+    // The access tokens are the text this makes from the grant (a signed token, say), in place of "<name>-access-<n>".
+    // Called with the server's lock held: it must not call this server.
+    void mint_with(std::function<std::string(const Grant&)> mint) {
+        std::lock_guard lock(mutex_);
+        mint_ = std::move(mint);
+    }
+    // Requests the script does not know are offered to this first (after the test's override), without the server's
+    // lock held: an introspection endpoint, a key set.
+    void serve_extra(Override extra) {
+        std::lock_guard lock(mutex_);
+        extra_ = std::move(extra);
+    }
+
     // Refresh tokens are issued with every token, and refresh requests answered with new tokens.
     void issue_refresh_tokens(bool on) {
         std::lock_guard lock(mutex_);
@@ -195,11 +240,28 @@ private:
         return document;
     }
 
-    http_test::Reply tokens_for(std::vector<std::string> scopes) {
-        std::string access = name_ + "-access-" + std::to_string(++tokens_issued_);
-        json body{{"access_token", access}, {"token_type", "Bearer"}, {"expires_in", 3600}};
+    http_test::Reply tokens_for(std::vector<std::string> scopes, const Request& request) {
+        if (grantable_) {
+            std::vector<std::string> kept;
+            for (const std::string& one : scopes) {
+                if (std::find(grantable_->begin(), grantable_->end(), one) != grantable_->end()) kept.push_back(one);
+            }
+            scopes = std::move(kept);
+        }
+        ++tokens_issued_;
+        Grant grant;
+        grant.scopes = scopes;
+        grant.audience = audience_ ? *audience_ : field_of(request.body, "resource").value_or(std::string());
+        grant.client_id = field_of(request.body, "client_id").value_or(std::string());
+        grant.subject = std::string(subject_name);
+        grant.expires = std::chrono::system_clock::now() + lifetime_;
+        std::string access = mint_ ? mint_(grant) : name_ + "-access-" + std::to_string(tokens_issued_);
+        json body{{"access_token", access},
+                  {"token_type", "Bearer"},
+                  {"expires_in", static_cast<long long>(lifetime_.count())}};
         issued_.push_back(access);
         access_issued_.push_back(access);
+        grants_[access] = std::move(grant);
         if (refresh_) {
             std::string refresh = name_ + "-refresh-" + std::to_string(tokens_issued_);
             body["refresh_token"] = refresh;
@@ -218,6 +280,14 @@ private:
         }
         if (chosen) {
             if (auto given = chosen(request)) return std::move(*given);
+        }
+        Override extra;
+        {
+            std::lock_guard lock(mutex_);
+            extra = extra_;
+        }
+        if (extra) {
+            if (auto given = extra(request)) return std::move(*given);
         }
         return reply(request);
     }
@@ -248,7 +318,7 @@ private:
                 if (found == codes_.end()) return http_test::json_reply(400, json{{"error", "invalid_grant"}});
                 std::vector<std::string> scopes = found->second;
                 codes_.erase(found);
-                return tokens_for(std::move(scopes));
+                return tokens_for(std::move(scopes), request);
             }
             if (grant == std::optional<std::string>("refresh_token")) {
                 const auto refresh = field_of(request.body, "refresh_token");
@@ -258,7 +328,7 @@ private:
                 }
                 std::vector<std::string> scopes = found->second;
                 refresh_tokens_.erase(found);
-                return tokens_for(std::move(scopes));
+                return tokens_for(std::move(scopes), request);
             }
             return http_test::json_reply(400, json{{"error", "unsupported_grant_type"}});
         }
@@ -279,6 +349,12 @@ private:
     std::size_t tokens_issued_ = 0;
     std::map<std::string, std::vector<std::string>> codes_;
     std::map<std::string, std::vector<std::string>> refresh_tokens_;
+    std::map<std::string, Grant> grants_;
+    std::chrono::seconds lifetime_{3600};
+    std::optional<std::vector<std::string>> grantable_;
+    std::optional<std::string> audience_;
+    std::function<std::string(const Grant&)> mint_;
+    Override extra_;
     ScriptedHttpServer server_;
 };
 
