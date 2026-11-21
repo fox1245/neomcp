@@ -50,6 +50,7 @@
 
 #include "client_http/authorization_gate.h"
 #include "client_http/delivery.h"
+#include "client_http/header_fields.h"
 #include "client_http/transfers.h"
 #include "client_http/url_guard.h"
 #include "core/uri.h"
@@ -130,25 +131,11 @@ std::optional<std::string> resolve_endpoint(std::string_view base, std::string_v
     return to_string(target);
 }
 
-// The header lines of a request, and why one cannot be sent.
-struct Lines {
-    std::vector<std::string> lines;
-    std::optional<std::string> problem;
-
-    void add(std::string_view name, std::string_view value) {
-        auto line = header_line(name, value);
-        if (!line) {
-            if (!problem) problem = "the header field " + std::string(name) + " cannot be sent as it is";
-            return;
-        }
-        lines.push_back(std::move(*line));
-    }
-};
-
 class SseTransport final : public Transport {
 public:
     SseTransport(HttpEndpoint endpoint, HttpParts parts, EventNames names, std::unique_ptr<AuthorizationGate> gate)
         : endpoint_(std::move(endpoint)),
+          fields_(std::move(parts.fields)),
           names_(std::move(names)),
           guard_(parts.guard),
           max_message_bytes_(parts.limits.max_message_bytes),
@@ -265,6 +252,7 @@ private:
         request.typed_events = true;
         Lines lines;
         lines.add(field_accept, event_stream_media_type);
+        fields_.add_to(lines, HttpRequestKind::connection_stream);
         request.header_lines = std::move(lines.lines);
         std::optional<std::string> problem = lines.problem;
         if (!problem) {
@@ -506,6 +494,7 @@ private:
             if (http::equal_ignoring_case(header.name, field_authorization)) continue;
             lines.add(header.name, header.value);
         }
+        fields_.add_to(lines, HttpRequestKind::message);
         request.header_lines = std::move(lines.lines);
         request.body = std::move(outgoing.line);
         Post exchange;
@@ -649,6 +638,7 @@ private:
     };
 
     HttpEndpoint endpoint_;
+    ApplicationFields fields_;
     EventNames names_;
     UrlGuard guard_;
     std::size_t max_message_bytes_;

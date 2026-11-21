@@ -61,6 +61,9 @@ std::optional<std::string> resolver_refusal(bool allow_blocking);
 // with CR, LF or NUL, which would end the field and start another.
 std::optional<std::string> header_line(std::string_view name, std::string_view value);
 
+// Whether `c` may be in the name of a header field (a token character, RFC 9110, section 5.6.2).
+bool is_token_char(char c);
+
 // ---- the body of a response
 
 enum class BodyKind {

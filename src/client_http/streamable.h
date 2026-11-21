@@ -7,6 +7,7 @@
 #include <variant>
 #include <vector>
 
+#include "client_http/header_fields.h"
 #include "client_http/transfers.h"
 #include "client_http/url_guard.h"
 #include "neomcp/client/engine.h"
@@ -38,6 +39,8 @@ struct HttpParts {
     UrlGuard guard;
     TransferLimits limits;
     std::shared_ptr<CurlGlobal> global;
+    // The header fields of the application's own, checked.
+    ApplicationFields fields;
 };
 
 // The parts for `endpoint`, or why it cannot serve: as make_http_transport fails.

@@ -13,6 +13,7 @@ if(NEOMCP_HTTP_CLIENT)
     add_library(neomcp_client_http
         src/client_auth/authorizer.cpp
         src/client_http/authorization_gate.cpp
+        src/client_http/header_fields.cpp
         src/client_http/http_sse.cpp
         src/client_http/streamable.cpp
         src/client_http/transfers.cpp

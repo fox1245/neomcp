@@ -197,7 +197,22 @@ struct HttpClientDefaults {
     static constexpr std::chrono::milliseconds endpoint_timeout{10'000};
     static constexpr std::chrono::milliseconds delete_timeout{2'000};
     static constexpr std::size_t max_authorizations_per_request = 3;
+    static constexpr std::size_t max_header_fields = 32;
+    static constexpr std::size_t max_header_field_bytes = std::size_t{8} * 1024;
 };
+
+// The kinds of request an HTTP transport makes, as HttpEndpoint::header_fields_for is told them.
+enum class HttpRequestKind {
+    message,            // a POST that carries one message of the client (on the older transport: a POST to the
+                        // endpoint that stream named)
+    connection_stream,  // the GET that opens the stream of the connection (on the older transport: the GET of the
+                        // event stream), and each GET that opens it again
+    stream_resumption,  // a GET that resumes the event stream of one request
+    end_session         // the DELETE that ends a session
+};
+
+// Supplies the header fields of the application's own for one request (HttpEndpoint::header_fields_for).
+using HttpFieldsCallback = std::function<std::vector<HttpHeader>(HttpRequestKind)>;
 
 struct HttpEndpoint {
     // The endpoint's URL, used exactly as given.
@@ -245,6 +260,38 @@ struct HttpEndpoint {
     // another kind between; one more refusal ends it with authorization_failed (attempts_exceeded), whatever the
     // authorizer would answer. Zero is an error. Default 3.
     std::size_t max_authorizations_per_request = HttpClientDefaults::max_authorizations_per_request;
+
+    // Header fields of the application's own: sent with every request the transport makes to the endpoint (the
+    // messages, the stream of the connection and the requests that resume a stream, the request that ends a
+    // session; on the older transport, its event stream and every message). They are not sent to the documents the
+    // authorizer fetches, and a redirect is followed within the endpoint's origin only, so they reach no other origin.
+    // A field's name is an HTTP token and its value holds no control character but a tab (RFC 9110, section 5), and
+    // names compare without regard to case. A field the transport or the protocol writes cannot be set, and is
+    // refused rather than replaced or sent twice: Accept, Content-Type, Authorization (the authorizer's alone),
+    // Last-Event-ID, Host, Content-Length, Transfer-Encoding, Connection and the other fields of HTTP that frame a
+    // message, the header of the session id and of the protocol version, and the fields that mirror a message's
+    // method, name or parameters, as the enabled revisions define them. A name given twice is refused too. The fixed
+    // fields are checked when the endpoint is opened; open fails with invalid_options for a field that fails these
+    // rules or the bounds below.
+    std::vector<HttpHeader> header_fields;
+    // Called for each request, with the kind of the request, for fields that vary between requests; null: none. It
+    // runs on the client's thread, from inside the transport's own work (a call of the client's, or of its close),
+    // so it must return promptly, never block (no waiting for another thread, a file or the network) and never call
+    // into the client; a value it needs is one the application keeps ready for it, read under a short lock or from
+    // an atomic. It is asked when a request is built: a request sent again as it was (after a refusal for want of
+    // authorization, or a redirect within the origin) keeps the fields it was built with, and a stream opened again
+    // or resumed after a wait is built before the wait. What it returns is checked as the fixed fields are, together
+    // with them and with what the request holds already. A request whose fields cannot be sent (a field that is not
+    // valid, that the transport writes itself, that is given twice, too many or too long ones, or a callback that
+    // throws) is not sent, and the request after it asks the callback again. A message fails its call with
+    // send_failed; the resumption of a stream ends the call it belongs to with stream_lost; the stream of the
+    // connection is opened again as after any loss, which max_resumptions bounds; on the older transport the first
+    // event stream failing ends the connection as a refused one does; the request that ends a session is not sent.
+    HttpFieldsCallback header_fields_for;
+    // Fields of the application's own on one request, those above and the callback's together, may not exceed this
+    // many, nor this many bytes (names and values together). Neither is zero. Defaults 32 and 8 KiB.
+    std::size_t max_header_fields = HttpClientDefaults::max_header_fields;
+    std::size_t max_header_field_bytes = HttpClientDefaults::max_header_field_bytes;
 };
 
 // ---- Making a transport

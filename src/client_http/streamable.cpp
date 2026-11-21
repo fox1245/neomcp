@@ -62,6 +62,7 @@
 
 #include "client_http/authorization_gate.h"
 #include "client_http/delivery.h"
+#include "client_http/header_fields.h"
 #include "client_http/http_sse.h"
 #include "client_http/transfers.h"
 #include "client_http/url_guard.h"
@@ -154,10 +155,12 @@ SessionRules session_rules(const HttpTransportSettings& settings) {
 class StreamableTransport final : public Transport {
 public:
     StreamableTransport(HttpEndpoint endpoint, UrlGuard guard, SessionRules rules, TransferLimits limits,
-                        std::shared_ptr<CurlGlobal> global, std::unique_ptr<AuthorizationGate> gate)
+                        std::shared_ptr<CurlGlobal> global, ApplicationFields fields,
+                        std::unique_ptr<AuthorizationGate> gate)
         : max_message_bytes_(limits.max_message_bytes),
           endpoint_(std::move(endpoint)),
           rules_(std::move(rules)),
+          fields_(std::move(fields)),
           global_(std::move(global)),
           delivery_(std::make_shared<Delivery>()),
           loop_(std::make_unique<TransferLoop>(std::move(limits), std::move(guard),
@@ -295,22 +298,6 @@ private:
         return rules_.handshake_methods.count(found->second.get_ref<const std::string&>()) > 0;
     }
 
-    // The header lines of a request: the transport's own fields, the engine's, the session's and the authorizer's.
-    // Why one cannot be sent, otherwise.
-    struct Lines {
-        std::vector<std::string> lines;
-        std::optional<std::string> problem;
-
-        void add(std::string_view name, std::string_view value) {
-            auto line = header_line(name, value);
-            if (!line) {
-                if (!problem) problem = "the header field " + std::string(name) + " cannot be sent as it is";
-                return;
-            }
-            lines.push_back(std::move(*line));
-        }
-    };
-
     // The engine's fields of a message. `Authorization` is the authorizer's alone and never taken from them.
     static void add_engine_fields(Lines& lines, const std::vector<HttpHeader>& fields) {
         for (const HttpHeader& field : fields) {
@@ -384,6 +371,7 @@ private:
             lines.add(session_name(), *session_id_);
             state.session = session_id_;
         }
+        fields_.add_to(lines, HttpRequestKind::message);
         request.header_lines = std::move(lines.lines);
         request.body = std::move(outgoing.line);
         std::optional<std::string> problem = lines.problem;
@@ -486,7 +474,8 @@ private:
     }
 
     // The request that ends the session: DELETE with the session id and the revision's header, bounded as a whole.
-    TransferRequest end_session_request() {
+    // Nothing when the application's fields cannot be sent with it: it is not sent.
+    std::optional<TransferRequest> end_session_request() {
         TransferRequest request;
         request.unit = end_session_unit;
         request.url = endpoint_.url;
@@ -496,7 +485,10 @@ private:
         lines.add(session_name(), *session_id_);
         const auto& http = *session_profile_->streamable_http();
         if (http.version_header) lines.add(http.version_header->name, session_profile_->revision());
-        request.header_lines = std::move(lines.lines);  // a field that cannot be sent is left out
+        const bool own_fields_sent = !lines.problem;
+        fields_.add_to(lines, HttpRequestKind::end_session);
+        if (own_fields_sent && lines.problem) return std::nullopt;
+        request.header_lines = std::move(lines.lines);  // a field of the transport's that cannot be sent is left out
         std::uint64_t generation = 0;
         TransferRequest stamped = request;
         if (!stamp(stamped, info(delete_method, end_session_unit, session_profile_), generation)) return stamped;
@@ -528,6 +520,11 @@ private:
         add_engine_fields(lines, connection_.fields);
         if (session_id_) lines.add(session_name(), *session_id_);
         if (connection_.last_event_id) lines.add(field_last_event_id, *connection_.last_event_id);
+        const bool own_fields_sent = !lines.problem;
+        fields_.add_to(lines, HttpRequestKind::connection_stream);
+        // The application's fields that cannot be sent fail this GET only: it is told as any GET that fails, and the
+        // stream is opened again as after a loss (asking the callback again).
+        const bool application_problem = own_fields_sent && lines.problem.has_value();
         request.header_lines = std::move(lines.lines);
         std::optional<std::string> problem = lines.problem;
         if (!problem) {
@@ -537,6 +534,10 @@ private:
         connection_.transfer = request.unit;
         connection_.running = true;
         connection_.carried = false;
+        if (application_problem) {
+            delivery_->push(request.unit, SendFailed{*problem});
+            return;
+        }
         if (problem) {
             connection_.running = false;
             connection_.refused = true;
@@ -711,6 +712,7 @@ private:
         add_engine_fields(lines, state.resume_fields);
         if (state.session) lines.add(session_name(), *state.session);
         lines.add(field_last_event_id, *state.last_event_id);
+        fields_.add_to(lines, HttpRequestKind::stream_resumption);
         if (lines.problem) return lines.problem;
         request.header_lines = std::move(lines.lines);
         if (gate_->configured()) state.retained = request;
@@ -852,6 +854,7 @@ private:
     std::size_t max_message_bytes_;  // of a JSON body and of one event's data
     HttpEndpoint endpoint_;
     SessionRules rules_;
+    ApplicationFields fields_;
     std::shared_ptr<CurlGlobal> global_;  // released after the loop (declared before it)
     std::shared_ptr<Delivery> delivery_;
     std::unique_ptr<TransferLoop> loop_;
@@ -913,6 +916,10 @@ std::variant<HttpParts, ClientError> prepare_http(const HttpEndpoint& endpoint, 
     if (settings.max_message_bytes == 0) {
         return settings_error(ClientErrorKind::invalid_options, "max_message_bytes is zero");
     }
+    auto fields = ApplicationFields::make(endpoint, settings.profiles);
+    if (auto* problem = std::get_if<std::string>(&fields)) {
+        return settings_error(ClientErrorKind::invalid_options, std::move(*problem));
+    }
     auto global = std::make_shared<CurlGlobal>();
     if (!global->ok()) {
         return settings_error(ClientErrorKind::transport, "the HTTP library could not be initialized");
@@ -928,7 +935,8 @@ std::variant<HttpParts, ClientError> prepare_http(const HttpEndpoint& endpoint, 
     limits.max_redirects = endpoint.max_redirects;
     limits.proxy = endpoint.proxy;
     limits.ca_file = endpoint.ca_file;
-    return HttpParts{std::get<UrlGuard>(std::move(guard)), std::move(limits), std::move(global)};
+    return HttpParts{std::get<UrlGuard>(std::move(guard)), std::move(limits), std::move(global),
+                     std::get<ApplicationFields>(std::move(fields))};
 }
 
 Result<std::unique_ptr<Transport>> make_http_transport(HttpEndpoint endpoint, HttpTransportSettings settings) {
@@ -940,7 +948,7 @@ Result<std::unique_ptr<Transport>> make_http_transport(HttpEndpoint endpoint, Ht
     if (auto* error = std::get_if<ClientError>(&gate)) return std::move(*error);
     std::unique_ptr<Transport> transport = std::make_unique<StreamableTransport>(
         std::move(endpoint), std::move(parts.guard), std::move(rules), std::move(parts.limits), std::move(parts.global),
-        std::get<std::unique_ptr<AuthorizationGate>>(std::move(gate)));
+        std::move(parts.fields), std::get<std::unique_ptr<AuthorizationGate>>(std::move(gate)));
     return transport;
 }
 

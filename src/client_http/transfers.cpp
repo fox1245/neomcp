@@ -42,12 +42,6 @@ constexpr std::string_view event_stream_subtype = "event-stream";
 
 bool is_success(int status) { return status >= status_success_first && status <= status_success_last; }
 
-bool is_token_char(char c) {
-    if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return true;
-    constexpr std::string_view others = "!#$%&'*+-.^_`|~";
-    return others.find(c) != std::string_view::npos;
-}
-
 bool is_whitespace(char c) { return c == ' ' || c == '\t'; }
 
 std::string_view trim(std::string_view text) {
@@ -103,6 +97,12 @@ std::optional<std::string> resolver_refusal(bool allow_blocking) {
 }
 
 // ---- header lines
+
+bool is_token_char(char c) {
+    if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return true;
+    constexpr std::string_view others = "!#$%&'*+-.^_`|~";
+    return others.find(c) != std::string_view::npos;
+}
 
 std::optional<std::string> header_line(std::string_view name, std::string_view value) {
     if (name.empty()) return std::nullopt;
