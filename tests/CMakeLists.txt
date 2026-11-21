@@ -394,6 +394,12 @@ target_link_libraries(neomcp_conformance_fixture_test PRIVATE neomcp::http neomc
 neomcp_configure_target(neomcp_conformance_fixture_test)
 gtest_discover_tests(neomcp_conformance_fixture_test DISCOVERY_TIMEOUT 120)
 
+# The flows of the runner's scenarios of the tasks extension, sent to the fixture's registrations with tasks on.
+add_executable(neomcp_conformance_fixture_tasks_test conformance/fixture_tasks_test.cpp)
+target_link_libraries(neomcp_conformance_fixture_tasks_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_conformance_fixture_tasks_test)
+gtest_discover_tests(neomcp_conformance_fixture_tasks_test DISCOVERY_TIMEOUT 120)
+
 # ---- Test suites that live in a folder of their own ------------------------------------------------------------------
 
 # A folder tests/<name>/ with its own CMakeLists.txt is a suite. It is added when a file tests/suites/<name>.suite
