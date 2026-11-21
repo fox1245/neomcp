@@ -14,6 +14,8 @@ add_executable(neomcp_client_http_test
     auth_seam_test.cpp
     bounds_test.cpp
     client_http_test.cpp
+    header_fields_requests_test.cpp
+    header_fields_test.cpp
     http_sse_test.cpp
     oauth_authorizer_host_test.cpp
     oauth_authorizer_prompt_test.cpp
