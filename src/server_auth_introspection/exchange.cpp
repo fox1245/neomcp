@@ -38,7 +38,7 @@ enum class Abort { none, body_bound, header_bound };
 
 }  // namespace
 
-std::optional<std::string> resolver_problem(bool allow_blocking) {
+std::optional<std::string> exchange_resolver_problem(bool allow_blocking) {
     const curl_version_info_data* info = curl_version_info(CURLVERSION_NOW);
     const bool asynchronous = info != nullptr && (info->features & CURL_VERSION_ASYNCHDNS) != 0;
     if (asynchronous || allow_blocking) return std::nullopt;

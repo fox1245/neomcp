@@ -144,7 +144,7 @@ std::string check_options(const IntrospectionOptions& options) {
     if (bounds.max_response_header_bytes < 1) return "max_response_header_bytes must be at least 1";
     if (bounds.max_pending < 1) return "max_pending must be at least 1";
     if (bounds.default_lifetime <= std::chrono::seconds::zero()) return "default_lifetime must be positive";
-    if (const auto problem = detail::resolver_problem(options.allow_blocking_resolver)) return *problem;
+    if (const auto problem = detail::exchange_resolver_problem(options.allow_blocking_resolver)) return *problem;
     return {};
 }
 

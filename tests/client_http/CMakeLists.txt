@@ -89,18 +89,13 @@ if(TARGET neomcp::server_auth_jwt)
     neomcp_configure_target(neomcp_server_end_to_end_jwt_test)
     gtest_discover_tests(neomcp_server_end_to_end_jwt_test DISCOVERY_TIMEOUT 120)
 
-    # A program that links both validators. Today it does not link: neomcp::server_auth_introspection
-    # (src/server_auth_introspection/exchange.cpp) and neomcp::server_auth_jwt (src/server_auth_jwt/fetch.cpp) each
-    # define neomcp::http::detail::resolver_problem(bool), a function with external linkage, so the linker reports a
-    # multiple definition. The test is disabled until one of them is changed; enable it by removing the property.
-    add_executable(neomcp_server_end_to_end_both_validators EXCLUDE_FROM_ALL end_to_end_server_both_validators.cpp)
+    # A program that links both validators, built with the tests: two targets defining one name with external
+    # linkage would fail the build here.
+    add_executable(neomcp_server_end_to_end_both_validators end_to_end_server_both_validators.cpp)
     target_link_libraries(neomcp_server_end_to_end_both_validators PRIVATE neomcp::server_auth_introspection
         neomcp::server_auth_jwt Threads::Threads)
     neomcp_configure_target(neomcp_server_end_to_end_both_validators)
-    add_test(NAME ServerEndToEndBothValidatorsLink
-             COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --config $<CONFIG>
-                     --target neomcp_server_end_to_end_both_validators)
-    set_tests_properties(ServerEndToEndBothValidatorsLink PROPERTIES DISABLED TRUE)
+    add_test(NAME ServerEndToEndBothValidatorsLink COMMAND neomcp_server_end_to_end_both_validators)
 endif()
 
 # The client the official conformance runner tests (the CI job `conformance-client`). It is neither installed nor an

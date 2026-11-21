@@ -22,7 +22,7 @@ std::string fetch_url_problem(std::string_view url, std::string_view what);
 std::optional<std::string> metadata_url_of(std::string_view issuer);
 
 // Why the HTTP library cannot serve (its resolver blocks and the application did not accept that); empty when it can.
-std::optional<std::string> resolver_problem(bool allow_blocking);
+std::optional<std::string> key_set_resolver_problem(bool allow_blocking);
 
 struct FetchRequest {
     std::string url;

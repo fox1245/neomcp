@@ -68,7 +68,7 @@ std::string check_options(const JwtOptions& options) {
     if (bounds.connect_timeout > bounds.request_timeout) return "connect_timeout must not be more than request_timeout";
     if (bounds.max_response_header_bytes < 1) return "max_response_header_bytes must be at least 1";
     if (bounds.max_pending < 1) return "max_pending must be at least 1";
-    if (const auto problem = detail::resolver_problem(options.allow_blocking_resolver)) return *problem;
+    if (const auto problem = detail::key_set_resolver_problem(options.allow_blocking_resolver)) return *problem;
     return {};
 }
 

@@ -49,7 +49,7 @@ struct ExchangeResult {
 using ExchangeDone = std::function<void(ExchangeResult)>;
 
 // Why the HTTP library cannot serve (its resolver blocks and the application did not accept that); empty when it can.
-std::optional<std::string> resolver_problem(bool allow_blocking);
+std::optional<std::string> exchange_resolver_problem(bool allow_blocking);
 
 class ExchangeLoop {
 public:

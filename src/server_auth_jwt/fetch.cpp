@@ -103,7 +103,7 @@ std::optional<std::string> metadata_url_of(std::string_view issuer) {
     return url_part(url->get(), CURLUPART_URL);
 }
 
-std::optional<std::string> resolver_problem(bool allow_blocking) {
+std::optional<std::string> key_set_resolver_problem(bool allow_blocking) {
     const curl_version_info_data* info = curl_version_info(CURLVERSION_NOW);
     const bool asynchronous = info != nullptr && (info->features & CURL_VERSION_ASYNCHDNS) != 0;
     if (asynchronous || allow_blocking) return std::nullopt;
