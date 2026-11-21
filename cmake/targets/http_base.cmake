@@ -17,6 +17,7 @@ add_library(neomcp_http_base
     src/http_base/media_type.cpp
     src/http_base/authority.cpp
     src/http_base/challenge.cpp
+    src/http_base/bearer.cpp
     src/http_base/form.cpp)
 add_library(neomcp::http_base ALIAS neomcp_http_base)
 target_include_directories(neomcp_http_base
