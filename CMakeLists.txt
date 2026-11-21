@@ -251,6 +251,7 @@ add_library(neomcp_http
     src/http/timer.cpp
     src/http/endpoint.cpp
     src/http/resource_server.cpp
+    src/http/fixed_tokens.cpp
     src/http/http_server.cpp)
 add_library(neomcp::http ALIAS neomcp_http)
 target_include_directories(neomcp_http

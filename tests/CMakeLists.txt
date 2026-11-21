@@ -389,6 +389,13 @@ foreach(scenario_name IN ITEMS token scope session bounds)
     gtest_discover_tests(neomcp_http_resource_server_scenario_${scenario_name}_test DISCOVERY_TIMEOUT 120)
 endforeach()
 
+# The table of fixed tokens on its own; it reaches the internal scan of its digests.
+add_executable(neomcp_http_fixed_tokens_table_test http_fixed_tokens_table_test.cpp)
+target_link_libraries(neomcp_http_fixed_tokens_table_test PRIVATE neomcp::http GTest::gtest_main)
+target_include_directories(neomcp_http_fixed_tokens_table_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+neomcp_configure_target(neomcp_http_fixed_tokens_table_test)
+gtest_discover_tests(neomcp_http_fixed_tokens_table_test DISCOVERY_TIMEOUT 120)
+
 # A tool call whose argument a schema `pattern` checks, next to another client's request, on a listener with one worker.
 add_executable(neomcp_http_pattern_check_test http_pattern_check_test.cpp)
 target_link_libraries(neomcp_http_pattern_check_test PRIVATE neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)
