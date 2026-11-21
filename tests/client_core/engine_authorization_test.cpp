@@ -31,7 +31,7 @@ constexpr std::string_view modern = "2026-07-28";
 
 CallFailure failed(AuthorizationProblem problem) {
     return CallFailure{CallFailureKind::authorization_failed, "the sign-in did not complete",
-                       AuthorizationFailure{problem, "https://issuer.test", ""}};
+                       AuthorizationFailure{problem, "https://issuer.test", "", std::nullopt}};
 }
 
 std::unique_ptr<Rig> opened() {

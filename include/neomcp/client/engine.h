@@ -161,17 +161,21 @@ enum class AuthorizationProblem {
     attempts_exceeded,         // the request was refused more often than the bounds allow
     document_too_large,        // a document or an answer exceeded its bound
     timed_out,                 // an exchange with an authorization server or the whole sign-in took too long
+    random_source_failed,      // the operating system's random source failed, so no sign-in could be started
     no_answer                  // the authorizer dropped the request without answering it
 };
 
 std::string_view to_string(AuthorizationProblem problem) noexcept;
 
 // What an authorizer met, without any secret: never a token, a code, a verifier, a state or a client secret, and
-// never a text the server or the authorization server sent.
+// never a text the server or the authorization server sent but the error code below.
 struct AuthorizationFailure {
     AuthorizationProblem problem = AuthorizationProblem::forbidden;
     std::string issuer;  // the authorization server it concerns, when one is known
     std::string url;     // the URL involved, without its query, when one
+    // The error code the authorization server answered with (such as invalid_grant), when it sent one made only of the
+    // characters such codes may hold; never its description or error URI.
+    std::optional<std::string> error_code;
 };
 
 // Why a call ended without an answer from the server, or was refused before it went out.

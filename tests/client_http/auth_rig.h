@@ -41,6 +41,10 @@ public:
         ++detaches_;
         changed_.notify_all();
     }
+    void accepted(const neomcp::HttpRequestInfo& request) override {
+        std::lock_guard lock(mutex_);
+        accepted_.push_back(request);
+    }
     neomcp::Credential authorization(const neomcp::HttpRequestInfo& request) override {
         std::lock_guard lock(mutex_);
         asked_.push_back(request);
@@ -86,6 +90,10 @@ public:
         std::lock_guard lock(mutex_);
         return told_;
     }
+    std::vector<neomcp::HttpRequestInfo> accepted_requests() const {
+        std::lock_guard lock(mutex_);
+        return accepted_;
+    }
     std::size_t asked() const {
         std::lock_guard lock(mutex_);
         return asked_.size();
@@ -119,6 +127,7 @@ private:
     int attaches_ = 0;
     int detaches_ = 0;
     std::vector<neomcp::HttpRequestInfo> asked_;
+    std::vector<neomcp::HttpRequestInfo> accepted_;
     std::vector<Told> told_;
     std::vector<neomcp::ChallengeReply> replies_;
 };
@@ -141,7 +150,8 @@ inline neomcp::ClientError failed_with(neomcp::AuthorizationProblem problem) {
     neomcp::ClientError error;
     error.kind = neomcp::ClientErrorKind::authorization_failed;
     error.message = "the sign-in did not complete";
-    error.authorization = neomcp::AuthorizationFailure{problem, "https://issuer.test", "https://issuer.test/token"};
+    error.authorization =
+        neomcp::AuthorizationFailure{problem, "https://issuer.test", "https://issuer.test/token", std::nullopt};
     return error;
 }
 

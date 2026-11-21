@@ -212,6 +212,11 @@ public:
     virtual void challenge(const HttpRequestInfo& request, int status, std::span<const std::string> challenges,
                            std::uint64_t generation, ChallengeReply reply) = 0;
 
+    // A request the server had refused for want of authorization, and that went out again, was answered otherwise
+    // than with such a refusal: the credentials it carried were good for it. `request` describes it as its last
+    // refusal did.
+    virtual void accepted(const HttpRequestInfo& /*request*/) {}
+
 private:
     friend class detail::http_client::AuthorizerClaim;
     std::atomic<bool> claimed_{false};  // a transport holds it

@@ -143,6 +143,31 @@ TEST(ClientHttpAuth, AHeldRequestsClocksWaitForTheSignIn) {
     EXPECT_TRUE(client->close());
 }
 
+// A request refused, held and sent again is accepted: the authorizer is told so once, of that request; a request that
+// was never refused is not reported.
+TEST(ClientHttpAuth, TheAuthorizerHearsOfARefusedRequestAccepted) {
+    Peer peer(first);
+    auto authorizer = std::make_shared<ScriptedAuthorizer>(first, 0);
+    auto client = neomcp::Client::open(every_revision(), authorized(peer.url(), authorizer));
+    ASSERT_TRUE(client) << client.error().message;
+    EXPECT_TRUE(authorizer->accepted_requests().empty());
+    peer.refuse_next(1);
+    auto listing = std::async(std::launch::async, [&] { return client->request("tools/list"); });
+    const auth_rig::Finally release_listing{[&] { authorizer->fail_all(); }};
+    ASSERT_TRUE(authorizer->wait_told(1));
+    authorizer->retry(0);
+    const auto listed = listing.get();
+    ASSERT_TRUE(listed) << listed.error().message;
+    const auto accepted = authorizer->accepted_requests();
+    ASSERT_EQ(accepted.size(), 1u);
+    EXPECT_EQ(accepted.front().unit, authorizer->told().front().request.unit);
+    EXPECT_EQ(accepted.front().method, "POST");
+    const auto again = client->request("tools/list");
+    ASSERT_TRUE(again) << again.error().message;
+    EXPECT_EQ(authorizer->accepted_requests().size(), 1u);
+    EXPECT_TRUE(client->close());
+}
+
 // ---- StaticBearer
 
 TEST(ClientHttpAuth, StaticBearerSendsItsTokenAndFailsARefusal) {

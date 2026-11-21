@@ -126,6 +126,7 @@ std::string_view to_string(AuthorizationProblem problem) noexcept {
         case AuthorizationProblem::attempts_exceeded: return "attempts_exceeded";
         case AuthorizationProblem::document_too_large: return "document_too_large";
         case AuthorizationProblem::timed_out: return "timed_out";
+        case AuthorizationProblem::random_source_failed: return "random_source_failed";
         case AuthorizationProblem::no_answer: return "no_answer";
     }
     return "unknown";

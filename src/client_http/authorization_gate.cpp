@@ -29,7 +29,7 @@ CallFailure authorization_failure(AuthorizationProblem problem, std::string mess
     CallFailure failure;
     failure.kind = CallFailureKind::authorization_failed;
     failure.message = std::move(message);
-    failure.authorization = AuthorizationFailure{problem, std::string(), std::string()};
+    failure.authorization = AuthorizationFailure{problem, std::string(), std::string(), std::nullopt};
     return failure;
 }
 
@@ -96,6 +96,12 @@ struct AuthorizationGate::State final : AuthorizationHost, std::enable_shared_fr
     // One sign-in under way: the generation of the credentials whose refusal opened it.
     struct Flow {
         std::uint64_t generation = 0;
+    };
+
+    // The refusals of one unit's request in a row, and the request as the authorizer was told of it.
+    struct Refusals {
+        std::size_t count = 0;
+        HttpRequestInfo request;
     };
 
     // A request that waits for a flow's answer.
@@ -262,7 +268,9 @@ struct AuthorizationGate::State final : AuthorizationHost, std::enable_shared_fr
                        status);
             return;
         }
-        std::size_t& refusals = counts[unit];
+        Refusals& counted = counts[unit];
+        counted.request = request;
+        std::size_t& refusals = counted.count;
         if (refusals >= max_holds) {
             hooks.deny(unit,
                        authorization_failure(AuthorizationProblem::attempts_exceeded,
@@ -374,7 +382,7 @@ struct AuthorizationGate::State final : AuthorizationHost, std::enable_shared_fr
     std::map<std::uint64_t, Flow> flows;          // open flows by id
     std::map<std::uint64_t, std::uint64_t> open;  // the open flow of each generation
     std::map<UnitId, Hold> holds;
-    std::map<UnitId, std::size_t> counts;  // refusals of each unit's request so far
+    std::map<UnitId, Refusals> counts;  // refusals of each unit's request so far
     std::map<UnitId, std::shared_ptr<Fetch>> fetches;
     UnitId next_fetch = first_fetch_unit;
 };
@@ -440,7 +448,19 @@ void AuthorizationGate::refused(UnitId unit, const HttpRequestInfo& request, std
 
 void AuthorizationGate::forget(UnitId unit) { state_->forget(unit); }
 
-void AuthorizationGate::accepted(UnitId unit) { state_->counts.erase(unit); }
+void AuthorizationGate::accepted(UnitId unit) {
+    State& state = *state_;
+    const auto found = state.counts.find(unit);
+    if (found == state.counts.end()) return;
+    const HttpRequestInfo request = std::move(found->second.request);
+    state.counts.erase(found);
+    if (!state.attached) return;
+    try {
+        state.authorizer->accepted(request);
+    } catch (...) {
+        // What the authorizer makes of a success is its own; the answer goes on to the client either way.
+    }
+}
 
 bool AuthorizationGate::owns(UnitId unit) const noexcept {
     return unit >= first_fetch_unit && unit < state_->next_fetch;
