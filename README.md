@@ -132,11 +132,12 @@ target_link_libraries(app PRIVATE neomcp::server neomcp::stdio)
 ```
 
 Each component is the target of the same name: `server`, `stdio`, `http`, `http_base`, `client`,
-`client_in_process`, `client_stdio`, `client_http`, `client_auth`, `server_auth_introspection`, `server_auth_jwt`,
-`core`, `profile`, `schema`, `describe`, `crypto`. A component the build left out (`client_http` without
-`NEOMCP_HTTP_CLIENT`, `server_auth_jwt` without `NEOMCP_JWT`) is reported as not found. The packages a component needs
-are looked for only when it is asked for: `client_http` needs libcurl and `server_auth_jwt` libcrypto and libcurl,
-found as the build found them, and every component needs the thread library. Without `COMPONENTS` every installed component is asked for.
+`client_in_process`, `client_stdio`, `client_http`, `client_auth`, `client_oauth_loopback`,
+`server_auth_introspection`, `server_auth_jwt`, `core`, `profile`, `schema`, `describe`, `crypto`. A component the
+build left out (`client_http` without `NEOMCP_HTTP_CLIENT`, `server_auth_jwt` without `NEOMCP_JWT`) is reported as not
+found. The packages a component needs are looked for only when it is asked for: `client_http` needs libcurl and
+`server_auth_jwt` libcrypto and libcurl, found as the build found them, and every component needs the thread library.
+Without `COMPONENTS` every installed component is asked for.
 
 The headers of standalone Asio and of neojson, which neomcp's own headers include, are installed with it in
 `include/neomcp/deps`, and neojson's library in `lib/neomcp`; in a static build, the libraries of RE2 and Abseil that
@@ -318,6 +319,27 @@ that keeps them; the library never writes them anywhere itself. Credentials regi
 `client_id_metadata_url`; otherwise the client registers itself where the authorization server offers it. A sign-in
 the person does not finish ends after `OAuthOptions::bounds.authorization_timeout`, and the calls it held fail with
 `ClientErrorKind::authorization_failed`.
+
+An application that opens the person's browser but has no listener for the redirect can use the optional
+`neomcp::client_oauth_loopback` component (`neomcp/client/oauth_loopback.h`, built unless
+`NEOMCP_CLIENT_OAUTH_LOOPBACK` is `OFF`). A `neomcp::LoopbackRedirect` supplies the redirect URI and the prompt
+handler:
+
+```cpp
+neomcp::LoopbackRedirectOptions loopback;
+loopback.open_browser = [](const std::string& url) { open_in_browser(url); };  // the application's own
+auto redirect = neomcp::LoopbackRedirect::create(std::move(loopback));
+
+neomcp::OAuthOptions oauth;
+oauth.redirect_uri = (*redirect)->redirect_uri();  // http://127.0.0.1:<port>/callback
+oauth.prompt = (*redirect)->plain_prompt();        // or coroutine_prompt()
+```
+
+While a sign-in waits, the handler listens on `127.0.0.1` only, with the library's own HTTP listener, for one `GET` to
+the redirect path. It shows the browser a short fixed page, closes the port, and gives the callback URL to the
+authorizer, which makes every check of it. Any other path or method, and a request over the callback bound, is refused
+and does not end the wait. The prompt's timeout, or a client that closes, ends it without an answer and closes the port
+as well. The library never starts a browser itself.
 
 ## License
 
