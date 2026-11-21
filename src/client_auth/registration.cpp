@@ -128,6 +128,7 @@ std::string registration_request_body(const RegistrationConfig& config) {
 
 std::variant<StoredClient, FlowFailure> read_registration_answer(const FetchResult& result, std::string_view issuer,
                                                                  std::string_view registration_endpoint,
+                                                                 std::string_view redirect_uri,
                                                                  const OAuthBounds& bounds) {
     switch (result.outcome) {
         case FetchOutcome::response: break;
@@ -155,6 +156,12 @@ std::variant<StoredClient, FlowFailure> read_registration_answer(const FetchResu
     const std::string* client_id = string_member(*document, member_client_id);
     if (client_id == nullptr || client_id->empty()) {
         return rejected(AuthorizationProblem::registration_rejected, issuer, registration_endpoint);
+    }
+    if (member(*document, member_redirect_uris) != nullptr) {
+        const auto registered = string_array_member(*document, member_redirect_uris);
+        if (!registered || std::find(registered->begin(), registered->end(), redirect_uri) == registered->end()) {
+            return rejected(AuthorizationProblem::registration_rejected, issuer, registration_endpoint);
+        }
     }
     StoredClient client;
     client.client_id = *client_id;

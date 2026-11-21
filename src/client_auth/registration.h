@@ -58,9 +58,13 @@ std::string registration_request_body(const RegistrationConfig& config);
 
 ApplicationType application_type_for(const RegistrationConfig& config);
 
-// The registration the server answered, or why it cannot be used.
+// The registration the server answered, or why it cannot be used. When the answer lists the redirect URIs it
+// registered (RFC 7591, section 3.2.1: the server may change what the client asked for), `redirect_uri`, the one this
+// client sends, must be among them exactly; a list that is not an array of strings, or that leaves it out, refuses
+// the registration.
 std::variant<StoredClient, FlowFailure> read_registration_answer(const FetchResult& result, std::string_view issuer,
                                                                  std::string_view registration_endpoint,
+                                                                 std::string_view redirect_uri,
                                                                  const OAuthBounds& bounds);
 
 // A client ID metadata document URL the application gives: https, a path other than "/", no "." or ".." segment, no

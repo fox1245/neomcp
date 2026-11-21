@@ -370,7 +370,8 @@ FlowStep OAuthFlow::register_client() {
 }
 
 FlowStep OAuthFlow::on_registration(const FetchResult& result) {
-    auto outcome = read_registration_answer(result, server_.issuer, *server_.registration_endpoint, config_.bounds);
+    auto outcome = read_registration_answer(result, server_.issuer, *server_.registration_endpoint,
+                                            config_.registration.redirect_uri, config_.bounds);
     if (auto* failure = std::get_if<FlowFailure>(&outcome)) return fail(std::move(*failure));
     StoredClient registered = std::get<StoredClient>(std::move(outcome));
     client_ = credentials_of(registered, server_, RegistrationSource::dynamic_new);

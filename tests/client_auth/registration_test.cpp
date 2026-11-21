@@ -8,6 +8,8 @@ namespace {
 
 using namespace oauth_test;
 
+constexpr std::string_view sent_redirect_uri = "http://127.0.0.1:3000/callback";
+
 AuthorizationServer server_with(std::optional<std::vector<std::string>> methods, bool cimd = false,
                                 bool registration = true) {
     AuthorizationServer server;
@@ -144,12 +146,12 @@ TEST(OAuthFlowRegistration, TheRegistrationAnswer) {
     auto ok = read_registration_answer(
         json_answer(json{{"client_id", "id-1"}, {"client_secret", "sec"},
                          {"token_endpoint_auth_method", "client_secret_basic"}}, 201),
-        "https://as.example", "https://as.example/register", bounds);
+        "https://as.example", "https://as.example/register", sent_redirect_uri, bounds);
     ASSERT_TRUE(std::holds_alternative<StoredClient>(ok));
     EXPECT_EQ(std::get<StoredClient>(ok),
               (StoredClient{"id-1", std::string("sec"), TokenEndpointAuth::client_secret_basic}));
     auto plain = read_registration_answer(json_answer(json{{"client_id", "id-2"}, {"token_endpoint_auth_method", "x"}}),
-                                          "https://as.example", "https://as.example/register", bounds);
+                                          "https://as.example", "https://as.example/register", sent_redirect_uri, bounds);
     ASSERT_TRUE(std::holds_alternative<StoredClient>(plain));
     EXPECT_EQ(std::get<StoredClient>(plain), (StoredClient{"id-2", std::nullopt, std::nullopt}));
 
@@ -170,13 +172,32 @@ TEST(OAuthFlowRegistration, TheRegistrationAnswer) {
         {no_answer(FetchOutcome::too_large), AuthorizationProblem::document_too_large},
     };
     for (const Case& one : refused) {
-        auto result = read_registration_answer(one.result, "https://as.example", "https://as.example/register", bounds);
+        auto result = read_registration_answer(one.result, "https://as.example", "https://as.example/register", sent_redirect_uri, bounds);
         ASSERT_TRUE(std::holds_alternative<FlowFailure>(result)) << one.result.body;
         EXPECT_EQ(std::get<FlowFailure>(result).problem, one.problem);
     }
     auto coded =
-        read_registration_answer(refused[0].result, "https://as.example", "https://as.example/register", bounds);
+        read_registration_answer(refused[0].result, "https://as.example", "https://as.example/register", sent_redirect_uri, bounds);
     EXPECT_EQ(std::get<FlowFailure>(coded).error_code, "invalid_redirect_uri");
+}
+
+TEST(OAuthFlowRegistration, TheRegisteredRedirectUrisMustHoldTheOneTheClientSends) {
+    const OAuthBounds bounds;
+    const auto read = [&](json document) {
+        return read_registration_answer(json_answer(std::move(document), 201), "https://as.example",
+                                        "https://as.example/register", sent_redirect_uri, bounds);
+    };
+    const std::string sent(sent_redirect_uri);
+    EXPECT_TRUE(std::holds_alternative<StoredClient>(read(json{{"client_id", "a"}})));
+    EXPECT_TRUE(std::holds_alternative<StoredClient>(read(json{{"client_id", "a"}, {"redirect_uris", json::array({sent})}})));
+    EXPECT_TRUE(std::holds_alternative<StoredClient>(
+        read(json{{"client_id", "a"}, {"redirect_uris", json::array({"https://other.example/cb", sent})}})));
+    for (json registered : {json::array({"https://elsewhere.example/cb"}), json::array(), json::array({sent + "/"}),
+                            json::array({1}), json("http://127.0.0.1:3000/callback"), json(nullptr)}) {
+        const auto result = read(json{{"client_id", "a"}, {"redirect_uris", registered}});
+        ASSERT_TRUE(std::holds_alternative<FlowFailure>(result)) << registered.dump();
+        EXPECT_EQ(std::get<FlowFailure>(result).problem, AuthorizationProblem::registration_rejected);
+    }
 }
 
 TEST(OAuthFlowRegistration, AnErrorCodeOutsideItsCharacterSetIsNotKept) {
@@ -184,7 +205,7 @@ TEST(OAuthFlowRegistration, AnErrorCodeOutsideItsCharacterSetIsNotKept) {
     for (const std::string& code : {std::string("bad\r\ncode"), std::string("a\"b"), std::string("a\\b"),
                                     std::string(""), std::string("\xc3\xa9")}) {
         auto result = read_registration_answer(json_answer(json{{"error", code}}, 400), "https://as.example",
-                                               "https://as.example/register", bounds);
+                                               "https://as.example/register", sent_redirect_uri, bounds);
         ASSERT_TRUE(std::holds_alternative<FlowFailure>(result));
         EXPECT_FALSE(std::get<FlowFailure>(result).error_code);
     }

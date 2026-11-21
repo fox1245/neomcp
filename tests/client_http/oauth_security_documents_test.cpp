@@ -330,10 +330,6 @@ TEST(OAuthSecurity, ARegistrationThatChangesTheRedirectUriIsRefused) {
             201, json{{"client_id", "changed-client"}, {"redirect_uris", json::array({"https://elsewhere.example/cb"})}});
     });
     auto client = world.open(world.authorizer());
-    if (client && world.person.prompts().size() == 1u) {
-        GTEST_SKIP() << "defect: a registration answer whose redirect_uris lacks the client's redirect URI is "
-                        "accepted, and the person is prompted";
-    }
     expect_outcome(world, client, AuthorizationProblem::registration_rejected);
     EXPECT_EQ(world.person.prompts().size(), 0u);
 }
