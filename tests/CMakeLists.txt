@@ -399,6 +399,14 @@ target_include_directories(neomcp_http_fixed_tokens_table_test PRIVATE "${CMAKE_
 neomcp_configure_target(neomcp_http_fixed_tokens_table_test)
 gtest_discover_tests(neomcp_http_fixed_tokens_table_test DISCOVERY_TIMEOUT 120)
 
+# The stream of a session that opens after a replacement's sweep, driven through the endpoint's handler and its
+# internal probe.
+add_executable(neomcp_http_fixed_tokens_probe_test http_fixed_tokens_probe_test.cpp)
+target_link_libraries(neomcp_http_fixed_tokens_probe_test PRIVATE neomcp::http GTest::gtest_main Threads::Threads)
+target_include_directories(neomcp_http_fixed_tokens_probe_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+neomcp_configure_target(neomcp_http_fixed_tokens_probe_test)
+gtest_discover_tests(neomcp_http_fixed_tokens_probe_test DISCOVERY_TIMEOUT 120)
+
 foreach(fixed_tokens_name IN ITEMS scenario replace stream)
     add_executable(neomcp_http_fixed_tokens_${fixed_tokens_name}_test http_fixed_tokens_${fixed_tokens_name}_test.cpp)
     target_link_libraries(neomcp_http_fixed_tokens_${fixed_tokens_name}_test

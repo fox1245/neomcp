@@ -46,6 +46,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -522,6 +523,7 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
     const std::unique_ptr<const detail::ResourceServerConfig> resource_server;  // null without authorization
     const ScopeImplications implications;                                      // the server's
     const detail::EndpointProbe::FeedObserver observe_feed;                    // tests only; usually empty
+    std::function<void()> observe_fixed_lookup;  // tests only, set before anything is served; usually empty
     std::vector<std::string> session_headers;          // the names the revisions give the session header
     std::vector<std::string> version_headers;          // the names they give the version header
     bool offers_get = false;
@@ -1578,6 +1580,7 @@ void Endpoint::Impl::authorize_fixed(Request request, Responder responder, std::
             verdict = Verdict{Verdict::Kind::valid, std::move(granted)};
         }
     }
+    if (observe_fixed_lookup) observe_fixed_lookup();
     deliver(Waiter{std::move(request), std::move(responder)}, verdict);
 }
 
@@ -1979,6 +1982,31 @@ Outcome<std::unique_ptr<Endpoint>> detail::EndpointProbe::create(Server& server,
     } catch (const std::system_error& error) {
         return Result::failure(std::string("cannot start the endpoint's timer thread: ") + error.what());
     }
+}
+
+void detail::EndpointProbe::observe_fixed_lookups(Endpoint& endpoint, std::function<void()> observer) {
+    endpoint.impl_->observe_fixed_lookup = std::move(observer);
+}
+
+void detail::EndpointProbe::wait_for_timer(Endpoint& endpoint) {
+    // The timer runs its jobs by time, then in the order they were scheduled: one scheduled now runs after the others.
+    // The job owns the state it signals with as much as the caller does, so the caller may return while it notifies.
+    struct Signal {
+        std::mutex mutex;
+        std::condition_variable changed;
+        bool ran = false;
+    };
+    const auto signal = std::make_shared<Signal>();
+    const auto id = endpoint.impl_->timer.schedule(Clock::now(), [signal] {
+        {
+            std::lock_guard lock(signal->mutex);
+            signal->ran = true;
+        }
+        signal->changed.notify_all();
+    });
+    if (id == 0) return;  // stopped: nothing runs any more
+    std::unique_lock lock(signal->mutex);
+    signal->changed.wait(lock, [&] { return signal->ran; });
 }
 
 Endpoint::Endpoint(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
