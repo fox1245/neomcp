@@ -34,7 +34,7 @@ namespace neomcp::detail {
 class TaskRunner;
 
 // What one entry of a task's handler ended with.
-using TaskOutcome = std::variant<ToolResult, Refusal, HostFailure, InvalidRequest, InputRequired>;
+using TaskOutcome = std::variant<ToolResult, Refusal, HostFailure, InvalidRequest, InputRequired, ApplicationFailure>;
 
 // The answers and the state the handler of a task is entered again with.
 struct TaskResume {

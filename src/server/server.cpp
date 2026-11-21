@@ -164,7 +164,7 @@ struct CallRecord;
 
 // What a call produced: any outcome a host can complete a call with.
 using JobOutcome = std::variant<ToolResult, ReadResult, PromptResult, CompletionResult, NotFound, InvalidRequest,
-                                Refusal, HostFailure, InputRequired>;
+                                Refusal, HostFailure, InputRequired, ApplicationFailure>;
 
 // The answers and the state a call of a thing that asked for input comes back with.
 struct Answers {
@@ -1380,7 +1380,8 @@ void ServerCore::settle_task(const std::shared_ptr<TaskRun>& run, JobOutcome out
         [](auto&& value) -> TaskOutcome {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, ToolResult> || std::is_same_v<T, Refusal> || std::is_same_v<T, HostFailure> ||
-                          std::is_same_v<T, InvalidRequest> || std::is_same_v<T, InputRequired>) {
+                          std::is_same_v<T, InvalidRequest> || std::is_same_v<T, InputRequired> ||
+                          std::is_same_v<T, ApplicationFailure>) {
                 return TaskOutcome(std::move(value));
             } else {
                 return TaskOutcome(HostFailure{"the tool answered with a result of another kind"});
@@ -1653,7 +1654,7 @@ void ServerCore::finish(const std::shared_ptr<CallRecord>& record, JobOutcome ou
         [&](auto&& value) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, ToolResult> || std::is_same_v<T, Refusal> || std::is_same_v<T, HostFailure> ||
-                          std::is_same_v<T, InputRequired>) {
+                          std::is_same_v<T, InputRequired> || std::is_same_v<T, ApplicationFailure>) {
                 (*record->done)(CallOutcome(std::move(value)));
             } else {
                 (*record->done)(FeatureOutcome(std::move(value)));
@@ -1699,6 +1700,8 @@ JobOutcome ToolEntry::failure(const CallRecord&, const std::exception_ptr& throw
         return InvalidRequest{refused.what()};
     } catch (const ToolError& error) {
         return error_result(error.what());
+    } catch (const ApplicationError& error) {
+        return ApplicationFailure{error.code(), error.what(), error.data()};
     } catch (const std::exception& error) {
         return failed(error.what());
     } catch (...) {
@@ -1754,6 +1757,8 @@ JobOutcome FeatureEntry<Out>::failure(const CallRecord& record, const std::excep
         return InvalidRequest{refused.what()};
     } catch (const ResourceNotFound&) {
         return NotFound{record.subject};
+    } catch (const ApplicationError& error) {
+        return ApplicationFailure{error.code(), error.what(), error.data()};
     } catch (const std::exception& error) {
         return HostFailure{name_label + " failed: " + error.what()};
     } catch (...) {

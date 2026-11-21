@@ -29,6 +29,33 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+// Thrown by a handler of any kind (a tool, a resource or a template, a prompt, a completer; plain or coroutine) to
+// answer its request with a JSON-RPC error of its own: the answer carries exactly this code, message and data (no
+// `data` member when it is null), on every transport and under every revision. For a call that runs as a task, the
+// task fails with them.
+//
+// The server answers it only when the code may be used by an application: a code outside the range JSON-RPC reserves
+// for itself (-32768 to -32000), or one of -32099 to -32000, which that range leaves to implementations, that the
+// revision serving the request does not name (the `errors` of its profile and of the extensions in force, and the
+// codes it forbids a sender to use). The protocol's own codes are inside the reserved range. Any other code is
+// not sent: the request is answered with an internal error whose message is fixed, and the message and the data are
+// dropped. So is an answer longer than ServerOptions::max_message_bytes (the whole JSON-RPC message); for a task, the
+// bound is the task store's (MemoryTaskStoreOptions::max_result_bytes on the error object), and the task then fails as an
+// internal error. The message and the data reach the client as they are, so they must hold nothing the client may not
+// see.
+class ApplicationError : public std::runtime_error {
+public:
+    ApplicationError(int code, std::string message, json data = nullptr)
+        : std::runtime_error(std::move(message)), code_(code), data_(std::move(data)) {}
+
+    int code() const noexcept { return code_; }
+    const json& data() const noexcept { return data_; }
+
+private:
+    int code_;
+    json data_;
+};
+
 // Thrown by a resource handler when what its URI names does not exist (for example a template matched, and nothing is
 // stored under the name it carries). The read is answered as the revision prescribes for a resource that does not
 // exist. Any other exception is answered with an internal error whose text stays on the server

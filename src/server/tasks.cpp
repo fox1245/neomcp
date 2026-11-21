@@ -4,6 +4,7 @@
 #include <iterator>
 #include <stdexcept>
 
+#include "core/application_error.h"
 #include "neomcp/jsonrpc.h"
 #include "neomcp/wire.h"
 
@@ -201,11 +202,20 @@ std::optional<TaskResume> TaskRunner::settle(const std::shared_ptr<TaskRun>& run
         failed = failure(error_code::internal_error, busy_text, json{{"reason", std::string(busy_reason)}});
     } else if (const auto* host = std::get_if<HostFailure>(&outcome)) {
         failed = host_failure(*host);
+    } else if (const auto* application = std::get_if<ApplicationFailure>(&outcome)) {
+        // The code under the revision that governs the task's call, as for a call answered at once.
+        std::string refused = refused_application_code(run->origin.profile(), application->code);
+        failed = refused.empty() ? failure(application->code, application->message, application->data)
+                                 : host_failure(HostFailure{std::move(refused)});
     } else {
         failed = failure(error_code::invalid_params,
                          std::string(invalid_params_prefix) + std::get<InvalidRequest>(outcome).message);
     }
-    const Transition ended = options_.store->transition(run->id, working_only, std::move(failed));
+    Transition ended = options_.store->transition(run->id, working_only, std::move(failed));
+    if (ended.outcome == TransitionOutcome::too_large || ended.outcome == TransitionOutcome::over_budget) {
+        // An error of the application's own that the store cannot keep: the task fails without it.
+        ended = options_.store->transition(run->id, working_only, failure(error_code::internal_error, too_large_text));
+    }
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         forget(run->id);

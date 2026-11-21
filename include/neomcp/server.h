@@ -33,7 +33,9 @@
 // error); a result that fails it is a defect of the server program and is answered with an internal error. Throwing
 // neomcp::ToolError answers the call with a tool execution error carrying its message; any other exception, a
 // failed decoding of arguments that passed the schema included, is answered with a tool execution error with a
-// fixed message (ServerOptions::expose_error_details adds the exception's text).
+// fixed message (ServerOptions::expose_error_details adds the exception's text). Throwing neomcp::ApplicationError
+// (neomcp/server/context.h) from a handler of any kind answers its request with a JSON-RPC error of the handler's own
+// code, message and data; the library keeps the codes it and the revision use for itself out of its reach.
 //
 // Resources and templates. A resource has a fixed URI, a template describes a family of them:
 //
@@ -328,7 +330,8 @@ struct ServerOptions {
     // Prompts per prompts/list page; empty: one page with every prompt. Zero is an error.
     std::optional<std::size_t> prompts_page_size{};
     // Input bounds of a session (see SessionOptions): 8 MiB per line, 128 levels of nesting, and 1024 lines waiting
-    // to be written before progress and log notifications are dropped.
+    // to be written before progress and log notifications are dropped. An error answer of a handler's own
+    // (neomcp::ApplicationError) longer than max_message_bytes is answered with an internal error instead.
     std::size_t max_message_bytes = SessionDefaults::max_message_bytes;
     std::size_t max_nesting_depth = SessionDefaults::max_nesting_depth;
     std::size_t max_queued_notifications = SessionDefaults::max_queued_notifications;
