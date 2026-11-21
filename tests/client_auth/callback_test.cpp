@@ -276,4 +276,19 @@ TEST(OAuthFlowCallback, ThePromptTellsWhatTheApplicationNeeds) {
     EXPECT_TRUE(prompt.authorization_url.starts_with("http://localhost:3002/authorize?"));
 }
 
+// An error code longer than max_error_code_bytes is not passed on; the flow still ends with the denial.
+TEST(OAuthFlowCallback, TheErrorCodeBoundAtItsEdge) {
+    OAuthBounds bounds;
+    bounds.max_error_code_bytes = 32;
+    for (const std::size_t size : {std::size_t{31}, std::size_t{32}, std::size_t{33}}) {
+        SCOPED_TRACE(size);
+        const std::string code(size, 'e');
+        auto result = check_callback(callback({{"error", code}, {"state", std::string(state)}}), pending(false), bounds);
+        ASSERT_TRUE(std::holds_alternative<FlowFailure>(result));
+        EXPECT_EQ(std::get<FlowFailure>(result).problem, AuthorizationProblem::authorization_denied);
+        EXPECT_EQ(std::get<FlowFailure>(result).error_code,
+                  size <= bounds.max_error_code_bytes ? std::optional<std::string>(code) : std::nullopt);
+    }
+}
+
 }  // namespace

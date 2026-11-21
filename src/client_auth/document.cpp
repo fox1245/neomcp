@@ -86,8 +86,8 @@ std::optional<std::vector<std::string>> string_array_member(const json& object, 
     return out;
 }
 
-bool is_error_code(std::string_view code) noexcept {
-    if (code.empty()) return false;
+bool is_error_code(std::string_view code, std::size_t max_bytes) noexcept {
+    if (code.empty() || code.size() > max_bytes) return false;
     for (const char c : code) {
         const auto value = static_cast<unsigned char>(c);
         const bool allowed = value == 0x20 || value == 0x21 || (value >= 0x23 && value <= 0x5B) ||
@@ -97,11 +97,11 @@ bool is_error_code(std::string_view code) noexcept {
     return true;
 }
 
-std::optional<std::string> error_code_of(std::string_view body, std::size_t max_depth) {
+std::optional<std::string> error_code_of(std::string_view body, std::size_t max_depth, std::size_t max_code_bytes) {
     const auto document = json_object(body, max_depth);
     if (!document) return std::nullopt;
     const std::string* code = string_member(*document, error_member);
-    if (code == nullptr || !is_error_code(*code)) return std::nullopt;
+    if (code == nullptr || !is_error_code(*code, max_code_bytes)) return std::nullopt;
     return *code;
 }
 

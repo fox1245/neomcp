@@ -145,7 +145,7 @@ std::variant<StoredClient, FlowFailure> read_registration_answer(const FetchResu
     if (result.status != status_ok && result.status != status_created) {
         FlowFailure failure = rejected(AuthorizationProblem::registration_rejected, issuer, registration_endpoint);
         if (is_client_error_status(result.status)) {
-            failure.error_code = error_code_of(result.body, bounds.max_document_depth);
+            failure.error_code = error_code_of(result.body, bounds.max_document_depth, bounds.max_error_code_bytes);
         }
         return failure;
     }

@@ -195,4 +195,18 @@ TEST(OAuthFlowTokens, RefusalsCarryTheErrorCodeOnly) {
     EXPECT_FALSE(std::get<FlowFailure>(server_error).error_code);
 }
 
+TEST(OAuthFlowTokens, TheErrorCodeBoundAtItsEdge) {
+    OAuthBounds bounds;
+    bounds.max_error_code_bytes = 32;
+    for (const std::size_t size : {std::size_t{31}, std::size_t{32}, std::size_t{33}}) {
+        SCOPED_TRACE(size);
+        const std::string code(size, 'e');
+        auto out = read_answer(json_answer(json{{"error", code}}, 400), bounds);
+        ASSERT_TRUE(std::holds_alternative<FlowFailure>(out));
+        EXPECT_EQ(std::get<FlowFailure>(out).problem, AuthorizationProblem::token_request_failed);
+        EXPECT_EQ(std::get<FlowFailure>(out).error_code,
+                  size <= bounds.max_error_code_bytes ? std::optional<std::string>(code) : std::nullopt);
+    }
+}
+
 }  // namespace

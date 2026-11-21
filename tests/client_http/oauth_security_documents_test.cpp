@@ -403,4 +403,49 @@ TEST(OAuthSecurity, APromptHandlerThatNeverReturnsEndsAtTheSignInsBound) {
     EXPECT_TRUE(world.as.requests_to("/token").empty());
 }
 
+// ---- Error codes and refresh tokens at their bounds
+
+// A code of exactly max_error_code_bytes reaches the application; one byte more does not, and the sign-in ends with the
+// problem it would have ended with.
+TEST(OAuthSecurity, AnErrorCodeAtItsBoundReachesTheApplicationAndOneByteMoreDoesNot) {
+    constexpr std::size_t bound = 40;
+    struct Source {
+        const char* name;
+        AuthorizationProblem problem;
+    };
+    for (const Source& source : {Source{"/register", AuthorizationProblem::registration_rejected},
+                                 Source{"/token", AuthorizationProblem::token_request_failed},
+                                 Source{"callback", AuthorizationProblem::authorization_denied}}) {
+        for (const std::size_t size : {bound - 1, bound, bound + 1}) {
+            SCOPED_TRACE(std::string(source.name) + " " + std::to_string(size));
+            World world;
+            const std::string code(size, 'e');
+            const std::string path = source.name;
+            if (path != "callback") {
+                world.as.override_with([path, code](const Request& request) -> std::optional<http_test::Reply> {
+                    if (request.target != path) return std::nullopt;
+                    return http_test::json_reply(400, json{{"error", code}});
+                });
+            } else {
+                world.person.answer_with([code](const neomcp::AuthorizationPromptInfo& info) {
+                    const std::string state = field_of(query_of(info.authorization_url), "state").value_or("");
+                    const std::vector<neomcp::http::FormField> fields = {{"error", code}, {"state", state}};
+                    return info.redirect_uri + "?" + neomcp::http::form_encode(fields);
+                });
+            }
+            neomcp::OAuthOptions options = world.options();
+            options.bounds.max_error_code_bytes = bound;
+            auto client = world.open(world.authorizer(std::move(options)));
+            expect_outcome(world, client, source.problem);
+            ASSERT_FALSE(client);
+            ASSERT_TRUE(client.error().authorization);
+            if (size <= bound) {
+                EXPECT_EQ(client.error().authorization->error_code, code);
+            } else {
+                EXPECT_FALSE(client.error().authorization->error_code);
+            }
+        }
+    }
+}
+
 }  // namespace

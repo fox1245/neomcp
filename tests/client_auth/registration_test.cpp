@@ -347,4 +347,19 @@ TEST(OAuthFlowRegistration, TheRegisteredSecretAndMethodAreUsed) {
     }
 }
 
+TEST(OAuthFlowRegistration, TheErrorCodeBoundAtItsEdge) {
+    OAuthBounds bounds;
+    bounds.max_error_code_bytes = 32;
+    for (const std::size_t size : {std::size_t{31}, std::size_t{32}, std::size_t{33}}) {
+        SCOPED_TRACE(size);
+        const std::string code(size, 'e');
+        auto result = read_registration_answer(json_answer(json{{"error", code}}, 400), "https://as.example",
+                                               "https://as.example/register", sent_redirect_uri, bounds);
+        ASSERT_TRUE(std::holds_alternative<FlowFailure>(result));
+        EXPECT_EQ(std::get<FlowFailure>(result).problem, AuthorizationProblem::registration_rejected);
+        EXPECT_EQ(std::get<FlowFailure>(result).error_code,
+                  size <= bounds.max_error_code_bytes ? std::optional<std::string>(code) : std::nullopt);
+    }
+}
+
 }  // namespace

@@ -276,9 +276,10 @@ std::string operation_of(const HttpRequestInfo& request) {
 bool positive(const OAuthBounds& bounds) {
     return bounds.max_metadata_bytes > 0 && bounds.max_token_response_bytes > 0 && bounds.max_token_bytes > 0 &&
            bounds.max_callback_bytes > 0 && bounds.max_challenge_params > 0 && bounds.max_authorization_servers > 0 &&
-           bounds.max_scopes > 0 && bounds.max_scope_bytes > 0 && bounds.max_document_depth > 0 &&
-           bounds.authorization_fetch_timeout.count() > 0 && bounds.prompt_timeout.count() > 0 &&
-           bounds.authorization_timeout.count() > 0 && bounds.max_token_lifetime.count() > 0;
+           bounds.max_scopes > 0 && bounds.max_scope_bytes > 0 && bounds.max_error_code_bytes > 0 &&
+           bounds.max_document_depth > 0 && bounds.authorization_fetch_timeout.count() > 0 &&
+           bounds.prompt_timeout.count() > 0 && bounds.authorization_timeout.count() > 0 &&
+           bounds.max_token_lifetime.count() > 0;
 }
 
 constexpr std::string_view bearer_prefix = StaticBearer::scheme;

@@ -222,6 +222,9 @@ TEST(OAuthAuthorizerBounds, CreateRefusesOptionsThatCannotWork) {
     neomcp::OAuthOptions zero = world.options();
     zero.bounds.authorization_timeout = std::chrono::milliseconds(0);
     EXPECT_TRUE(refused(zero));
+    neomcp::OAuthOptions no_codes = world.options();
+    no_codes.bounds.max_error_code_bytes = 0;
+    EXPECT_TRUE(refused(no_codes));
     neomcp::OAuthOptions fine = world.options();
     fine.redirect_uri = "https://app.example/callback";
     EXPECT_FALSE(refused(fine));

@@ -96,7 +96,7 @@ std::variant<std::string, FlowFailure> check_callback(std::string_view callback_
     const neomcp::http::FieldLookup error = neomcp::http::find_unique_field(fields, param_error);
     if (error.state == neomcp::http::FieldLookup::State::present) {
         FlowFailure failure = refused(AuthorizationProblem::authorization_denied, pending);
-        if (is_error_code(error.value)) failure.error_code = std::string(error.value);
+        if (is_error_code(error.value, bounds.max_error_code_bytes)) failure.error_code = std::string(error.value);
         return failure;
     }
 

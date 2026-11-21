@@ -83,6 +83,9 @@ struct OAuthDefaults {
     // Scopes in one list, and the bytes of all of them together.
     static constexpr std::size_t max_scopes = 64;
     static constexpr std::size_t max_scope_bytes = std::size_t{4} * 1024;
+    // An error code an authorization server or the callback sends and the application is told of. Codes are short
+    // words such as `invalid_grant`.
+    static constexpr std::size_t max_error_code_bytes = 128;
     // Nesting of a JSON document an authorization server or a resource sends; these documents are flat.
     static constexpr std::size_t max_document_depth = 64;
     // One request to an authorization server or for a metadata document.
@@ -109,6 +112,8 @@ struct OAuthBounds {
     std::size_t max_authorization_servers = OAuthDefaults::max_authorization_servers;
     std::size_t max_scopes = OAuthDefaults::max_scopes;
     std::size_t max_scope_bytes = OAuthDefaults::max_scope_bytes;
+    // An error code longer than this is not passed on; the sign-in still ends with the problem it ended with.
+    std::size_t max_error_code_bytes = OAuthDefaults::max_error_code_bytes;
     std::size_t max_document_depth = OAuthDefaults::max_document_depth;
     std::chrono::milliseconds authorization_fetch_timeout = OAuthDefaults::authorization_fetch_timeout;
     // How long the person may take in the browser; the sign-in fails prompt_timed_out after it.

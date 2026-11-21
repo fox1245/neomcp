@@ -47,12 +47,12 @@ bool true_member(const json& object, std::string_view name);
 std::optional<std::vector<std::string>> string_array_member(const json& object, std::string_view name);
 
 // An error code as OAuth defines it: one or more of %x20-21, %x23-5B and %x5D-7E (no '"', no '\', no control
-// character).
-bool is_error_code(std::string_view code) noexcept;
+// character), of at most `max_bytes` bytes. A longer code is not shortened: a shortened code would be another code.
+bool is_error_code(std::string_view code, std::size_t max_bytes) noexcept;
 
 // The `error` code of an error answer's JSON object, when it is one; nothing otherwise. The description and the URI
 // of the error are never read.
-std::optional<std::string> error_code_of(std::string_view body, std::size_t max_depth);
+std::optional<std::string> error_code_of(std::string_view body, std::size_t max_depth, std::size_t max_code_bytes);
 
 inline bool is_success_status(int status) noexcept { return status >= 200 && status <= 299; }
 inline bool is_client_error_status(int status) noexcept { return status >= 400 && status <= 499; }

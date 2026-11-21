@@ -138,7 +138,7 @@ std::variant<StoredTokens, FlowFailure> read_token_answer(const FetchResult& res
     if (result.status != status_ok) {
         FlowFailure failure = failed(AuthorizationProblem::token_request_failed, issuer, token_endpoint);
         if (is_client_error_status(result.status)) {
-            failure.error_code = error_code_of(result.body, bounds.max_document_depth);
+            failure.error_code = error_code_of(result.body, bounds.max_document_depth, bounds.max_error_code_bytes);
         }
         return failure;
     }
