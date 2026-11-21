@@ -9,6 +9,7 @@ endif()
 
 option(NEOMCP_BUILD_TESTS "Build the tests" ${NEOMCP_IS_TOP_LEVEL})
 option(NEOMCP_INSTALL "Generate the install rules and the CMake package configuration" ${NEOMCP_IS_TOP_LEVEL})
+option(NEOMCP_BUILD_EXAMPLES "Build the programs in examples/" OFF)
 option(NEOMCP_WARNINGS_AS_ERRORS "Treat warnings in neomcp's own targets as errors" OFF)
 option(NEOMCP_INTEROP_TESTS
     "Register the interoperability test, which drives the fixture server with the official Python SDK's client. Needs NEOMCP_INTEROP_PYTHON"
@@ -285,4 +286,8 @@ endif()
 if(NEOMCP_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(NEOMCP_BUILD_EXAMPLES)
+    add_subdirectory(examples)
 endif()

@@ -265,6 +265,11 @@ completion from the client's model, the client's roots. Declare it after the han
 answer:
 
 ```cpp
+struct DeleteArgs {
+    std::string path;
+};
+NEOMCP_DESCRIBE(DeleteArgs, path, "the folder to delete")
+
 struct Confirm {
     bool ok;
 };
@@ -284,7 +289,8 @@ question function runs on every round of the call, so it must have no effects an
 same arguments. The handler runs exactly once, when every declared input has its answer, and never in a round that
 asks. Whether the client is asked by a result and a retried call or by requests sent while the call waits follows the
 revision it speaks, and the same code serves both. A handler that needs more control returns `neomcp::InputRequired`
-itself and is entered again with the answers, as `neomcp/server.h` describes.
+itself and is entered again with the answers, as `neomcp/server.h` describes. [examples/elicitation.cpp](examples/elicitation.cpp)
+is a complete program with the client's side, the handler that answers the form.
 
 ## A client that signs in
 
@@ -304,10 +310,12 @@ oauth.prompt.handler([](const neomcp::AuthorizationPromptInfo& prompt,
     return neomcp::AuthorizationPromptAnswer{back};
 });
 auto authorizer = neomcp::OAuthAuthorizer::create(std::move(oauth));
+if (!authorizer) { /* authorizer.error(): the options cannot work */ }
 
 neomcp::HttpEndpoint endpoint;
 endpoint.url = "https://mcp.example.com/mcp";
 endpoint.authorizer = *authorizer;
+neomcp::ClientOptions options;
 auto client = neomcp::Client::open(options, std::move(endpoint));
 ```
 
@@ -318,7 +326,41 @@ that keeps them; the library never writes them anywhere itself. Credentials regi
 `OAuthOptions::pre_registered`, and a client ID metadata document the application hosts in
 `client_id_metadata_url`; otherwise the client registers itself where the authorization server offers it. A sign-in
 the person does not finish ends after `OAuthOptions::bounds.authorization_timeout`, and the calls it held fail with
-`ClientErrorKind::authorization_failed`.
+`ClientErrorKind::authorization_failed`. [examples/oauth_client.cpp](examples/oauth_client.cpp) is a complete program
+that prints the address to open and reads the one the browser went to from standard input.
+
+## Examples
+
+[examples/](examples/) holds eight small programs, each one source file with comments for a reader who is new to MCP.
+They build with the library (configure with `-DNEOMCP_BUILD_EXAMPLES=ON`; the option is off by default), or on their
+own against an installed neomcp (see [Using an installed neomcp](#using-an-installed-neomcp)):
+
+```sh
+cmake -S examples -B build-examples -DCMAKE_PREFIX_PATH=/opt/neomcp
+cmake --build build-examples
+```
+
+- [stdio_server.cpp](examples/stdio_server.cpp): the first server, grown to tools from C++ types (one with a typed
+  result), a resource and a prompt, served over stdio. Its tools, resource and prompt are registered in
+  [demo_server.h](examples/demo_server.h), with the types of the tools in [demo_types.h](examples/demo_types.h).
+- [http_server.cpp](examples/http_server.cpp): the same server over Streamable HTTP, on the port given on the command
+  line.
+- [client_stdio.cpp](examples/client_stdio.cpp): a client that starts the first example as a child process, lists its
+  tools, makes typed calls, reads the resource and gets the prompt.
+- [client_http.cpp](examples/client_http.cpp): a client of the second example, which shows how the client finds out
+  which revision the server speaks, once speaking every revision and once only those of the older era.
+- [client_in_process.cpp](examples/client_in_process.cpp): a server and a client in one process with no I/O, the
+  smallest complete program.
+- [elicitation.cpp](examples/elicitation.cpp): a tool that asks the client for a confirmation (a form), and the
+  client's handler that answers it, under the newest revision of each era.
+- [oauth_client.cpp](examples/oauth_client.cpp): a client that signs in with `OAuthAuthorizer`; it prints the address
+  to open and reads the address the browser went to from standard input. Built where the client's HTTP transport is.
+- [protected_server.cpp](examples/protected_server.cpp): the second example behind `ResourceServerOptions`, with a
+  `TokenValidator` over a fixed table of made-up tokens, for demonstration only.
+
+[examples/run_unattended.sh](examples/run_unattended.sh) runs the ones that need no person, as CI does: the in-process
+client, the elicitation, the stdio client (which starts the first example), and the HTTP client against the second
+example, which the script starts and stops.
 
 An application that opens the person's browser but has no listener for the redirect can use the optional
 `neomcp::client_oauth_loopback` component (`neomcp/client/oauth_loopback.h`, built unless

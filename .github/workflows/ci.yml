@@ -22,6 +22,7 @@ name: CI
 # its extension, read at the commit its evidence names (which NOTICE names too).
 # Two more jobs on Linux (GCC with static libraries, Clang with shared ones) and one on Windows install neomcp, move the
 # prefix and build and run a project that uses the installed package.
+# The Linux job with Clang also builds the programs in examples/ and runs the ones that need no person.
 
 on:
   push:
@@ -72,6 +73,15 @@ jobs:
         run: cmake --build build --parallel 4
       - name: Test
         run: ctest --test-dir build --output-on-failure --timeout 300
+      # The programs of examples/ in the same build tree, so with the same compiler, flags and sanitizers. The ones that
+      # need no person run: the clients, with the servers they talk to. The two that need a person and an authorization
+      # server are built only.
+      - name: Build the examples and run the ones that need no person
+        if: matrix.name == 'linux-x64-clang'
+        run: |
+          cmake -S . -B build -DNEOMCP_BUILD_EXAMPLES=ON
+          cmake --build build --parallel 4 --target neomcp_examples
+          examples/run_unattended.sh build/examples
 
   other-platforms:
     name: ${{ matrix.name }}
