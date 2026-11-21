@@ -9,6 +9,11 @@ name: CI
 # The client's HTTP transport runs on libcurl from the system: the Linux jobs install it with apt, macOS with Homebrew and
 # Windows with vcpkg; the jobs that build only servers configure without it (NEOMCP_HTTP_CLIENT=OFF), which shows that a
 # server needs no libcurl. One more job runs the official conformance suite against the client fixture.
+# The validator of JWT access tokens (NEOMCP_JWT) needs OpenSSL's libcrypto as well: the Linux jobs install it with apt
+# and build and test the validator (configured with NEOMCP_JWT=ON, so that a missing libcrypto fails them), macOS takes
+# it from Homebrew and does the same, and the install jobs on Linux install it with the libraries. The Windows jobs
+# build without it (NEOMCP_JWT=OFF), so they need no libcrypto.
+# Every other job leaves the option at its default, which is ON only where libcrypto and libcurl are found.
 # One more job checks the translation of regular expressions for the schema keyword `pattern` against V8: Node writes
 # patterns with the answers of V8, and a test executable compares the validator with them.
 # One more job compares the wire data of every profile in profiles/ with the schema the protocol's specification
@@ -49,15 +54,16 @@ jobs:
       SANITIZE: ${{ matrix.sanitize }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install libcurl (the client's HTTP transport)
+      - name: Install libcurl (the client's HTTP transport) and libcrypto (the JWT validator)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev libssl-dev
           curl-config --version
+          openssl version
       - name: Configure (Debug; sanitizers where the matrix names them)
         run: >-
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DNEOMCP_WARNINGS_AS_ERRORS=ON
-          -DNEOMCP_TEST_TIME_BOUNDS=OFF
+          -DNEOMCP_TEST_TIME_BOUNDS=OFF -DNEOMCP_JWT=ON
           "-DCMAKE_C_FLAGS=$SANITIZE" "-DCMAKE_CXX_FLAGS=$SANITIZE"
       - name: Show the compilers and flags the build uses
         run: grep -E '^CMAKE_(C|CXX)_(COMPILER|FLAGS):' build/CMakeCache.txt
@@ -84,13 +90,15 @@ jobs:
           - { name: windows-arm64-msvc, runner: windows-11-arm }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install libcurl (Homebrew)
+      - name: Install libcurl and libcrypto (Homebrew)
         if: runner.os == 'macOS'
         run: |
-          brew install curl
+          brew install curl openssl@3
           prefix="$(brew --prefix curl)"
           "$prefix/bin/curl-config" --version
-          echo "NEOMCP_CMAKE_EXTRA=-DCURL_ROOT=$prefix" >> "$GITHUB_ENV"
+          openssl_prefix="$(brew --prefix openssl@3)"
+          "$openssl_prefix/bin/openssl" version
+          echo "NEOMCP_CMAKE_EXTRA=-DCURL_ROOT=$prefix -DOPENSSL_ROOT_DIR=$openssl_prefix -DNEOMCP_JWT=ON" >> "$GITHUB_ENV"
       - name: Install libcurl (vcpkg)
         if: runner.os == 'Windows'
         shell: bash
@@ -104,7 +112,7 @@ jobs:
           root="$(cygpath -m "$VCPKG_INSTALLATION_ROOT")"
           "$root/vcpkg" install "curl:$TRIPLET"
           "$root/vcpkg" list curl
-          echo "NEOMCP_CMAKE_EXTRA=-DCMAKE_TOOLCHAIN_FILE=$root/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=$TRIPLET" >> "$GITHUB_ENV"
+          echo "NEOMCP_CMAKE_EXTRA=-DCMAKE_TOOLCHAIN_FILE=$root/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=$TRIPLET -DNEOMCP_JWT=OFF" >> "$GITHUB_ENV"
       - name: Configure (Release)
         shell: bash
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON ${NEOMCP_CMAKE_EXTRA:-}
@@ -394,16 +402,16 @@ jobs:
       CXX: ${{ matrix.cxx }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install libcurl (the client's HTTP transport)
+      - name: Install libcurl (the client's HTTP transport) and libcrypto (the JWT validator)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev libssl-dev
       - name: Configure neomcp (Release; the libraries only)
         run: >-
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON -DNEOMCP_BUILD_TESTS=OFF
           -DBUILD_SHARED_LIBS=${{ matrix.shared }}
       - name: Show the compilers and flags the build uses
-        run: grep -E '^(CMAKE_(C|CXX)_(COMPILER|FLAGS)|BUILD_SHARED_LIBS|NEOMCP_INSTALL):' build/CMakeCache.txt
+        run: grep -E '^(CMAKE_(C|CXX)_(COMPILER|FLAGS)|BUILD_SHARED_LIBS|NEOMCP_INSTALL|NEOMCP_JWT):' build/CMakeCache.txt
       - name: Build
         run: cmake --build build --parallel 4
       - name: Install

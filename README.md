@@ -104,6 +104,10 @@ Options: `NEOMCP_BUILD_TESTS` (default ON when neomcp is the top-level project) 
 system (with its headers); configure stops with a message when it is missing. A program that only serves, or a
 client that only starts servers as child processes, can be built with the option OFF and needs no libcurl.
 
+`NEOMCP_JWT` builds `neomcp::server_auth_jwt`, a validator of JWT access tokens (RFC 9068) for an HTTP server that
+checks the signatures itself with the authorization server's published keys (`neomcp/http/jwt.h`). It needs OpenSSL's
+libcrypto 3.0 or newer and libcurl from the system; it is ON by default when both are found and OFF otherwise.
+
 `NEOMCP_INTEROP_TESTS` (default OFF) adds tests that drive a stdio server and an HTTP server with the official
 Python SDK's client, and the official Python SDK's servers with this library's client. Install
 `tests/interop/requirements.txt` into a Python environment and pass its interpreter as `NEOMCP_INTEROP_PYTHON`.
@@ -128,10 +132,11 @@ target_link_libraries(app PRIVATE neomcp::server neomcp::stdio)
 ```
 
 Each component is the target of the same name: `server`, `stdio`, `http`, `http_base`, `client`,
-`client_in_process`, `client_stdio`, `client_http`, `client_auth`, `core`, `profile`, `schema`, `describe`, `crypto`.
-A component the build left out (`client_http` without `NEOMCP_HTTP_CLIENT`) is reported as not found. The packages a
-component needs are looked for only when it is asked for: `client_http` needs libcurl, found as the build found it, and
-every component needs the thread library. Without `COMPONENTS` every installed component is asked for.
+`client_in_process`, `client_stdio`, `client_http`, `client_auth`, `server_auth_introspection`, `server_auth_jwt`,
+`core`, `profile`, `schema`, `describe`, `crypto`. A component the build left out (`client_http` without
+`NEOMCP_HTTP_CLIENT`, `server_auth_jwt` without `NEOMCP_JWT`) is reported as not found. The packages a component needs
+are looked for only when it is asked for: `client_http` needs libcurl and `server_auth_jwt` libcrypto and libcurl,
+found as the build found them, and every component needs the thread library. Without `COMPONENTS` every installed component is asked for.
 
 The headers of standalone Asio and of neojson, which neomcp's own headers include, are installed with it in
 `include/neomcp/deps`, and neojson's library in `lib/neomcp`; in a static build, the libraries of RE2 and Abseil that
