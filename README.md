@@ -39,6 +39,9 @@ What exists now:
   declares what it needs and runs once the answers are there, or returns what it needs and is entered again with
   them, and the library carries that in the way each revision defines. The state that travels between the rounds is
   signed by the server.
+- Errors of the application's own: a handler of any kind answers its request with a JSON-RPC error whose code, message
+  and data it chooses (`neomcp::ApplicationError`), on every transport and revision, within the codes the revision
+  leaves to applications.
 - Telling clients of changes: tools, prompts and resources can be switched on and off while the server serves, a
   resource can be reported as updated, and clients hear of it in the way their revision defines.
 - The server is run in CI against the official conformance suite for the revisions 2025-11-25 and 2026-07-28, and
@@ -178,6 +181,35 @@ standard output, one JSON message per line, and exits when its input closes. To 
 add_subdirectory(neomcp)
 target_link_libraries(calc PRIVATE neomcp::server neomcp::stdio)
 ```
+
+## Errors of a handler
+
+A handler fails in one of three ways. Throwing `neomcp::ToolError` from a tool answers the call with a result that has
+`isError` set and the message as its text, which the model sees. Throwing `neomcp::ResourceNotFound` from a resource
+handler answers a read as a resource that does not exist. Throwing `neomcp::ApplicationError` from a handler of any
+kind (a tool, a resource, a resource template, a prompt or a completer, plain or as a coroutine) answers the request
+with a JSON-RPC error whose code, message and data the handler chooses:
+
+```cpp
+constexpr int quota_exceeded = -32050;
+server.tool<AddArgs>("add", "Add two integers", [](const AddArgs& args) -> int {
+    if (args.a < 0) throw neomcp::ApplicationError(quota_exceeded, "negative addends", {{"limit", 0}});
+    return args.a + args.b;
+});
+```
+
+The answer carries exactly that code, message and `data` on every transport and under every revision, and the client
+hands them to its application (`ClientError::code`, `::message` and `::data`). For a call that runs as a task, the task
+fails with them. Any other exception is answered with an internal error whose message is fixed, so that nothing about
+the server's internals reaches the client (`ServerOptions::expose_error_details` adds the exception's text).
+
+The code must be one an application may use: a code outside the range JSON-RPC reserves for itself (-32768 to -32000),
+or one of -32099 to -32000, which that range leaves to implementations, that the revision serving the request does not
+name. The protocol's own codes (-32700, -32600 to -32603) and the codes the revision's profile lists in its `errors`
+(the ones its extensions in force add, and those it forbids a sender to use, included) are not available: such a request
+is answered with an internal error and the handler's message and data are dropped. So is an answer longer than
+`ServerOptions::max_message_bytes`. The message and the data reach the client as they are; keep out of them whatever the
+client may not see.
 
 ## Serving over HTTP
 

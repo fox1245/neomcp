@@ -5,6 +5,16 @@ interface, and a new patch number does not.
 
 ## Unreleased
 
+### Server
+
+- `neomcp::ApplicationError`: a handler of any kind (tool, resource, resource template, prompt, completer; plain or
+  coroutine) answers its request with a JSON-RPC error of its own code, message and data, on every transport and
+  revision, and a call that runs as a task fails with them. A code outside the range JSON-RPC reserves, or one of the
+  codes that range leaves to implementations, is available unless the governing revision names it (its profile's
+  `errors`, the extensions in force and the codes it forbids a sender to use); a request whose handler uses another
+  code, or whose answer is longer than `max_message_bytes`, is answered with an internal error whose message is fixed.
+- A host (`neomcp::ToolHost`) completes a call with `neomcp::ApplicationFailure` for the same.
+
 ### Client
 
 - Header fields of the application's own on the HTTP transports: `HttpEndpoint::header_fields` (fixed fields) and

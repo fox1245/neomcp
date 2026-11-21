@@ -23,6 +23,12 @@ Last updated: 2026-11-21.
   of JSON Schema); CI compares the translation with V8 on generated patterns.
 - **Conformance.** The official conformance suite passes for the server at 2025-11-25 and 2026-07-28 with empty
   lists of expected failures; the official Python SDK's client is run against the stdio and HTTP servers.
+- **Errors of the application's own.** A handler of any kind (tool, resource, resource template, prompt, completer;
+  plain or coroutine) throws `neomcp::ApplicationError` and the request is answered with a JSON-RPC error of the
+  code, message and data it chose, on every transport and revision; for a task, the task fails with them. The codes
+  of the range JSON-RPC reserves for itself and the codes the governing revision names are refused (the request is
+  answered with an internal error), and so is an answer longer than `max_message_bytes`. The client hands the code and
+  the data of every error answer to the application.
 - **Build preparation for the client**: the targets `neomcp::io` and `neomcp::http_base` hold what a client shares
   with the server.
 - **Shared declarations for the client**: `ByteReader`/`ByteWriter` (`neomcp/byte_stream.h`), `Headers`
@@ -106,9 +112,6 @@ Linux, shared libraries; versioned releases from 0.1.0.
 
 ## Not started: later steps
 
-- **Errors of the application's own.** A tool or another handler answers with a JSON-RPC error whose code and `data`
-  the application chooses (a code outside those the protocol reserves), and the client hands the code and the data of
-  every error answer to the application.
 - **A validator of fixed bearer tokens** for a server without an authorization server: a table of tokens and the scopes
   each grants, whose scopes reach the handler and the declared scopes of items as an OAuth token's do, without
   protected resource metadata.
