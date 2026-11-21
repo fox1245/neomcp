@@ -157,11 +157,12 @@ def list_runs(expectations_path):
 
 def result_checks(folder):
     """The checks of the one result folder in `folder`, or why there are none."""
+    # The runner names a result folder after the scenario and the time, so a scenario named with a group
+    # (`auth/metadata-default`) gets its folder one level deeper: walk the whole tree under `folder`.
     found = []
-    for entry in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
-        path = os.path.join(folder, entry, "checks.json")
-        if os.path.isfile(path):
-            found.append(os.path.join(folder, entry))
+    for directory, _, files in sorted(os.walk(folder)) if os.path.isdir(folder) else []:
+        if directory != folder and "checks.json" in files:
+            found.append(directory)
     if len(found) != 1:
         return None, None, f"{len(found)} result folders with a checks.json"
     try:

@@ -271,7 +271,7 @@ jobs:
         if: ${{ failure() }}
         run: |
           python3 -I tests/conformance/summarize_checks.py "$RUNNER_TEMP/requirements-2025-11-25" "$RUNNER_TEMP/requirements-2026-07-28"
-          for log in "$RUNNER_TEMP"/single/*/*/*/runner.log; do
+          find "$RUNNER_TEMP/single" -name runner.log | sort | while read -r log; do
             echo "--- $log"
             tail -n 40 "$log"
           done
