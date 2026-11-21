@@ -250,7 +250,9 @@ TokenProblem check_token(const Authorization& granted, const ResourceServerConfi
                        options.accepted_audiences.end();
         });
     if (!for_this_resource) return TokenProblem::audience;
-    if (now >= *granted.expires + options.bounds.leeway) return TokenProblem::expired;
+    // Written so that no sum can overflow, whatever expiry a validator returns: the leeway is at most
+    // ResourceServerDefaults::max_leeway, and `now` is a time the clock gave.
+    if (now - options.bounds.leeway >= *granted.expires) return TokenProblem::expired;
     if (granted.not_before && now + options.bounds.leeway < *granted.not_before) return TokenProblem::not_yet_valid;
     return TokenProblem::none;
 }
@@ -275,6 +277,9 @@ std::vector<std::string> challenge_scopes(std::span<const std::string> missing, 
         if (named(scope)) add(scope);
     }
     if (!fits_a_challenge(scopes)) scopes.resize(needed);
+    // What an item declares may be more than one challenge carries: the scopes it needs are then cut, in their
+    // order, to what fits, so that the answer is never a challenge a client refuses to read.
+    while (!scopes.empty() && !fits_a_challenge(scopes)) scopes.pop_back();
     return scopes;
 }
 

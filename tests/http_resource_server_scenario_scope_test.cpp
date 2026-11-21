@@ -251,10 +251,6 @@ TEST(ResourceServerScenarioScope, TheBytesOfAChallengesScopesAreCutToWhatAClient
 }
 
 TEST(ResourceServerScenarioScope, AnItemThatDeclaresMoreScopesThanAChallengeCanCarryIsNeverAnsweredWithOneThatIsTooLarge) {
-    if (known_defects_are_skipped()) {
-        GTEST_SKIP() << "defect: neither registration nor start refuses an item whose declared scopes exceed what a challenge may "
-                    "carry (64), and its 403 lists them all (src/http/endpoint.cpp scope_response, src/http/resource_server.cpp:277)";
-    }
     FakeClock clock;
     auto table = std::make_shared<Table>();
     Scopes many;

@@ -173,10 +173,6 @@ TEST(ResourceServerScenarioToken, ARememberedVerdictEndsAtTheSameInstantAFreshOn
 }
 
 TEST(ResourceServerScenarioToken, ATokenWhoseExpiryIsTheLastInstantTheClockHoldsNeverExpires) {
-    if (known_defects_are_skipped()) {
-        GTEST_SKIP() << "defect: check_token adds the leeway to the expiry without saturating (src/http/resource_server.cpp:253), "
-                    "so an expiry at the end of time overflows (undefined behaviour) and the token is refused";
-    }
     Harness harness;
     auto forever = granted(harness.clock, "a", {"mcp:use"});
     forever.expires = SystemClock::time_point::max();
