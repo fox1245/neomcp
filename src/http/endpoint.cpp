@@ -1610,10 +1610,15 @@ void Endpoint::Impl::deliver(Waiter waiter, const Verdict& verdict) {
     if (waiter.responder.completed()) return;  // the client left while it waited
     const detail::ResourceServerConfig& config = *resource_server;
     switch (verdict.kind) {
-        case Verdict::Kind::unavailable:
-            refuse(waiter.responder, reason::token_unavailable, nullptr,
-                   "Service unavailable: the access token cannot be validated now", error_code::internal_error);
+        case Verdict::Kind::unavailable: {
+            // Like every answer of the gate, not to be kept by a cache: the next request may be served.
+            Response response = refusal(reason::token_unavailable, nullptr,
+                                        "Service unavailable: the access token cannot be validated now",
+                                        error_code::internal_error);
+            response.headers.add(std::string(cache_control_field), std::string(no_store));
+            waiter.responder.complete(std::move(response));
             return;
+        }
         case Verdict::Kind::invalid:
             waiter.responder.complete(challenge_response(reason::invalid_token, nullptr, config.invalid_token_challenge,
                                                          bearer_error_invalid_token));

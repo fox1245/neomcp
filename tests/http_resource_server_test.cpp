@@ -666,6 +666,7 @@ TEST(ResourceServerGate, AValidatorThatCannotAnswerGives503AndNothingIsRemembere
         const Reply first = list_tools(harness.port, "t");
         EXPECT_EQ(first.status, 503) << static_cast<int>(way);
         EXPECT_FALSE(first.headers.count("WWW-Authenticate")) << "not the token's fault";
+        EXPECT_EQ(first.header("Cache-Control"), "no-store") << static_cast<int>(way);
         EXPECT_LT(std::chrono::steady_clock::now() - started, 20s);
         EXPECT_EQ(list_tools(harness.port, "t").status, 503);
         EXPECT_EQ(validator->calls.load(), 2) << static_cast<int>(way);
@@ -684,7 +685,9 @@ TEST(ResourceServerGate, OneTokenTooManyInValidationGets503) {
     std::thread waiting([&] { EXPECT_EQ(list_tools(harness.port, "first").status, 503); });
     while (validator->calls.load() == 0) std::this_thread::yield();
     const auto started = std::chrono::steady_clock::now();
-    EXPECT_EQ(list_tools(harness.port, "second").status, 503);
+    const Reply second = list_tools(harness.port, "second");
+    EXPECT_EQ(second.status, 503);
+    EXPECT_EQ(second.header("Cache-Control"), "no-store");
     EXPECT_LT(std::chrono::steady_clock::now() - started, 4s) << "refused at once, not after the timeout";
     EXPECT_EQ(validator->calls.load(), 1);
     waiting.join();
