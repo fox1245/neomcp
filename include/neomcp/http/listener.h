@@ -51,6 +51,10 @@ struct ListenerDefaults {
     static constexpr std::chrono::seconds idle_connection_timeout{5};
     static constexpr std::chrono::milliseconds keep_alive_interval{15000};
     static constexpr std::chrono::milliseconds disconnect_poll_interval{250};
+    // The longest header field line the listener reads, in bytes: the name, the colon, the value and the line's CRLF.
+    // A request with a longer line is answered 400 by the HTTP library before any handler runs. Fixed: it is the
+    // library's own bound, which the listener's source checks it against.
+    static constexpr std::size_t max_header_line_bytes = 8192;
 };
 
 // An extra path the listener serves for reading, beside the main path: a document published at a well-known address,

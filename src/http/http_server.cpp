@@ -10,6 +10,8 @@
 #include <asio/io_context.hpp>
 #include <asio/signal_set.hpp>
 
+#include "http/resource_server.h"
+
 namespace neomcp {
 
 namespace {
@@ -64,12 +66,30 @@ http::Outcome<std::uint16_t> HttpServer::start() {
     // port is refused.
     auto provisional = http::HostPolicy::create(policy_options(options_, 0));
     if (!provisional) return Result::failure(provisional.error);
-    auto endpoint = http::Endpoint::create(server_, std::move(*provisional.value), options_.endpoint);
+    http::EndpointOptions endpoint_options = options_.endpoint;
+    if (options_.authorization) {
+        if (endpoint_options.authorization) {
+            return Result::failure("authorization is set twice: in the options and in their endpoint options");
+        }
+        endpoint_options.authorization = options_.authorization;
+    }
+    if (endpoint_options.authorization) {
+        if (endpoint_options.authorization->bounds.max_token_bytes > http::ResourceServerDefaults::max_token_bytes) {
+            return Result::failure("authorization: max_token_bytes is more than the listener lets through (" +
+                                   std::to_string(http::ResourceServerDefaults::max_token_bytes) + " bytes)");
+        }
+    } else if (server_.declares_scopes()) {
+        return Result::failure("items declare scopes, which need authorization: set the authorization options");
+    }
+    auto endpoint = http::Endpoint::create(server_, std::move(*provisional.value), std::move(endpoint_options));
     if (!endpoint) return Result::failure(endpoint.error);
     endpoint_ = std::move(*endpoint.value);
 
-    listener_ = std::make_unique<http::Listener>(listener_options(options_, server_.options().max_message_bytes),
-                                                 endpoint_->handler());
+    http::ListenerOptions listening = listener_options(options_, server_.options().max_message_bytes);
+    if (const std::optional<std::string> document_path = endpoint_->metadata_path()) {
+        listening.routes.push_back(http::Route{*document_path, endpoint_->metadata_handler()});
+    }
+    listener_ = std::make_unique<http::Listener>(std::move(listening), endpoint_->handler());
     auto bound = listener_->start();
     if (!bound) {
         stop();
@@ -80,6 +100,17 @@ http::Outcome<std::uint16_t> HttpServer::start() {
         stop();
         return Result::failure(policy.error);
     }
+    const http::ResourceServerOptions* authorization =
+        options_.authorization ? &*options_.authorization
+                               : (options_.endpoint.authorization ? &*options_.endpoint.authorization : nullptr);
+    if (authorization != nullptr) {
+        const std::optional<std::string> host = http::detail::url_authority(authorization->resource);
+        if (!host || !policy.value->host_allowed(*host)) {
+            stop();
+            return Result::failure("authorization: the host of resource does not pass the Host check, so every client "
+                                   "request would be refused");
+        }
+    }
     endpoint_->set_policy(std::move(*policy.value));
     return Result::success(*bound.value);
 }
@@ -89,6 +120,11 @@ void HttpServer::stop() noexcept {
     // whose workers are free by then.
     if (endpoint_) endpoint_->stop();
     if (listener_) listener_->stop();
+}
+
+http::Outcome<bool> HttpServer::update_authorization_servers(std::vector<std::string> issuers) {
+    if (!endpoint_) return http::Outcome<bool>::failure("the server has not started");
+    return endpoint_->update_authorization_servers(std::move(issuers));
 }
 
 std::uint16_t HttpServer::port() const noexcept { return listener_ ? listener_->port() : 0; }

@@ -8,8 +8,16 @@
 // - Exchange is one POST waiting for its answer. Its entry maps the unit number to it until the exchange is released,
 //   and it holds its entry, so a session that has no id lives exactly as long as its one request.
 //
-// Locks, in the order they may be nested: Impl::mutex, Entry::mutex, Exchange::mutex, the timer's. None is held
-// while a session, a responder, a stream or the policy is called. Two entries' locks are never held at once.
+// Locks, in the order they may be nested: Impl::mutex, Entry::mutex, Exchange::mutex, the timer's; and
+// Impl::gate_mutex, which is never held with an entry's or an exchange's lock, before the timer's. None is held while
+// a session, a responder, a stream, a validator or the policy is called. Two entries' locks are never held at once.
+//
+// The gate (with authorization). A request's token is read and the field removed; then the verdict is the one
+// remembered for the token's digest, or the validator is asked. A token being validated has one Flight: the requests
+// that carry it wait in it, in the order they arrived. The verdict settles the flight once (the validator's reply,
+// its timeout on the timer, or stop()); the thread that settles it hands the waiters on one at a time, without the
+// lock, and a request with the same token that arrives meanwhile joins the end of the list. Only when the list is
+// empty does the flight end and its verdict become a remembered one, so no later request overtakes a waiting one.
 //
 // Sessions nobody used. A kept entry is listed in Impl::unused, in the order it was kept, until a request names it
 // (find) or it ends; the list and the entry's place in it are guarded by Impl::mutex, so a newcomer that takes the
@@ -37,6 +45,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -44,7 +53,12 @@
 #include <variant>
 #include <vector>
 
+#include "crypto/sha256.h"
+#include "http/endpoint_probe.h"
+#include "http/resource_server.h"
 #include "http/timer.h"
+#include "neomcp/http/bearer.h"
+#include "neomcp/http/challenge.h"
 #include "neomcp/http/media_type.h"
 #include "neomcp/http/random.h"
 #include "neomcp/http/sse.h"
@@ -85,6 +99,11 @@ constexpr std::string_view malformed_session_header = "malformed_session_header"
 constexpr std::string_view no_capacity = "no_capacity";          // no room for a session, or no id could be made for it
 constexpr std::string_view stopping = "stopping";                // the endpoint stops
 constexpr std::string_view defect = "defect";                    // the library failed
+// The gate's (with authorization; RFC 6750, section 3.1).
+constexpr std::string_view no_token = "no_token";                // no credentials of the Bearer scheme
+constexpr std::string_view unreadable_credentials = "unreadable_credentials";  // repeated, or not Bearer 1*SP b64token
+constexpr std::string_view invalid_token = "invalid_token";      // the validator or the endpoint's checks refuse it
+constexpr std::string_view token_unavailable = "token_unavailable";  // the token cannot be validated now
 }  // namespace reason
 
 struct NamedDefault {
@@ -129,6 +148,10 @@ constexpr std::array library_defaults{
     NamedDefault{reason::no_capacity, 503},
     NamedDefault{reason::stopping, 503},
     NamedDefault{reason::defect, 500},
+    NamedDefault{reason::no_token, 401},
+    NamedDefault{reason::unreadable_credentials, 400},
+    NamedDefault{reason::invalid_token, 401},
+    NamedDefault{reason::token_unavailable, 503},
 };
 
 std::optional<int> library_default(std::string_view name) {
@@ -141,7 +164,10 @@ std::optional<int> library_default(std::string_view name) {
 // HTTP itself, not the protocol that runs over it.
 constexpr std::string_view post_method = "POST";
 constexpr std::string_view get_method = "GET";
+constexpr std::string_view head_method = "HEAD";
 constexpr std::string_view delete_method = "DELETE";
+constexpr std::string_view document_methods = "GET, HEAD";  // the Allow value of the metadata document's 405
+constexpr std::string_view max_age_directive = "max-age=";
 constexpr std::string_view content_type_field = "Content-Type";
 constexpr std::string_view accept_field = "Accept";
 constexpr std::string_view origin_field = "Origin";
@@ -158,6 +184,37 @@ constexpr std::string_view event_stream_subtype = "event-stream";
 
 // The random bytes of a session id.
 constexpr std::size_t session_id_bytes = 32;
+
+// The member of the OAuth error object (RFC 6749, section 5.2) the gate's 400, 401 and 403 answers carry.
+constexpr std::string_view oauth_error_member = "error";
+
+using SystemClock = std::chrono::system_clock;
+
+// `when` plus `added`, or the latest time there is when that would not fit.
+SystemClock::time_point saturating_add(SystemClock::time_point when, SystemClock::duration added) {
+    if (when > (SystemClock::time_point::max)() - added) return (SystemClock::time_point::max)();
+    return when + added;
+}
+
+// The time on the endpoint's clock that is `left` from now, or the latest there is.
+Clock::time_point steady_after(SystemClock::duration left) {
+    if (left <= SystemClock::duration::zero()) return Clock::now();
+    const Clock::time_point now = Clock::now();
+    const auto room = std::chrono::duration_cast<SystemClock::duration>((Clock::time_point::max)() - now);
+    if (left >= room) return (Clock::time_point::max)();
+    return now + std::chrono::duration_cast<Clock::duration>(left);
+}
+
+// A token by its SHA-256 digest and its length: two tokens with one key are taken for one.
+struct TokenKey {
+    neomcp::detail::Sha256Digest digest{};
+    std::size_t length = 0;
+
+    friend bool operator<(const TokenKey& left, const TokenKey& right) {
+        if (left.length != right.length) return left.length < right.length;
+        return left.digest < right.digest;
+    }
+};
 
 std::string_view trim(std::string_view text) noexcept {
     while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.remove_prefix(1);
@@ -211,6 +268,7 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
     struct Feed {
         std::shared_ptr<Exchange> exchange;
         Request request;
+        std::shared_ptr<const Authorization> authorization;  // what the gate validated; null without authorization
     };
 
     enum class Keep { undecided, kept, transient };
@@ -232,6 +290,10 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
         std::size_t active = 0;            // exchanges not released, and the connection stream
         std::uint64_t idle_generation = 0;  // a job of the idle timer acts only when it is still current
         Timer::Id idle_timer = 0;
+
+        // With authorization: the principal of the request that opened the session. Written before the entry is
+        // listed, then constant.
+        std::optional<PrincipalKey> owner;
 
         // Guarded by Impl::mutex.
         bool used = false;  // a request after the handshake named it
@@ -256,19 +318,22 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
         bool droppable = false;              // append: dropped when the stream is full, instead of ending it
     };
 
-    struct Exchange {
-        Exchange(UnitId number, Responder answer, std::shared_ptr<Entry> owner, const Acceptance& accept)
+    struct Exchange : std::enable_shared_from_this<Exchange> {
+        Exchange(UnitId number, Responder answer, std::shared_ptr<Entry> owner, const Acceptance& accept,
+                 std::shared_ptr<const Authorization> granted)
             : unit(number),
               responder(std::move(answer)),
               entry(std::move(owner)),
               admits_json(accept.json),
-              admits_event_stream(accept.event_stream) {}
+              admits_event_stream(accept.event_stream),
+              authorization(std::move(granted)) {}
 
         const UnitId unit;
         const Responder responder;
         const std::shared_ptr<Entry> entry;
         const bool admits_json;
         const bool admits_event_stream;
+        const std::shared_ptr<const Authorization> authorization;  // what the gate validated; null without it
 
         std::mutex mutex;  // guards the members below
         Phase phase = Phase::waiting;
@@ -281,17 +346,52 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
         std::deque<Output> held;                 // outputs that came before receive() returned
         std::shared_ptr<BodyStream> stream;
         Timer::Id timer = 0;
+        bool long_lived = false;     // its stream carries a subscription
+        Timer::Id expiry_timer = 0;  // the subscription's end when its token expires
         std::deque<Step> steps;
         bool running = false;  // a thread runs the steps
     };
 
+    // ---- the gate (with authorization)
+
+    // A request waiting for the verdict on its token.
+    struct Waiter {
+        Request request;
+        Responder responder;
+    };
+
+    struct Verdict {
+        enum class Kind { valid, invalid, unavailable };
+        Kind kind = Kind::unavailable;
+        std::shared_ptr<const Authorization> granted;  // when valid
+    };
+
+    // A token being validated (see the top of the file).
+    struct Flight {
+        bool settled = false;
+        std::deque<Waiter> waiters;
+        Timer::Id timer = 0;  // the validation timeout
+    };
+
+    // A verdict remembered: valid when `granted` is set, invalid otherwise.
+    struct Remembered {
+        std::shared_ptr<const Authorization> granted;
+        SystemClock::time_point until;
+    };
+
     Impl(Server& owner, HostPolicy host_policy, EndpointOptions endpoint_options,
-         std::vector<profile::ProfilePtr> served)
+         std::vector<profile::ProfilePtr> served, std::unique_ptr<const detail::ResourceServerConfig> gate,
+         std::shared_ptr<const std::string> metadata, detail::EndpointProbe::FeedObserver observer)
         : server(owner),
-          options(endpoint_options),
+          options(std::move(endpoint_options)),
           max_body_bytes(owner.options().max_message_bytes),
           profiles(std::move(served)),
-          policy(std::make_shared<const HostPolicy>(std::move(host_policy))) {
+          resource_server(std::move(gate)),
+          implications(owner.options().scope_implications),
+          observe_feed(std::move(observer)),
+          policy(std::make_shared<const HostPolicy>(std::move(host_policy))),
+          document(std::move(metadata)) {
+        if (resource_server) issuers = resource_server->options.authorization_servers;
         const auto add_name = [](std::vector<std::string>& names, const std::string& name) {
             const bool known = std::any_of(names.begin(), names.end(),
                                            [&](const std::string& seen) { return equal_ignoring_case(seen, name); });
@@ -314,16 +414,39 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
 
     // ---- requests
     void handle(Request request, Responder responder);
-    void post(Request request, Responder responder);
-    void get(const Request& request, const Responder& responder);
-    void remove(const Request& request, const Responder& responder);
+    // The Host and Origin policy; false when it refused the request (and answered it).
+    bool admitted(const Request& request, const Responder& responder);
+    void dispatch(Request request, Responder responder, std::shared_ptr<const Authorization> granted);
+    void post(Request request, Responder responder, std::shared_ptr<const Authorization> granted);
+    void get(const Request& request, const Responder& responder, const std::shared_ptr<const Authorization>& granted);
+    void remove(const Request& request, const Responder& responder, const Authorization* granted);
+    void serve_metadata(const Request& request, const Responder& responder);
+
+    // ---- the gate
+    void authorize(Request request, Responder responder);
+    void validate(const TokenKey& key, const std::shared_ptr<Flight>& flight, std::string& token);
+    void settle(const TokenKey& key, const std::shared_ptr<Flight>& flight, TokenVerdict reported);
+    void deliver(Waiter waiter, const Verdict& verdict);
+    // With gate_mutex held: what a verdict of the validator (null: invalid) is worth now.
+    Verdict judge(const std::shared_ptr<const Authorization>& granted, SystemClock::time_point now) const;
+    void remember(const TokenKey& key, std::shared_ptr<const Authorization> granted, SystemClock::time_point until,
+                  SystemClock::time_point now);  // with gate_mutex held
+    Clock::time_point expiry_of(const Authorization& granted) const;  // when a stream it opened ends
+    void schedule_expiry(Exchange& exchange);                         // with the exchange's lock held
+    void expire_exchange(const std::shared_ptr<Exchange>& exchange);
+    void expire_connection(const std::shared_ptr<Entry>& entry, const std::shared_ptr<BodyStream>& stream);
+    Response challenge_response(std::string_view why, const profile::Profile* governing, std::string challenge,
+                                std::optional<std::string_view> error) const;
+    Response scope_response(std::span<const std::string> missing, const Authorization* granted,
+                            const profile::Profile* governing) const;
 
     // ---- sessions
-    std::variant<std::shared_ptr<Entry>, std::string_view> open_entry();
+    std::variant<std::shared_ptr<Entry>, std::string_view> open_entry(const Authorization* opener);
     std::variant<std::string, std::string_view> keep_entry(const std::shared_ptr<Entry>& entry,
                                                            const profile::ProfilePtr& opened);
-    // The kept entry under `id`, marked used; null when there is none.
-    std::shared_ptr<Entry> find(std::string_view id);
+    // The kept entry under `id`, marked used; null when there is none, or when it belongs to another principal than
+    // the one `asker` names (who learns nothing more than about a session that does not exist).
+    std::shared_ptr<Entry> find(std::string_view id, const Authorization* asker);
     void forget(const Entry& entry);
     void unlist(Entry& entry);                  // with `mutex` held
     Ended end_unused(Entry& entry);             // with `mutex` held; takes the entry's lock
@@ -376,6 +499,9 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
     const EndpointOptions options;
     const std::size_t max_body_bytes;
     const std::vector<profile::ProfilePtr> profiles;  // those that define Streamable HTTP, newest first
+    const std::unique_ptr<const detail::ResourceServerConfig> resource_server;  // null without authorization
+    const ScopeImplications implications;                                      // the server's
+    const detail::EndpointProbe::FeedObserver observe_feed;                    // tests only; usually empty
     std::vector<std::string> session_headers;          // the names the revisions give the session header
     std::vector<std::string> version_headers;          // the names they give the version header
     bool offers_get = false;
@@ -391,6 +517,13 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
     std::map<std::uint64_t, std::shared_ptr<Entry>> live;
     std::map<std::string, std::shared_ptr<Entry>, std::less<>> by_id;
     std::list<std::shared_ptr<Entry>> unused;  // kept entries nobody used yet, the longest kept first
+
+    std::mutex gate_mutex;  // guards the members below
+    bool gate_stopped = false;
+    std::vector<std::string> issuers;           // the authorization servers now
+    std::shared_ptr<const std::string> document;  // the metadata document now
+    std::map<TokenKey, std::shared_ptr<Flight>> flights;
+    std::map<TokenKey, Remembered> remembered;
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -445,6 +578,13 @@ const profile::Profile* Endpoint::Impl::governing(const Exchange& exchange, cons
 }
 
 Response Endpoint::Impl::answer_response(const Exchange& exchange, const Output& output) const {
+    if (output.refusal == RefusalReason::insufficient_scope && resource_server) {
+        // The session's line is not sent: the answer is the challenge to ask for the scopes, with the OAuth error.
+        Response response =
+            scope_response(output.required_scopes, exchange.authorization.get(), governing(exchange, &output));
+        if (exchange.announce) response.headers.add(exchange.announce->name, exchange.announce->value);
+        return response;
+    }
     const std::string_view why =
         output.refusal == RefusalReason::none ? reason::answered : refusal_reason(output.refusal);
     Response response = make_response(status(why, governing(exchange, &output)), json_media_type, output.line);
@@ -507,7 +647,7 @@ Endpoint::Impl::SessionClaim Endpoint::Impl::session_claim(const Headers& header
 // ---------------------------------------------------------------------------------------------------------------------
 // Requests
 
-void Endpoint::Impl::handle(Request request, Responder responder) {
+bool Endpoint::Impl::admitted(const Request& request, const Responder& responder) {
     std::shared_ptr<const HostPolicy> current;
     {
         std::lock_guard lock(mutex);
@@ -516,7 +656,7 @@ void Endpoint::Impl::handle(Request request, Responder responder) {
     if (stopping.load()) {
         refuse(responder, reason::stopping, nullptr, "Service unavailable: the server is stopping",
                error_code::internal_error);
-        return;
+        return false;
     }
     const PolicyVerdict verdict = current->check(request.headers);
     if (!verdict.allowed) {
@@ -524,20 +664,35 @@ void Endpoint::Impl::handle(Request request, Responder responder) {
         const bool origin_refused = origins.size() > 1 || (origins.size() == 1 && !current->origin_allowed(origins[0]));
         refuse(responder, origin_refused ? reason::origin_rejected : reason::host_rejected, nullptr,
                "Forbidden: " + verdict.reason);
+        return false;
+    }
+    return true;
+}
+
+void Endpoint::Impl::handle(Request request, Responder responder) {
+    if (!admitted(request, responder)) return;
+    if (request.method != post_method && request.method != get_method && request.method != delete_method) {
+        refuse(responder, reason::method_not_allowed, nullptr, "Method not allowed: " + request.method);
         return;
     }
+    if (resource_server) {
+        authorize(std::move(request), std::move(responder));
+        return;
+    }
+    dispatch(std::move(request), std::move(responder), nullptr);
+}
+
+void Endpoint::Impl::dispatch(Request request, Responder responder, std::shared_ptr<const Authorization> granted) {
     if (request.method == post_method) {
-        post(std::move(request), std::move(responder));
+        post(std::move(request), std::move(responder), std::move(granted));
     } else if (request.method == get_method) {
-        get(request, responder);
-    } else if (request.method == delete_method) {
-        remove(request, responder);
+        get(request, responder, granted);
     } else {
-        refuse(responder, reason::method_not_allowed, nullptr, "Method not allowed: " + request.method);
+        remove(request, responder, granted.get());
     }
 }
 
-void Endpoint::Impl::post(Request request, Responder responder) {
+void Endpoint::Impl::post(Request request, Responder responder, std::shared_ptr<const Authorization> granted) {
     const std::vector<std::string_view> types = request.headers.get_all(content_type_field);
     if (types.size() != 1 || !is_media_type(types.front(), json_type, json_subtype)) {
         refuse(responder, reason::unsupported_media_type, nullptr,
@@ -564,13 +719,13 @@ void Endpoint::Impl::post(Request request, Responder responder) {
     }
     std::shared_ptr<Entry> entry;
     if (claim.count == 1) {
-        entry = find(claim.id);
+        entry = find(claim.id, granted.get());
         if (!entry) {
             refuse(responder, reason::unknown_session, nullptr, "Not found: no such session");
             return;
         }
     } else {
-        auto opened = open_entry();
+        auto opened = open_entry(granted.get());
         if (const auto* why = std::get_if<std::string_view>(&opened)) {
             refuse(responder, *why, nullptr, "Service unavailable: no session can be served now",
                    error_code::internal_error);
@@ -579,7 +734,7 @@ void Endpoint::Impl::post(Request request, Responder responder) {
         entry = std::get<std::shared_ptr<Entry>>(std::move(opened));
     }
 
-    auto exchange = std::make_shared<Exchange>(next_unit.fetch_add(1), std::move(responder), entry, accept);
+    auto exchange = std::make_shared<Exchange>(next_unit.fetch_add(1), std::move(responder), entry, accept, granted);
     {
         std::unique_lock lock(entry->mutex);
         if (entry->closed.load()) {
@@ -602,10 +757,11 @@ void Endpoint::Impl::post(Request request, Responder responder) {
             const auto lost = weak.lock();
             if (impl && lost) impl->abandon(lost);
         });
-    feed(entry, Feed{exchange, std::move(request)});
+    feed(entry, Feed{exchange, std::move(request), std::move(granted)});
 }
 
-void Endpoint::Impl::get(const Request& request, const Responder& responder) {
+void Endpoint::Impl::get(const Request& request, const Responder& responder,
+                         const std::shared_ptr<const Authorization>& granted) {
     const SessionClaim claim = session_claim(request.headers);
     if (claim.count == 0) {
         refuse(responder, reason::get_stream_not_offered, nullptr, "Method not allowed: no stream without a session");
@@ -615,7 +771,7 @@ void Endpoint::Impl::get(const Request& request, const Responder& responder) {
         refuse(responder, reason::malformed_session_header, nullptr, "Bad request: more than one session id");
         return;
     }
-    const std::shared_ptr<Entry> entry = find(claim.id);
+    const std::shared_ptr<Entry> entry = find(claim.id, granted.get());
     if (!entry) {
         refuse(responder, reason::unknown_session, nullptr, "Not found: no such session");
         return;
@@ -660,10 +816,20 @@ void Endpoint::Impl::get(const Request& request, const Responder& responder) {
         const auto owner = weak.lock();
         if (impl && owner) impl->connection_closed(owner, raw);
     });
+    // The stream ends when the token that opened it expires; the client opens it again with its current token.
+    if (granted && granted->expires) {
+        timer.schedule(expiry_of(*granted), [self = weak_from_this(), weak = std::weak_ptr<Entry>(entry),
+                                             opened = std::weak_ptr<BodyStream>(stream)] {
+            const auto impl = self.lock();
+            const auto owner = weak.lock();
+            const auto expired = opened.lock();
+            if (impl && owner && expired) impl->expire_connection(owner, expired);
+        });
+    }
     if (!responder.complete(stream_response(nullptr, rules, stream))) stream->close();
 }
 
-void Endpoint::Impl::remove(const Request& request, const Responder& responder) {
+void Endpoint::Impl::remove(const Request& request, const Responder& responder, const Authorization* granted) {
     const SessionClaim claim = session_claim(request.headers);
     if (claim.count == 0) {
         refuse(responder, reason::delete_not_allowed, nullptr, "Method not allowed: no session to end");
@@ -673,7 +839,7 @@ void Endpoint::Impl::remove(const Request& request, const Responder& responder) 
         refuse(responder, reason::malformed_session_header, nullptr, "Bad request: more than one session id");
         return;
     }
-    const std::shared_ptr<Entry> entry = find(claim.id);
+    const std::shared_ptr<Entry> entry = find(claim.id, granted);
     if (!entry) {
         refuse(responder, reason::unknown_session, nullptr, "Not found: no such session");
         return;
@@ -716,8 +882,10 @@ void Endpoint::Impl::remove(const Request& request, const Responder& responder) 
 // ---------------------------------------------------------------------------------------------------------------------
 // Sessions
 
-std::variant<std::shared_ptr<Endpoint::Impl::Entry>, std::string_view> Endpoint::Impl::open_entry() {
+std::variant<std::shared_ptr<Endpoint::Impl::Entry>, std::string_view> Endpoint::Impl::open_entry(
+    const Authorization* opener) {
     auto entry = std::make_shared<Entry>();
+    if (opener != nullptr) entry->owner = principal_of(*opener);
     {
         std::lock_guard lock(mutex);
         if (stopping.load()) return reason::stopping;
@@ -788,10 +956,14 @@ std::variant<std::string, std::string_view> Endpoint::Impl::keep_entry(const std
     return std::move(*id);
 }
 
-std::shared_ptr<Endpoint::Impl::Entry> Endpoint::Impl::find(std::string_view id) {
+std::shared_ptr<Endpoint::Impl::Entry> Endpoint::Impl::find(std::string_view id, const Authorization* asker) {
+    const std::optional<PrincipalKey> principal =
+        asker != nullptr ? std::optional<PrincipalKey>(principal_of(*asker)) : std::nullopt;
     std::lock_guard lock(mutex);
     const auto found = by_id.find(id);
     if (found == by_id.end()) return nullptr;
+    // Another principal's session is not there for this one, and is not used by its request.
+    if (found->second->owner != principal) return nullptr;
     // From its first request after the handshake on, a session never gives its place to a newcomer. Constant work:
     // only that first request takes it off the list.
     Entry& entry = *found->second;
@@ -881,7 +1053,8 @@ void Endpoint::Impl::feed_one(const std::shared_ptr<Entry>& entry, const std::sh
     bool awaits = false;
     std::optional<std::string_view> refused;
     try {
-        awaits = session->receive(exchange->unit, input.request.body, fields);
+        if (observe_feed) observe_feed(fields, input.authorization.get());
+        awaits = session->receive(exchange->unit, input.request.body, fields, input.authorization);
     } catch (...) {
         refused = reason::defect;  // the session's sink does not throw, and every unit number is new
     }
@@ -1080,6 +1253,10 @@ void Endpoint::Impl::open_stream(Exchange& exchange) {
 
 void Endpoint::Impl::decide(Exchange& exchange, Output output) {
     if (exchange.phase == Phase::done) return;
+    if (output.long_lived && !exchange.long_lived) {
+        exchange.long_lived = true;
+        schedule_expiry(exchange);
+    }
     if (exchange.phase == Phase::waiting) {
         if (output.last) {
             exchange.phase = Phase::done;
@@ -1206,6 +1383,8 @@ void Endpoint::Impl::release(const std::shared_ptr<Exchange>& exchange) {
         exchange->released = true;
         if (exchange->timer != 0) timer.cancel(exchange->timer);
         exchange->timer = 0;
+        if (exchange->expiry_timer != 0) timer.cancel(exchange->expiry_timer);
+        exchange->expiry_timer = 0;
     }
     const std::shared_ptr<Entry>& entry = exchange->entry;
     std::shared_ptr<Session> finished;
@@ -1227,6 +1406,323 @@ void Endpoint::Impl::release(const std::shared_ptr<Exchange>& exchange) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The gate (with authorization)
+
+namespace {
+
+// The reply a validator is handed. Its copies share one of these: the first answer settles the flight, and when the
+// last copy goes without an answer the flight is settled as `unavailable`, on the endpoint's timer rather than on
+// whichever thread let the reply go.
+template <class Impl, class Key, class Flight>
+struct ReplyGuard {
+    ReplyGuard(std::weak_ptr<Impl> owner, Key token, std::weak_ptr<Flight> waiting)
+        : impl(std::move(owner)), key(token), flight(std::move(waiting)) {}
+    ReplyGuard(const ReplyGuard&) = delete;
+    ReplyGuard& operator=(const ReplyGuard&) = delete;
+    ~ReplyGuard() {
+        if (answered.load()) return;
+        const auto endpoint = impl.lock();
+        if (!endpoint) return;
+        try {
+            endpoint->timer.schedule(Clock::now(), [weak = impl, token = key, waiting = flight] {
+                const auto later = weak.lock();
+                const auto due = waiting.lock();
+                if (later && due) later->settle(token, due, TokenVerdict{TokenRefusal::unavailable});
+            });
+        } catch (...) {
+            // Nothing can be scheduled: the validation timeout settles the flight.
+        }
+    }
+
+    void answer(TokenVerdict verdict) {
+        if (answered.exchange(true)) return;
+        const auto endpoint = impl.lock();
+        const auto due = flight.lock();
+        if (endpoint && due) endpoint->settle(key, due, std::move(verdict));
+    }
+
+    const std::weak_ptr<Impl> impl;
+    const Key key;
+    const std::weak_ptr<Flight> flight;
+    std::atomic<bool> answered{false};
+};
+
+}  // namespace
+
+void Endpoint::Impl::authorize(Request request, Responder responder) {
+    const detail::ResourceServerConfig& config = *resource_server;
+    auto credentials =
+        read_bearer_credentials(request.headers, CredentialsLimits{config.options.bounds.max_token_bytes});
+    // Nothing after the gate sees the field: the session gets what was validated instead.
+    request.headers.remove(authorization_field_name);
+    if (const auto* problem = std::get_if<CredentialsProblem>(&credentials)) {
+        switch (*problem) {
+            case CredentialsProblem::absent:
+            case CredentialsProblem::other_scheme:
+                responder.complete(
+                    challenge_response(reason::no_token, nullptr, config.no_credentials_challenge, std::nullopt));
+                return;
+            case CredentialsProblem::token_too_large:
+                responder.complete(challenge_response(reason::invalid_token, nullptr, config.invalid_token_challenge,
+                                                      bearer_error_invalid_token));
+                return;
+            case CredentialsProblem::repeated:
+            case CredentialsProblem::malformed: break;
+        }
+        responder.complete(challenge_response(reason::unreadable_credentials, nullptr,
+                                              config.invalid_request_challenge, bearer_error_invalid_request));
+        return;
+    }
+    std::string token = std::move(std::get<BearerCredentials>(credentials).token);
+    const TokenKey key{neomcp::detail::sha256(token), token.size()};
+
+    std::optional<Verdict> known;
+    std::shared_ptr<Flight> flight;
+    bool stopped = false;
+    {
+        std::lock_guard lock(gate_mutex);
+        const auto flying = flights.find(key);
+        if (gate_stopped) {
+            stopped = true;
+        } else if (flying != flights.end()) {
+            // Validated now, or its waiters are being handed on: this request waits behind them.
+            flying->second->waiters.push_back(Waiter{std::move(request), std::move(responder)});
+        } else {
+            const SystemClock::time_point now = config.now();
+            if (const auto found = remembered.find(key); found != remembered.end()) {
+                if (now < found->second.until) {
+                    known = judge(found->second.granted, now);
+                } else {
+                    remembered.erase(found);
+                }
+            }
+            if (!known) {
+                if (flights.size() >= config.options.bounds.max_pending_validations) {
+                    known = Verdict{Verdict::Kind::unavailable, nullptr};
+                } else {
+                    flight = std::make_shared<Flight>();
+                    flight->waiters.push_back(Waiter{std::move(request), std::move(responder)});
+                    flights.emplace(key, flight);
+                }
+            }
+        }
+    }
+    if (flight) validate(key, flight, token);
+    neomcp::detail::wipe(token.data(), token.size());
+    if (stopped) {
+        refuse(responder, reason::stopping, nullptr, "Service unavailable: the server is stopping",
+               error_code::internal_error);
+    } else if (known) {
+        deliver(Waiter{std::move(request), std::move(responder)}, *known);
+    }
+}
+
+void Endpoint::Impl::validate(const TokenKey& key, const std::shared_ptr<Flight>& flight, std::string& token) {
+    const detail::ResourceServerConfig& config = *resource_server;
+    const Timer::Id timeout = timer.schedule(
+        Clock::now() + config.options.bounds.validation_timeout,
+        [self = weak_from_this(), key, waiting = std::weak_ptr<Flight>(flight)] {
+            const auto impl = self.lock();
+            const auto due = waiting.lock();
+            if (impl && due) impl->settle(key, due, TokenVerdict{TokenRefusal::unavailable});
+        });
+    {
+        std::lock_guard lock(gate_mutex);
+        if (!flight->settled) flight->timer = timeout;
+    }
+    using Guard = ReplyGuard<Impl, TokenKey, Flight>;
+    auto guard = std::make_shared<Guard>(weak_from_this(), key, std::weak_ptr<Flight>(flight));
+    TokenReply reply = [guard](TokenVerdict verdict) { guard->answer(std::move(verdict)); };
+    guard.reset();
+    try {
+        config.options.validator->validate(TokenCheck{token, config.options.resource}, reply);
+    } catch (...) {
+        reply(TokenVerdict{TokenRefusal::unavailable});
+    }
+}
+
+Endpoint::Impl::Verdict Endpoint::Impl::judge(const std::shared_ptr<const Authorization>& granted,
+                                              SystemClock::time_point now) const {
+    if (!granted) return Verdict{Verdict::Kind::invalid, nullptr};
+    if (detail::check_token(*granted, *resource_server, issuers, now) != detail::TokenProblem::none) {
+        return Verdict{Verdict::Kind::invalid, nullptr};
+    }
+    return Verdict{Verdict::Kind::valid, granted};
+}
+
+void Endpoint::Impl::settle(const TokenKey& key, const std::shared_ptr<Flight>& flight, TokenVerdict reported) {
+    const ResourceServerBounds& bounds = resource_server->options.bounds;
+    std::shared_ptr<const Authorization> granted;
+    bool unavailable = false;
+    if (auto* found = std::get_if<Authorization>(&reported)) {
+        granted = std::make_shared<const Authorization>(std::move(*found));
+    } else {
+        unavailable = std::get<TokenRefusal>(reported) == TokenRefusal::unavailable;
+    }
+
+    std::unique_lock lock(gate_mutex);
+    if (flight->settled) return;  // the timeout came first, or stop(); this answer is dropped
+    flight->settled = true;
+    if (flight->timer != 0) timer.cancel(flight->timer);
+    flight->timer = 0;
+    const SystemClock::time_point now = resource_server->now();
+    const Verdict verdict = unavailable ? Verdict{Verdict::Kind::unavailable, nullptr} : judge(granted, now);
+    // A valid verdict is remembered until the token expires or for max_cache_age, whichever comes first; an invalid one
+    // for negative_cache_age; one that could not be had, never.
+    std::optional<SystemClock::time_point> until;
+    if (verdict.kind == Verdict::Kind::valid && bounds.max_cache_age > std::chrono::seconds::zero()) {
+        until = (std::min)(saturating_add(*granted->expires, bounds.leeway), now + bounds.max_cache_age);
+    } else if (verdict.kind == Verdict::Kind::invalid && bounds.negative_cache_age > std::chrono::seconds::zero()) {
+        until = now + bounds.negative_cache_age;
+    }
+    // The waiters go on in the order they arrived; one that arrives meanwhile joins the end.
+    while (!flight->waiters.empty()) {
+        Waiter next = std::move(flight->waiters.front());
+        flight->waiters.pop_front();
+        lock.unlock();
+        deliver(std::move(next), verdict);
+        lock.lock();
+    }
+    const auto found = flights.find(key);
+    if (found != flights.end() && found->second == flight) flights.erase(found);
+    if (until && !gate_stopped) remember(key, verdict.granted, *until, now);
+}
+
+void Endpoint::Impl::remember(const TokenKey& key, std::shared_ptr<const Authorization> granted,
+                              SystemClock::time_point until, SystemClock::time_point now) {
+    const std::size_t capacity = resource_server->options.bounds.max_cache_entries;
+    if (capacity == 0) return;
+    if (remembered.size() >= capacity && remembered.find(key) == remembered.end()) {
+        for (auto at = remembered.begin(); at != remembered.end();) {
+            at = at->second.until <= now ? remembered.erase(at) : std::next(at);
+        }
+        if (remembered.size() >= capacity) {
+            const auto nearest = std::min_element(remembered.begin(), remembered.end(), [](const auto& a, const auto& b) {
+                return a.second.until < b.second.until;
+            });
+            remembered.erase(nearest);
+        }
+    }
+    remembered.insert_or_assign(key, Remembered{std::move(granted), until});
+}
+
+void Endpoint::Impl::deliver(Waiter waiter, const Verdict& verdict) {
+    if (waiter.responder.completed()) return;  // the client left while it waited
+    const detail::ResourceServerConfig& config = *resource_server;
+    switch (verdict.kind) {
+        case Verdict::Kind::unavailable:
+            refuse(waiter.responder, reason::token_unavailable, nullptr,
+                   "Service unavailable: the access token cannot be validated now", error_code::internal_error);
+            return;
+        case Verdict::Kind::invalid:
+            waiter.responder.complete(challenge_response(reason::invalid_token, nullptr, config.invalid_token_challenge,
+                                                         bearer_error_invalid_token));
+            return;
+        case Verdict::Kind::valid: break;
+    }
+    // What every request needs, before anything of the request is read.
+    const std::vector<std::string> missing =
+        missing_scopes(verdict.granted->scopes, config.options.required_scopes, implications);
+    if (!missing.empty()) {
+        waiter.responder.complete(scope_response(missing, verdict.granted.get(), nullptr));
+        return;
+    }
+    dispatch(std::move(waiter.request), std::move(waiter.responder), verdict.granted);
+}
+
+Response Endpoint::Impl::challenge_response(std::string_view why, const profile::Profile* governing,
+                                            std::string challenge, std::optional<std::string_view> error) const {
+    Response response;
+    if (error) {
+        json body = json::object();
+        body[std::string(oauth_error_member)] = std::string(*error);
+        response = make_response(status(why, governing), json_media_type, serialize(body));
+    } else {
+        response = make_response(status(why, governing));
+    }
+    response.headers.add(std::string(www_authenticate_field_name), std::move(challenge));
+    response.headers.add(std::string(cache_control_field), std::string(no_store));
+    return response;
+}
+
+Response Endpoint::Impl::scope_response(std::span<const std::string> missing, const Authorization* granted,
+                                        const profile::Profile* governing) const {
+    const detail::ResourceServerConfig& config = *resource_server;
+    std::vector<std::string> scopes = detail::challenge_scopes(
+        missing, config, granted != nullptr ? std::span<const std::string>(granted->scopes) : std::span<const std::string>());
+    auto written = write_bearer_challenge(BearerChallengeParts{config.metadata_url, std::move(scopes),
+                                                               std::string(bearer_error_insufficient_scope),
+                                                               std::nullopt});
+    auto* challenge = std::get_if<std::string>(&written);
+    if (challenge == nullptr) {
+        return refusal(reason::defect, nullptr, "Internal error: the scopes to ask for cannot be written",
+                       error_code::internal_error);
+    }
+    return challenge_response(to_string(RefusalReason::insufficient_scope), governing, std::move(*challenge),
+                              bearer_error_insufficient_scope);
+}
+
+Clock::time_point Endpoint::Impl::expiry_of(const Authorization& granted) const {
+    const SystemClock::time_point end = saturating_add(*granted.expires, resource_server->options.bounds.leeway);
+    const SystemClock::time_point now = resource_server->now();
+    return steady_after(end > now ? end - now : SystemClock::duration::zero());
+}
+
+void Endpoint::Impl::schedule_expiry(Exchange& exchange) {
+    if (!resource_server || !exchange.authorization || !exchange.authorization->expires) return;
+    exchange.expiry_timer = timer.schedule(expiry_of(*exchange.authorization),
+                                           [self = weak_from_this(), weak = exchange.weak_from_this()] {
+                                               const auto impl = self.lock();
+                                               const auto due = weak.lock();
+                                               if (impl && due) impl->expire_exchange(due);
+                                           });
+}
+
+void Endpoint::Impl::expire_exchange(const std::shared_ptr<Exchange>& exchange) {
+    std::unique_lock lock(exchange->mutex);
+    exchange->expiry_timer = 0;
+    if (exchange->released || exchange->abandoned || exchange->phase != Phase::streaming) return;
+    // The subscription ends with its token: the session lets the unit go, and the stream ends, which tells the client
+    // to open it again with its current token.
+    exchange->abandoned = true;
+    exchange->phase = Phase::done;
+    exchange->steps.push_back(Step{Step::Kind::abandon_unit, {}, nullptr, {}, false});
+    exchange->steps.push_back(Step{Step::Kind::end_stream, {}, exchange->stream, {}, false});
+    exchange->steps.push_back(Step{Step::Kind::release, {}, nullptr, {}, false});
+    run_steps(lock, exchange);
+}
+
+void Endpoint::Impl::expire_connection(const std::shared_ptr<Entry>& entry, const std::shared_ptr<BodyStream>& stream) {
+    {
+        std::lock_guard lock(entry->mutex);
+        if (entry->connection_stream != stream) return;  // closed already, or another one
+        entry->connection_stream.reset();
+        deactivate(*entry);
+    }
+    stream->end();
+}
+
+void Endpoint::Impl::serve_metadata(const Request& request, const Responder& responder) {
+    if (!admitted(request, responder)) return;
+    if (request.method != get_method && request.method != head_method) {
+        Response response = refusal(reason::method_not_allowed, nullptr, "Method not allowed: " + request.method);
+        response.headers.set(std::string(allow_field), std::string(document_methods));
+        responder.complete(std::move(response));
+        return;
+    }
+    std::shared_ptr<const std::string> current;
+    {
+        std::lock_guard lock(gate_mutex);
+        current = document;
+    }
+    Response response = make_response(status(reason::answered, nullptr), json_media_type, *current);
+    response.headers.add(std::string(cache_control_field),
+                         std::string(max_age_directive) +
+                             std::to_string(resource_server->options.bounds.metadata_max_age.count()));
+    responder.complete(std::move(response));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Stopping
 
 void Endpoint::Impl::stop() noexcept {
@@ -1241,6 +1737,27 @@ void Endpoint::Impl::stop() noexcept {
         // The timer's jobs are dropped below; a job that runs meanwhile finds `stopping` and leaves.
         for (const auto& listed : unused) listed->unused_place.reset();
         unused.clear();
+    }
+    // The requests waiting for a verdict are answered 503, and a verdict that comes later finds its flight settled.
+    // A request that arrives from now on finds the gate stopped.
+    std::vector<Waiter> waiting;
+    {
+        std::lock_guard lock(gate_mutex);
+        gate_stopped = true;
+        for (auto& item : flights) {
+            item.second->settled = true;
+            for (Waiter& waiter : item.second->waiters) waiting.push_back(std::move(waiter));
+            item.second->waiters.clear();
+        }
+        flights.clear();
+        remembered.clear();
+    }
+    for (const Waiter& waiter : waiting) {
+        try {
+            refuse(waiter.responder, reason::stopping, nullptr, "Service unavailable: the server is stopping",
+                   error_code::internal_error);
+        } catch (...) {
+        }
     }
     for (const auto& entry : entries) {
         std::shared_ptr<Session> session;
@@ -1278,6 +1795,11 @@ void Endpoint::Impl::stop() noexcept {
 // The public handle
 
 Outcome<std::unique_ptr<Endpoint>> Endpoint::create(Server& server, HostPolicy policy, EndpointOptions options) {
+    return detail::EndpointProbe::create(server, std::move(policy), std::move(options), {});
+}
+
+Outcome<std::unique_ptr<Endpoint>> detail::EndpointProbe::create(Server& server, HostPolicy policy,
+                                                                 EndpointOptions options, FeedObserver observer) {
     using Result = Outcome<std::unique_ptr<Endpoint>>;
     if (options.max_sessions < 1) return Result::failure("max_sessions must be at least 1");
     if (options.session_idle_timeout <= std::chrono::milliseconds::zero()) {
@@ -1293,6 +1815,16 @@ Outcome<std::unique_ptr<Endpoint>> Endpoint::create(Server& server, HostPolicy p
             return Result::failure("the library has no status for the reason '" + std::string(name) + "'");
         }
     }
+    std::unique_ptr<const ResourceServerConfig> gate;
+    std::shared_ptr<const std::string> metadata;
+    if (options.authorization) {
+        auto configured = configure(*options.authorization);
+        if (!configured) return Result::failure("authorization: " + configured.error);
+        auto document = metadata_document(*configured.value, configured.value->options.authorization_servers);
+        if (!document) return Result::failure("authorization: " + document.error);
+        metadata = std::make_shared<const std::string>(std::move(*document.value));
+        gate = std::make_unique<const ResourceServerConfig>(std::move(*configured.value));
+    }
 
     // Which revisions are served on this transport: a session made to find out says.
     auto probe = server.connect_tagged(profile::Transport::streamable_http, [](Output) {});
@@ -1304,7 +1836,8 @@ Outcome<std::unique_ptr<Endpoint>> Endpoint::create(Server& server, HostPolicy p
     session->close();
 
     try {
-        auto impl = std::make_shared<Impl>(server, std::move(policy), options, std::move(profiles));
+        auto impl = std::make_shared<Endpoint::Impl>(server, std::move(policy), std::move(options), std::move(profiles),
+                                                     std::move(gate), std::move(metadata), std::move(observer));
         return Result::success(std::unique_ptr<Endpoint>(new Endpoint(std::move(impl))));
     } catch (const std::system_error& error) {
         return Result::failure(std::string("cannot start the endpoint's timer thread: ") + error.what());
@@ -1330,6 +1863,30 @@ void Endpoint::set_policy(HostPolicy policy) {
 }
 
 void Endpoint::stop() noexcept { impl_->stop(); }
+
+Handler Endpoint::metadata_handler() {
+    if (!impl_->resource_server) return {};
+    return [impl = impl_](Request request, Responder responder) { impl->serve_metadata(request, responder); };
+}
+
+std::optional<std::string> Endpoint::metadata_path() const {
+    if (!impl_->resource_server) return std::nullopt;
+    return impl_->resource_server->metadata_path;
+}
+
+Outcome<bool> Endpoint::update_authorization_servers(std::vector<std::string> issuers) {
+    if (!impl_->resource_server) return Outcome<bool>::failure("the endpoint has no authorization");
+    if (std::string problem = detail::check_authorization_servers(issuers); !problem.empty()) {
+        return Outcome<bool>::failure(problem);
+    }
+    auto document = detail::metadata_document(*impl_->resource_server, issuers);
+    if (!document) return Outcome<bool>::failure(document.error);
+    auto replacement = std::make_shared<const std::string>(std::move(*document.value));
+    std::lock_guard lock(impl_->gate_mutex);
+    impl_->issuers = std::move(issuers);
+    impl_->document = std::move(replacement);
+    return Outcome<bool>::success(true);
+}
 
 std::size_t Endpoint::session_count() const {
     std::lock_guard lock(impl_->mutex);

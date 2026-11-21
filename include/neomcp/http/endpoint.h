@@ -41,18 +41,28 @@
 // Later requests that name an ended session are answered 404, which tells a client to open a new one. Requests of one
 // session may arrive on many threads; the endpoint feeds them to the session one at a time.
 //
+// Authorization: with EndpointOptions::authorization set, the endpoint is an OAuth protected resource. Between the
+// method check (step 2, for any other method than POST, GET and DELETE) and the rest, every request needs a valid
+// Bearer token, and a session belongs to the principal of the request that opened it; neomcp/http/resource_server.h
+// says what is checked and answered. The metadata document is served by metadata_handler(), on metadata_path().
+//
 // Threads: the endpoint has one thread of its own, which runs its deadlines. It never holds a lock while it calls
-// into a session, a responder or a stream.
+// into a session, a responder, a stream or a validator. A request whose token is being validated goes on on the
+// thread that brings the verdict.
 #pragma once
 
 #include <chrono>
 #include <cstddef>
 #include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
 #include "neomcp/http/body_stream.h"
 #include "neomcp/http/message.h"
 #include "neomcp/http/outcome.h"
 #include "neomcp/http/policy.h"
+#include "neomcp/http/resource_server.h"
 
 namespace neomcp {
 class Server;
@@ -85,13 +95,21 @@ struct EndpointOptions {
     // The bytes an event stream holds for a reader that is slower than the server (see BodyStream). A notification
     // that does not fit is dropped; an answer that does not fit ends the stream and abandons the request. At least 1.
     std::size_t max_stream_buffer_bytes = BodyStream::default_max_buffered_bytes;
+
+    // When set, the endpoint is an OAuth protected resource (see neomcp/http/resource_server.h). Empty: no request
+    // needs a token, and none is read.
+    std::optional<ResourceServerOptions> authorization{};
 };
+
+namespace detail {
+struct EndpointProbe;
+}  // namespace detail
 
 class Endpoint {
 public:
-    // Fails, with a message, when an option is out of range or a session of the server cannot be served on Streamable
-    // HTTP (no enabled revision defines the transport, or a mechanism has no implementation). The server must outlive
-    // the endpoint. Creating it ends the registration of the server's tools.
+    // Fails, with a message, when an option is out of range (the authorization's included) or a session of the
+    // server cannot be served on Streamable HTTP (no enabled revision defines the transport, or a mechanism has no
+    // implementation). The server must outlive the endpoint. Creating it ends the registration of the server's tools.
     static Outcome<std::unique_ptr<Endpoint>> create(Server& server, HostPolicy policy, EndpointOptions options = {});
 
     // Calls stop().
@@ -109,6 +127,17 @@ public:
     // its port only once it serves).
     void set_policy(HostPolicy policy);
 
+    // With authorization: the handler of the protected resource metadata document (GET and HEAD, under the same Host
+    // and Origin policy, no token needed; another method is answered 405), and the path to serve it on. Without: an
+    // empty handler and no path. The endpoint must outlive every use of the handler.
+    Handler metadata_handler();
+    std::optional<std::string> metadata_path() const;
+
+    // Replaces the authorization servers named in the metadata document, checked as at creation; from now on only
+    // tokens of these issuers are accepted. Fails without authorization, or for a list that cannot be used (and then
+    // nothing changes).
+    Outcome<bool> update_authorization_servers(std::vector<std::string> issuers);
+
     // Closes every session and every stream: requests waiting for an answer are answered 503, an open subscription
     // ends gracefully (its stream gets the end and then ends), the other open streams are cut, and a request that
     // arrives from now on is answered 503. Returns without waiting for anything a client does. Idempotent. Must not be
@@ -119,6 +148,7 @@ public:
     std::size_t session_count() const;
 
 private:
+    friend struct detail::EndpointProbe;  // the tests' view of what the endpoint gives its sessions
     struct Impl;
     explicit Endpoint(std::shared_ptr<Impl> impl);
     std::shared_ptr<Impl> impl_;

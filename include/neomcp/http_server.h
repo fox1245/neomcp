@@ -18,6 +18,11 @@
 // and one beyond that is closed. So max_worker_threads bounds the requests in progress plus the open streams (a
 // client of a session-based revision usually keeps one stream open, besides its requests). A request also holds its
 // worker while it arrives: its body within body_timeout.
+//
+// Authorization. With `authorization` set, the server is an OAuth protected resource (neomcp/http/resource_server.h):
+// every request to `path` needs a valid Bearer token, and the protected resource metadata document is served on its
+// own path. A server whose tools, resources, templates or prompts declare scopes does not start without it, so that a
+// forgotten option cannot leave a protected item open.
 #pragma once
 
 #include <chrono>
@@ -25,6 +30,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -32,6 +38,7 @@
 #include "neomcp/http/listener.h"
 #include "neomcp/http/outcome.h"
 #include "neomcp/http/policy.h"
+#include "neomcp/http/resource_server.h"
 #include "neomcp/server.h"
 
 namespace neomcp {
@@ -53,6 +60,12 @@ struct HttpServerOptions {
 
     // Sessions and streams.
     http::EndpointOptions endpoint{};
+
+    // When set, every request needs a valid access token (see neomcp/http/resource_server.h); start() checks the
+    // options, and fails when endpoint.authorization is set as well, when bounds.max_token_bytes is more than the
+    // listener lets through (http::ResourceServerDefaults::max_token_bytes), or when the host of `resource` does not
+    // pass the Host check (every request would be refused). Empty: no token is needed or read.
+    std::optional<http::ResourceServerOptions> authorization{};
 
     // The listener (see http::ListenerOptions). The body bound is the server's max_message_bytes.
     std::size_t worker_threads = http::ListenerDefaults::worker_threads;
@@ -84,8 +97,13 @@ public:
 
     // Binds, starts serving and returns the bound port, or why it could not: an option out of range, an address or
     // port that cannot be bound, a Host check that cannot be built (a non-loopback address without allowed_hosts),
-    // or revisions that cannot be served on Streamable HTTP. Starts once; a second call fails.
+    // revisions that cannot be served on Streamable HTTP, authorization that cannot be served (see `authorization`),
+    // or items that declare scopes without authorization. Starts once; a second call fails.
     http::Outcome<std::uint16_t> start();
+
+    // Replaces the authorization servers (see http::Endpoint::update_authorization_servers). Fails before start(),
+    // without authorization, or for a list that cannot be used.
+    http::Outcome<bool> update_authorization_servers(std::vector<std::string> issuers);
 
     // Closes every session and stream (an open subscription ends gracefully, and its end is written out within the
     // write timeout), stops listening and returns when the listener's threads have left (within about the read and

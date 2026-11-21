@@ -326,6 +326,20 @@ target_include_directories(neomcp_http_endpoint_test PRIVATE "${CMAKE_CURRENT_SO
 neomcp_configure_target(neomcp_http_endpoint_test)
 gtest_discover_tests(neomcp_http_endpoint_test DISCOVERY_TIMEOUT 120)
 
+# The endpoint as an OAuth protected resource: over sockets, and through its handler for the order of the requests that
+# wait for one validation. Both reach the endpoint's internal view of what it feeds its sessions.
+add_executable(neomcp_http_resource_server_test http_resource_server_test.cpp)
+target_link_libraries(neomcp_http_resource_server_test PRIVATE neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)
+target_include_directories(neomcp_http_resource_server_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+neomcp_configure_target(neomcp_http_resource_server_test)
+gtest_discover_tests(neomcp_http_resource_server_test DISCOVERY_TIMEOUT 120)
+
+add_executable(neomcp_http_resource_server_flight_test http_resource_server_flight_test.cpp)
+target_link_libraries(neomcp_http_resource_server_flight_test PRIVATE neomcp::http GTest::gtest_main Threads::Threads)
+target_include_directories(neomcp_http_resource_server_flight_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+neomcp_configure_target(neomcp_http_resource_server_flight_test)
+gtest_discover_tests(neomcp_http_resource_server_flight_test DISCOVERY_TIMEOUT 120)
+
 # A tool call whose argument a schema `pattern` checks, next to another client's request, on a listener with one worker.
 add_executable(neomcp_http_pattern_check_test http_pattern_check_test.cpp)
 target_link_libraries(neomcp_http_pattern_check_test PRIVATE neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)

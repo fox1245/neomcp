@@ -128,6 +128,10 @@ static_assert(std::string_view(CPPHTTPLIB_VERSION) == std::string_view(NEOMCP_HT
               "src/http/listener.cpp with httplib::Server::process_and_close_socket of the new version, then set "
               "NEOMCP_HTTPLIB_VERSION in cmake/NeomcpHttplib.cmake to it");
 
+// What the listener says about the header lines it reads is what the library reads.
+static_assert(ListenerDefaults::max_header_line_bytes == CPPHTTPLIB_HEADER_MAX_LENGTH,
+              "the HTTP library reads header lines of another length than ListenerDefaults::max_header_line_bytes");
+
 class DeadlineServer final : public httplib::Server {
 public:
     explicit DeadlineServer(const std::atomic<bool>& closing) : closing_(closing) {}
