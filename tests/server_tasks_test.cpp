@@ -797,7 +797,11 @@ TEST(ServerTasksTest, CancelRacingCompletionEndsTheTaskOnce) {
     };
     std::vector<Round> rounds;
     {
-        neomcp::Server server(options_with(store));
+        // The rounds start faster than a slow machine finishes them: room in the queue of calls for all of them, so
+        // none is refused as busy.
+        neomcp::ServerOptions options = options_with(store);
+        options.max_pending_calls = round_count;
+        neomcp::Server server(std::move(options));
         server.tool("quick", "Answers at once", [] { return std::string("quick"); })
             .task_support(neomcp::TaskSupport::optional);
         TaskingHost host(server, neomcp::TaskStart{});
