@@ -517,18 +517,23 @@ TEST(ClientHttp, ARedirectToAUrlWithUserInformationIsNotFollowed) {
 
 // ---- Authorization
 
+// Gives a fixed value and fails every refusal, recording what it is told (on the io thread; read after close).
 class RecordingAuthorizer final : public neomcp::HttpAuthorizer {
 public:
     explicit RecordingAuthorizer(std::string value) : value_(std::move(value)) {}
-    std::string authorization(const neomcp::HttpRequestInfo& request) override {
+    neomcp::Credential authorization(const neomcp::HttpRequestInfo& request) override {
         asked.push_back(request);
-        return value_;
+        return neomcp::Credential{value_, 0};
     }
-    void challenge(const neomcp::HttpRequestInfo& request, int status,
-                   std::span<const std::string> challenges) override {
+    void challenge(const neomcp::HttpRequestInfo& request, int status, std::span<const std::string> challenges,
+                   std::uint64_t, neomcp::ChallengeReply reply) override {
         challenged.push_back(request);
         statuses.push_back(status);
         seen.assign(challenges.begin(), challenges.end());
+        neomcp::ClientError error;
+        error.kind = neomcp::ClientErrorKind::authorization_required;
+        error.message = "no other credentials";
+        reply.fail(std::move(error));
     }
     std::vector<neomcp::HttpRequestInfo> asked;
     std::vector<neomcp::HttpRequestInfo> challenged;
@@ -597,7 +602,15 @@ TEST(ClientHttp, ARefusalForWantOfAuthorizationIsToldToTheAuthorizer) {
         Driven driven(described);
         driven.post(1, ping_line);
         const auto seen = driven.recorder().until_end(1);
-        EXPECT_EQ(head_of(seen)->status, status);
+        // Held while the authorizer decides, then ended with its failure; the refusal's head is not told as an answer.
+        EXPECT_FALSE(head_of(seen));
+        const auto holds = events_of<neomcp::AuthorizationHold>(seen);
+        ASSERT_EQ(holds.size(), 1u);
+        EXPECT_TRUE(holds.front().begin);
+        const auto denied = events_of<neomcp::AuthorizationDenied>(seen);
+        ASSERT_EQ(denied.size(), 1u);
+        EXPECT_EQ(denied.front().status, status);
+        EXPECT_EQ(denied.front().failure.kind, neomcp::CallFailureKind::authorization_required);
         driven.close();
         ASSERT_EQ(authorizer->statuses, std::vector<int>{status});
         EXPECT_EQ(authorizer->seen,

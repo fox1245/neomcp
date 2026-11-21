@@ -22,6 +22,7 @@
 #include <asio/post.hpp>
 #include <asio/use_future.hpp>
 
+#include "client_http/http_sse.h"
 #include "client_http/streamable.h"
 #include "neomcp/client/engine.h"
 #include "neomcp/client/transport.h"
@@ -108,8 +109,8 @@ public:
         return changed_.wait_for(lock, bound, [&] { return done(seen_); });
     }
 
-    // Waits until a unit's exchange ended (StreamEnded, StreamLost or SendFailed) or received a message, and returns
-    // what the unit received.
+    // Waits until a unit's exchange ended (StreamEnded, StreamLost, SendFailed or AuthorizationDenied), and returns what
+    // the unit received.
     std::vector<Delivered> until_end(neomcp::UnitId unit) const {
         wait([&](const std::vector<Delivered>& seen) {
             for (const auto& one : seen) {
@@ -117,13 +118,27 @@ public:
                 if (event == nullptr || event->unit != unit) continue;
                 if (std::holds_alternative<neomcp::StreamEnded>(event->event) ||
                     std::holds_alternative<neomcp::StreamLost>(event->event) ||
-                    std::holds_alternative<neomcp::SendFailed>(event->event)) {
+                    std::holds_alternative<neomcp::SendFailed>(event->event) ||
+                    std::holds_alternative<neomcp::AuthorizationDenied>(event->event)) {
                     return true;
                 }
             }
             return false;
         });
         return of(unit);
+    }
+
+    // Waits until `unit` was told `count` events of type E; whether it was within the bound.
+    template <class E>
+    bool until_count(neomcp::UnitId unit, std::size_t count) const {
+        return wait([&](const std::vector<Delivered>& seen) {
+            std::size_t found = 0;
+            for (const auto& one : seen) {
+                const auto* event = std::get_if<Event>(&one);
+                if (event != nullptr && event->unit == unit && std::holds_alternative<E>(event->event)) ++found;
+            }
+            return found >= count;
+        });
     }
 
 private:
@@ -172,12 +187,19 @@ inline neomcp::HttpEndpoint endpoint(std::string url) {
     return endpoint;
 }
 
+// Which transport a Driven makes.
+enum class Kind { streamable, events };
+
 // A transport made, started and driven on the io thread, with its events recorded.
 class Driven {
 public:
-    explicit Driven(neomcp::HttpEndpoint endpoint, neomcp::detail::http_client::HttpTransportSettings settings = {})
+    explicit Driven(neomcp::HttpEndpoint endpoint, neomcp::detail::http_client::HttpTransportSettings settings = {},
+                    Kind kind = Kind::streamable)
         : recorder_(io_.executor()) {
-        auto made = neomcp::detail::http_client::make_http_transport(std::move(endpoint), std::move(settings));
+        auto made = kind == Kind::streamable
+                        ? neomcp::detail::http_client::make_http_transport(std::move(endpoint), std::move(settings))
+                        : neomcp::detail::http_client::make_http_sse_transport(std::move(endpoint),
+                                                                               std::move(settings));
         if (!made) {
             problem_ = made.error().message;
             return;

@@ -33,6 +33,12 @@
 // there; the client is not told of the break. A wait above max_retry_delay, or max_resumptions resumptions in a row
 // that brought no message, end the request's exchange as lost. A stream without an event id, or under a revision that
 // does not resume streams, is lost when it ends.
+//
+// Authorization (authorization_gate.h). With an authorizer, each request is kept as it was sent, without its
+// `Authorization` field, until its answer's head arrives. A refusal with 401 or 403 withdraws the exchange (whatever
+// it still delivers is dropped up to the loop's fence) and hands the request to the gate; the engine hears of the hold,
+// and on retry the kept request goes out again on the same unit with a fresh field. The stream of the connection is
+// held the same way and opened anew on retry. The DELETE that ends a session is never held.
 #include "client_http/streamable.h"
 
 #include <algorithm>
@@ -54,6 +60,7 @@
 #include <asio/steady_timer.hpp>
 #include <asio/use_awaitable.hpp>
 
+#include "client_http/authorization_gate.h"
 #include "client_http/delivery.h"
 #include "client_http/http_sse.h"
 #include "client_http/transfers.h"
@@ -85,7 +92,6 @@ constexpr UnitId end_session_unit = std::numeric_limits<UnitId>::max();
 constexpr std::string_view field_content_type = "Content-Type";
 constexpr std::string_view field_accept = "Accept";
 constexpr std::string_view field_authorization = "Authorization";
-constexpr std::string_view field_www_authenticate = "WWW-Authenticate";
 constexpr std::string_view request_media_type = "application/json";
 // Every POST accepts both forms of an answer.
 constexpr std::string_view accepted_media_types = "application/json, text/event-stream";
@@ -102,6 +108,7 @@ constexpr char visible_first = 0x21;
 constexpr char visible_last = 0x7E;
 
 bool is_success(int status) { return status >= status_success_first && status <= status_success_last; }
+bool is_refusal_for_authorization(int status) { return status == status_unauthorized || status == status_forbidden; }
 
 ClientError settings_error(ClientErrorKind kind, std::string message) {
     ClientError error;
@@ -147,7 +154,7 @@ SessionRules session_rules(const HttpTransportSettings& settings) {
 class StreamableTransport final : public Transport {
 public:
     StreamableTransport(HttpEndpoint endpoint, UrlGuard guard, SessionRules rules, TransferLimits limits,
-                        std::shared_ptr<CurlGlobal> global)
+                        std::shared_ptr<CurlGlobal> global, std::unique_ptr<AuthorizationGate> gate)
         : max_message_bytes_(limits.max_message_bytes),
           endpoint_(std::move(endpoint)),
           rules_(std::move(rules)),
@@ -156,9 +163,11 @@ public:
           loop_(std::make_unique<TransferLoop>(std::move(limits), std::move(guard),
                                                [delivery = delivery_](UnitId unit, TransferItem item) {
                                                    delivery->push(unit, std::move(item));
-                                               })) {}
+                                               })),
+          gate_(std::move(gate)) {}
 
     ~StreamableTransport() override {
+        gate_->stop();
         loop_->stop();
         delivery_->detach();
     }
@@ -174,7 +183,16 @@ public:
         started_ = true;
         events_ = &events;
         delivery_->attach(events.executor(), [this](UnitId unit, TransferItem item) { on_item(unit, std::move(item)); });
-        return loop_->start();
+        if (auto problem = loop_->start()) return problem;
+        GateHooks hooks;
+        hooks.hold = [this](UnitId unit) { hold(unit); };
+        hooks.resend = [this](UnitId unit) { resend(unit); };
+        hooks.deny = [this](UnitId unit, CallFailure failure, int status) { deny(unit, std::move(failure), status); };
+        hooks.diagnostic = [this](Diagnostic diagnostic) {
+            if (!closed_ && events_ != nullptr) events_->diagnostic(std::move(diagnostic));
+        };
+        gate_->start(events.executor(), *loop_, std::move(hooks));
+        return std::nullopt;
     }
 
     void send(Outgoing outgoing) override {
@@ -195,16 +213,24 @@ public:
     asio::awaitable<void> close(CloseCause cause) override {
         if (closed_) co_return;
         closed_ = true;
-        if (!started_ || events_ == nullptr) co_return;
+        if (!started_ || events_ == nullptr) {
+            gate_->stop();
+            co_return;
+        }
         for (const auto& [unit, state] : units_) loop_->remove(unit);
         units_.clear();
         deferred_.clear();
         drop_connection();
-        if (cause == CloseCause::client_closed && session_ends_by_request()) {
+        // The request that ends the session carries the current authorization; then the authorizer is let go, and
+        // every flow ends with it.
+        std::optional<TransferRequest> ending;
+        if (cause == CloseCause::client_closed && session_ends_by_request()) ending = end_session_request();
+        gate_->stop();
+        if (ending) {
             asio::steady_timer answered(events_->executor());
             answered.expires_after(endpoint_.delete_timeout);
             delete_wait_ = &answered;
-            loop_->submit(end_session_request());
+            loop_->submit(std::move(*ending));
             std::error_code woken;
             co_await answered.async_wait(asio::redirect_error(asio::use_awaitable, woken));
             delete_wait_ = nullptr;
@@ -228,6 +254,12 @@ private:
         std::optional<std::string> last_event_id;
         std::optional<std::chrono::milliseconds> retry;  // the server's advice on the wait before resuming
         std::size_t resumptions = 0;             // in a row, since the last message
+        // With an authorizer: the request of the exchange as it went out, without its `Authorization` field, until its
+        // answer's head arrives; and the generation of the credentials it carried.
+        std::optional<TransferRequest> retained;
+        std::uint64_t generation = 0;
+        bool fenced = false;  // a refused exchange was withdrawn: its items are dropped until the loop's fence
+        bool held = false;    // the engine was told that the request is held
     };
 
     // The stream of the connection: a GET the engine asked for, kept (and opened again after a loss) for the session.
@@ -243,12 +275,14 @@ private:
         std::optional<std::chrono::milliseconds> retry;
         std::size_t reopens = 0;    // in a row that did not establish the stream
         bool carried = false;       // the running GET carried a message
+        std::uint64_t generation = 0;  // of the credentials the running GET carried
+        bool authorizing = false;   // a refused GET is held by the gate
     };
 
     using Clock = std::chrono::steady_clock;
 
-    HttpRequestInfo info(std::string_view method, UnitId unit) const {
-        return HttpRequestInfo{std::string(method), endpoint_.url, unit};
+    HttpRequestInfo info(std::string_view method, UnitId unit, profile::ProfilePtr profile) const {
+        return HttpRequestInfo{std::string(method), endpoint_.url, unit, std::move(profile)};
     }
 
     bool is_handshake(const Outgoing& outgoing) const {
@@ -277,10 +311,25 @@ private:
         }
     };
 
-    void authorize(Lines& lines, std::string_view method, UnitId unit) const {
-        if (!endpoint_.authorizer) return;
-        const std::string value = endpoint_.authorizer->authorization(info(method, unit));
-        if (!value.empty()) lines.add(field_authorization, value);
+    // The engine's fields of a message. `Authorization` is the authorizer's alone and never taken from them.
+    static void add_engine_fields(Lines& lines, const std::vector<HttpHeader>& fields) {
+        for (const HttpHeader& field : fields) {
+            if (http::equal_ignoring_case(field.name, field_authorization)) continue;
+            lines.add(field.name, field.value);
+        }
+    }
+
+    // Adds the authorizer's field to a request about to go out, and notes the generation it came from; why the field
+    // cannot be sent, otherwise.
+    std::optional<std::string> stamp(TransferRequest& request, const HttpRequestInfo& about,
+                                     std::uint64_t& generation) {
+        const Credential credential = gate_->credential(about);
+        generation = credential.generation;
+        if (credential.value.empty()) return std::nullopt;
+        auto line = header_line(field_authorization, credential.value);
+        if (!line) return std::string("the header field Authorization cannot be sent as it is");
+        request.header_lines.push_back(std::move(*line));
+        return std::nullopt;
     }
 
     // The engine's fields that every message of the profile carries (the revision, where a header names it): what a
@@ -329,19 +378,23 @@ private:
         lines.add(field_content_type, request_media_type);
         lines.add(field_accept, accepted_media_types);
         lines.lines.emplace_back(no_expect_line);
-        for (const HttpHeader& header : outgoing.headers) lines.add(header.name, header.value);
+        add_engine_fields(lines, outgoing.headers);
         // A handshake starts a session of its own.
         if (session_id_ && !state.handshake) {
             lines.add(session_name(), *session_id_);
             state.session = session_id_;
         }
-        authorize(lines, post_method, unit);
         request.header_lines = std::move(lines.lines);
         request.body = std::move(outgoing.line);
+        std::optional<std::string> problem = lines.problem;
+        if (!problem) {
+            if (gate_->configured()) state.retained = request;
+            problem = stamp(request, info(post_method, unit, state.profile), state.generation);
+        }
         const bool waits = outgoing.kind == OutgoingKind::request && holding_;
         units_[unit] = std::move(state);
-        if (lines.problem) {
-            delivery_->push(unit, SendFailed{*lines.problem});
+        if (problem) {
+            delivery_->push(unit, SendFailed{*problem});
             return;
         }
         if (waits) {
@@ -353,6 +406,7 @@ private:
 
     void end(UnitId unit) {
         if (unit == connection_unit) return;
+        gate_->forget(unit);
         const auto found = units_.find(unit);
         if (found == units_.end()) return;
         units_.erase(found);
@@ -379,6 +433,7 @@ private:
     std::optional<std::string> adopt_session(const std::vector<HttpHeader>& headers,
                                              const profile::ProfilePtr& profile) {
         drop_connection();
+        gate_->forget(connection_unit);
         connection_ = ConnectionState{};
         std::vector<std::string_view> values;
         for (const HttpHeader& header : headers) {
@@ -413,6 +468,7 @@ private:
         session_id_.reset();
         session_profile_.reset();
         drop_connection();
+        gate_->forget(connection_unit);
         connection_ = ConnectionState{};
         return true;
     }
@@ -430,7 +486,7 @@ private:
     }
 
     // The request that ends the session: DELETE with the session id and the revision's header, bounded as a whole.
-    TransferRequest end_session_request() const {
+    TransferRequest end_session_request() {
         TransferRequest request;
         request.unit = end_session_unit;
         request.url = endpoint_.url;
@@ -440,15 +496,17 @@ private:
         lines.add(session_name(), *session_id_);
         const auto& http = *session_profile_->streamable_http();
         if (http.version_header) lines.add(http.version_header->name, session_profile_->revision());
-        authorize(lines, delete_method, end_session_unit);
         request.header_lines = std::move(lines.lines);  // a field that cannot be sent is left out
+        std::uint64_t generation = 0;
+        TransferRequest stamped = request;
+        if (!stamp(stamped, info(delete_method, end_session_unit, session_profile_), generation)) return stamped;
         return request;
     }
 
     // ---- the stream of the connection
 
     void open_connection(Outgoing outgoing) {
-        if (connection_.refused || connection_.running) return;
+        if (connection_.refused || connection_.running || connection_.authorizing) return;
         connection_.asked = true;
         connection_.profile = std::move(outgoing.profile);
         connection_.fields = std::move(outgoing.headers);
@@ -467,21 +525,24 @@ private:
         request.not_before = not_before;
         Lines lines;
         lines.add(field_accept, event_stream_media_type);
-        for (const HttpHeader& header : connection_.fields) lines.add(header.name, header.value);
+        add_engine_fields(lines, connection_.fields);
         if (session_id_) lines.add(session_name(), *session_id_);
         if (connection_.last_event_id) lines.add(field_last_event_id, *connection_.last_event_id);
-        authorize(lines, get_method, connection_unit);
+        request.header_lines = std::move(lines.lines);
+        std::optional<std::string> problem = lines.problem;
+        if (!problem) {
+            problem = stamp(request, info(get_method, connection_unit, connection_.profile), connection_.generation);
+        }
         connection_.session = session_id_;
         connection_.transfer = request.unit;
         connection_.running = true;
         connection_.carried = false;
-        if (lines.problem) {
+        if (problem) {
             connection_.running = false;
             connection_.refused = true;
             release_deferred();
             return;
         }
-        request.header_lines = std::move(lines.lines);
         loop_->submit(std::move(request));
     }
 
@@ -513,6 +574,7 @@ private:
     void on_connection_item(TransferItem item) {
         TransportEvents& events = *events_;
         if (auto* head = std::get_if<TransferHead>(&item)) {
+            if (!is_refusal_for_authorization(head->status)) gate_->accepted(connection_unit);
             if (is_stream(*head)) {
                 connection_.reopens = 0;
                 if (holding_) release_deferred();
@@ -530,11 +592,15 @@ private:
                                     StreamLost{"the server offers no stream of the connection for this session"});
                 return;
             }
-            if (status == status_unauthorized || status == status_forbidden) {
-                challenge(get_method, connection_unit, *head);
-                connection_.refused = true;
-                events.stream_event(connection_unit, StreamLost{"the server refused the stream of the connection for "
-                                                                "want of authorization"});
+            if (is_refusal_for_authorization(status)) {
+                if (gate_->takes_refusals()) {
+                    // Held: opened anew when the authorizer answers retry.
+                    connection_.authorizing = true;
+                    gate_->refused(connection_unit, info(get_method, connection_unit, connection_.profile),
+                                   connection_.generation, status, head->headers);
+                    return;
+                }
+                refuse_connection();
                 return;
             }
             reopen_connection();
@@ -558,13 +624,69 @@ private:
         reopen_connection();
     }
 
-    void challenge(std::string_view method, UnitId unit, const TransferHead& head) {
-        if (!endpoint_.authorizer) return;
-        std::vector<std::string> challenges;
-        for (const HttpHeader& header : head.headers) {
-            if (http::equal_ignoring_case(header.name, field_www_authenticate)) challenges.push_back(header.value);
+    // The stream of the connection is refused for want of authorization: never asked for again under the session.
+    void refuse_connection() {
+        connection_.refused = true;
+        events_->stream_event(connection_unit,
+                              StreamLost{"the server refused the stream of the connection for want of authorization"});
+    }
+
+    // ---- the gate's hooks (authorization_gate.h)
+
+    void hold(UnitId unit) {
+        if (closed_ || events_ == nullptr || unit == connection_unit) return;
+        const auto found = units_.find(unit);
+        if (found == units_.end()) return;
+        found->second.held = true;
+        events_->stream_event(unit, AuthorizationHold{true});
+    }
+
+    // The held request goes out again: the same bytes on the same unit, stamped anew. Its old exchange was withdrawn,
+    // so whatever it still delivers is dropped until the loop's fence.
+    void resend(UnitId unit) {
+        if (closed_ || events_ == nullptr) return;
+        if (unit == connection_unit) {
+            if (!connection_.authorizing) return;
+            connection_.authorizing = false;
+            start_connection(Clock::now());
+            return;
         }
-        endpoint_.authorizer->challenge(info(method, unit), head.status, challenges);
+        const auto found = units_.find(unit);
+        if (found == units_.end() || !found->second.retained) return;
+        UnitState& state = found->second;
+        TransferRequest request = *state.retained;
+        const std::string_view method = state.resuming ? get_method : post_method;
+        if (auto problem = stamp(request, info(method, unit, state.profile), state.generation)) {
+            units_.erase(found);
+            events_->stream_event(unit, SendFailed{std::move(*problem)});
+            return;
+        }
+        loop_->submit(std::move(request));
+        if (std::exchange(state.held, false)) events_->stream_event(unit, AuthorizationHold{false});
+    }
+
+    void deny(UnitId unit, CallFailure failure, int status) {
+        if (closed_ || events_ == nullptr) return;
+        if (unit == connection_unit) {
+            if (!connection_.authorizing) return;
+            connection_.authorizing = false;
+            refuse_connection();
+            return;
+        }
+        const auto found = units_.find(unit);
+        if (found == units_.end()) return;
+        units_.erase(found);
+        events_->stream_event(unit, AuthorizationDenied{std::move(failure), status});
+    }
+
+    // A request refused for want of authorization goes to the gate: its exchange is withdrawn first. Nothing of the
+    // unit is touched after the gate was told, since the gate's hooks may end it.
+    void hand_to_gate(UnitId unit, UnitState& state, std::string_view method, const TransferHead& head) {
+        loop_->withdraw(unit);
+        state.fenced = true;
+        const HttpRequestInfo about = info(method, unit, state.profile);
+        const std::uint64_t generation = state.generation;
+        gate_->refused(unit, about, generation, head.status, head.headers);
     }
 
     // ---- resuming a request's stream
@@ -586,12 +708,13 @@ private:
         request.not_before = Clock::now() + delay;
         Lines lines;
         lines.add(field_accept, event_stream_media_type);
-        for (const HttpHeader& header : state.resume_fields) lines.add(header.name, header.value);
+        add_engine_fields(lines, state.resume_fields);
         if (state.session) lines.add(session_name(), *state.session);
         lines.add(field_last_event_id, *state.last_event_id);
-        authorize(lines, get_method, unit);
         if (lines.problem) return lines.problem;
         request.header_lines = std::move(lines.lines);
+        if (gate_->configured()) state.retained = request;
+        if (auto problem = stamp(request, info(get_method, unit, state.profile), state.generation)) return problem;
         ++state.resumptions;
         state.resuming = true;
         loop_->submit(std::move(request));
@@ -610,6 +733,10 @@ private:
             return;
         }
         if (events_ == nullptr) return;
+        if (gate_->owns(unit)) {
+            gate_->on_fetch(unit, std::move(item));
+            return;
+        }
         if (connection_.running && unit == connection_.transfer) {
             on_connection_item(std::move(item));
             return;
@@ -618,11 +745,23 @@ private:
         if (found == units_.end()) return;
         UnitState& state = found->second;
         TransportEvents& events = *events_;
+        // What a withdrawn exchange still delivered, up to the loop's fence, belongs to no request of the unit.
+        if (state.fenced) {
+            if (std::holds_alternative<TransferWithdrawn>(item)) state.fenced = false;
+            return;
+        }
+        if (std::holds_alternative<TransferWithdrawn>(item)) return;
         if (auto* head = std::get_if<TransferHead>(&item)) {
             if (state.resuming) {
                 on_resumed_head(unit, state, *head);
                 return;
             }
+            if (is_refusal_for_authorization(head->status) && gate_->takes_refusals()) {
+                hand_to_gate(unit, state, post_method, *head);
+                return;
+            }
+            state.retained.reset();
+            gate_->accepted(unit);
             if (state.handshake && is_success(head->status)) {
                 if (auto problem = adopt_session(head->headers, state.profile)) {
                     units_.erase(found);
@@ -637,9 +776,6 @@ private:
                 loop_->remove(unit);
                 events.stream_event(unit, SessionExpired{current});
                 return;
-            }
-            if (head->status == status_unauthorized || head->status == status_forbidden) {
-                challenge(post_method, unit, *head);
             }
             state.stream = is_stream(*head);
             events.stream_event(unit,
@@ -675,7 +811,7 @@ private:
             [&](auto& event) {
                 using Event = std::decay_t<decltype(event)>;
                 if constexpr (!std::is_same_v<Event, TransferHead> && !std::is_same_v<Event, TransferMessage> &&
-                              !std::is_same_v<Event, TransferEvent>) {
+                              !std::is_same_v<Event, TransferEvent> && !std::is_same_v<Event, TransferWithdrawn>) {
                     events.stream_event(unit, std::move(event));
                 }
             },
@@ -685,7 +821,15 @@ private:
     // The head of a resumption: a stream goes on as the one it resumes (its head is not told again); any other answer
     // ends the request's exchange.
     void on_resumed_head(UnitId unit, UnitState& state, const TransferHead& head) {
-        if (is_stream(head)) return;
+        if (is_stream(head)) {
+            state.retained.reset();
+            gate_->accepted(unit);
+            return;
+        }
+        if (is_refusal_for_authorization(head.status) && gate_->takes_refusals()) {
+            hand_to_gate(unit, state, get_method, head);
+            return;
+        }
         TransportEvents& events = *events_;
         const std::optional<std::string> session = state.session;
         const profile::ProfilePtr profile = state.profile;
@@ -698,8 +842,7 @@ private:
             events.stream_event(unit, StreamLost{"the session of the stream ended before its answer"});
             return;
         }
-        if (head.status == status_unauthorized || head.status == status_forbidden) {
-            challenge(get_method, unit, head);
+        if (is_refusal_for_authorization(head.status)) {
             events.stream_event(unit, ResponseHead{head.status, head.media_type, head.headers});
             return;
         }
@@ -712,6 +855,7 @@ private:
     std::shared_ptr<CurlGlobal> global_;  // released after the loop (declared before it)
     std::shared_ptr<Delivery> delivery_;
     std::unique_ptr<TransferLoop> loop_;
+    std::unique_ptr<AuthorizationGate> gate_;  // stopped before the loop
 
     TransportEvents* events_ = nullptr;
     bool started_ = false;
@@ -763,6 +907,9 @@ std::variant<HttpParts, ClientError> prepare_http(const HttpEndpoint& endpoint, 
     if (endpoint.max_session_id_bytes == 0) {
         return settings_error(ClientErrorKind::invalid_options, "max_session_id_bytes is zero");
     }
+    if (endpoint.max_authorizations_per_request == 0) {
+        return settings_error(ClientErrorKind::invalid_options, "max_authorizations_per_request is zero");
+    }
     if (settings.max_message_bytes == 0) {
         return settings_error(ClientErrorKind::invalid_options, "max_message_bytes is zero");
     }
@@ -789,9 +936,11 @@ Result<std::unique_ptr<Transport>> make_http_transport(HttpEndpoint endpoint, Ht
     if (auto* error = std::get_if<ClientError>(&prepared)) return std::move(*error);
     HttpParts parts = std::get<HttpParts>(std::move(prepared));
     SessionRules rules = session_rules(settings);
-    std::unique_ptr<Transport> transport =
-        std::make_unique<StreamableTransport>(std::move(endpoint), std::move(parts.guard), std::move(rules),
-                                              std::move(parts.limits), std::move(parts.global));
+    auto gate = AuthorizationGate::make(endpoint, parts.guard);
+    if (auto* error = std::get_if<ClientError>(&gate)) return std::move(*error);
+    std::unique_ptr<Transport> transport = std::make_unique<StreamableTransport>(
+        std::move(endpoint), std::move(parts.guard), std::move(rules), std::move(parts.limits), std::move(parts.global),
+        std::get<std::unique_ptr<AuthorizationGate>>(std::move(gate)));
     return transport;
 }
 
@@ -843,7 +992,8 @@ HttpPlan plan_of(const ClientOptions& options) {
 // Whether a verdict that failed is worth a second look from the start: not when the options cannot work, nor when the
 // server wants authorization the client cannot give (it would want it on every step).
 bool probe_again(const ClientError& error) {
-    return error.kind != ClientErrorKind::invalid_options && error.kind != ClientErrorKind::authorization_required;
+    return error.kind != ClientErrorKind::invalid_options && error.kind != ClientErrorKind::authorization_required &&
+           error.kind != ClientErrorKind::authorization_failed;
 }
 
 // The failure of both transports: the second's kind, and what each met.

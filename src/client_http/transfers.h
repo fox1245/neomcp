@@ -91,6 +91,15 @@ enum class TransferMethod {
     remove   // DELETE, without a body
 };
 
+// Which redirects an exchange follows (always 307 and 308 only, with the method and the body kept, at most
+// TransferLimits::max_redirects times).
+enum class RedirectRule {
+    endpoint_origin,  // those the guard admits as a redirect: the endpoint's origin
+    request_origin,   // those that keep the origin of the URL the request went to, and that the guard admits as a
+                      // document for authorization
+    none              // none: a redirect is handed over as the answer
+};
+
 // One HTTP request to make.
 struct TransferRequest {
     UnitId unit = connection_unit;
@@ -109,6 +118,11 @@ struct TransferRequest {
     bool typed_events = false;
     // The body of the answer is read and dropped whatever its type: only the head and the end of the exchange come.
     bool discard_body = false;
+    // The body of the answer is kept whole whatever its type, and comes as one TransferMessage before the end.
+    bool whole_body = false;
+    // The bound of a message of this exchange; empty: TransferLimits::max_message_bytes.
+    std::optional<std::size_t> max_body_bytes;
+    RedirectRule redirects = RedirectRule::endpoint_origin;
 };
 
 // The head of a response, with the plan for its body.
@@ -131,8 +145,15 @@ struct TransferEvent {
     std::string data;
 };
 
+// Posted by withdraw() once the unit's exchange was ended: every item posted for the unit before it belongs to that
+// exchange, and every one after it to a later request of the unit.
+struct TransferWithdrawn {};
+
+// The last two are never posted by the loop: a transport queues them itself, so that the client hears of a request it
+// holds for authorization in order with the rest, and never from inside a call into the transport.
 using TransferItem = std::variant<TransferHead, TransferMessage, TransferEvent, StreamEventId, StreamRetryAdvice,
-                                  StreamEnded, StreamLost, SendFailed>;
+                                  StreamEnded, StreamLost, SendFailed, TransferWithdrawn, AuthorizationHold,
+                                  AuthorizationDenied>;
 
 // Called on the transfer thread for every item of a unit's exchange.
 using TransferSink = std::function<void(UnitId unit, TransferItem item)>;
@@ -156,7 +177,7 @@ struct TransferLimits {
 
 class TransferLoop {
 public:
-    // `guard` decides which redirects are followed.
+    // `guard` decides which redirects are followed (TransferRequest::redirects).
     TransferLoop(TransferLimits limits, UrlGuard guard, TransferSink sink);
     // Stops the loop (stop()).
     ~TransferLoop();
@@ -170,6 +191,9 @@ public:
     void submit(TransferRequest request);
     // Any thread. Ends the exchange of a unit (and the one a redirect of it made); nothing more comes for it.
     void remove(UnitId unit);
+    // Any thread. Ends the exchange of a unit as remove() does, then posts TransferWithdrawn for the unit, so that what
+    // the ended exchange posted before can be told from what a request submitted afterwards on the same unit posts.
+    void withdraw(UnitId unit);
     // Any thread but the loop's own. Ends every exchange, stops the thread and waits for it; nothing more reaches the
     // sink afterwards. Idempotent.
     void stop();

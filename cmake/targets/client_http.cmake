@@ -9,6 +9,7 @@ if(NEOMCP_HTTP_CLIENT)
     include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/NeomcpCurl.cmake")
 
     add_library(neomcp_client_http
+        src/client_http/authorization_gate.cpp
         src/client_http/http_sse.cpp
         src/client_http/streamable.cpp
         src/client_http/transfers.cpp

@@ -8,6 +8,9 @@ if(NOT NEOMCP_HTTP_CLIENT)
 endif()
 
 add_executable(neomcp_client_http_test
+    auth_client_test.cpp
+    auth_fetch_test.cpp
+    auth_seam_test.cpp
     bounds_test.cpp
     client_http_test.cpp
     http_sse_test.cpp
@@ -15,6 +18,7 @@ add_executable(neomcp_client_http_test
     streams_test.cpp
     transfer_loop_test.cpp
     transport_test.cpp
+    url_guard_auth_test.cpp
     url_guard_edges_test.cpp
     url_guard_test.cpp
     ../support/http_sse_server.cpp

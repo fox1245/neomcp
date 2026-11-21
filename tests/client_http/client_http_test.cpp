@@ -349,10 +349,16 @@ TEST(ClientHttp, ProbeARefusalForWantOfAuthorizationStops) {
 
 class ChallengeCounter final : public neomcp::HttpAuthorizer {
 public:
-    std::string authorization(const neomcp::HttpRequestInfo&) override { return "Bearer not-enough"; }
-    void challenge(const neomcp::HttpRequestInfo&, int status, std::span<const std::string> challenges) override {
+    neomcp::Credential authorization(const neomcp::HttpRequestInfo&) override {
+        return neomcp::Credential{"Bearer not-enough", 0};
+    }
+    void challenge(const neomcp::HttpRequestInfo&, int status, std::span<const std::string> challenges, std::uint64_t,
+                   neomcp::ChallengeReply reply) override {
         statuses.push_back(status);
         values.assign(challenges.begin(), challenges.end());
+        neomcp::ClientError error;
+        error.kind = neomcp::ClientErrorKind::authorization_required;
+        reply.fail(std::move(error));
     }
     std::vector<int> statuses;
     std::vector<std::string> values;

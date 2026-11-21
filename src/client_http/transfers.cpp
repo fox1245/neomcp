@@ -166,6 +166,7 @@ struct Submit {
 };
 struct Remove {
     UnitId unit = connection_unit;
+    bool fence = false;  // post TransferWithdrawn once the exchange was ended
 };
 struct Stop {};
 using Command = std::variant<Submit, Remove, Stop>;
@@ -248,6 +249,7 @@ struct TransferLoop::Impl {
                 } else if (auto* remove = std::get_if<Remove>(&next)) {
                     drop(remove->unit);
                     waiting.erase(remove->unit);
+                    if (remove->fence) post(remove->unit, TransferWithdrawn{});
                 } else {
                     stopping = true;
                 }
@@ -459,10 +461,12 @@ struct TransferLoop::Impl {
             length = -1;
         }
         BodyPlan plan = plan_body(status, types, static_cast<long long>(length));
+        // A JSON body is the one kept whole.
+        if (transfer.request.whole_body) plan.kind = BodyKind::json;
         if (transfer.request.discard_body) plan.kind = BodyKind::discard;
         transfer.kind = plan.kind;
         if (plan.kind == BodyKind::event_stream) {
-            transfer.events.emplace(limits.max_message_bytes);
+            transfer.events.emplace(bound_of(transfer));
             transfer.idle_bounded = true;
             transfer.last_byte = Clock::now();
         }
@@ -471,11 +475,32 @@ struct TransferLoop::Impl {
              TransferHead{status, std::move(plan.media_type), std::exchange(transfer.fields, {})});
     }
 
-    // Whether the head is a redirect the loop follows: 307 or 308, one Location that resolves to a URL of the
-    // endpoint's origin, and the bound not reached. The method and the body are kept; the body of the redirect is
-    // dropped.
+    // The bound of a message of the exchange.
+    std::size_t bound_of(const Transfer& transfer) const {
+        return transfer.request.max_body_bytes.value_or(limits.max_message_bytes);
+    }
+
+    // Whether a redirect to `target` keeps to the request's rule.
+    bool admits_redirect(const Transfer& transfer, const std::string& target) const {
+        switch (transfer.request.redirects) {
+            case RedirectRule::endpoint_origin: return !guard.admit(UrlPurpose::redirect, target);
+            case RedirectRule::request_origin: {
+                const auto from = origin_of(transfer.request.url);
+                const auto to = origin_of(target);
+                if (!std::holds_alternative<Origin>(from) || !std::holds_alternative<Origin>(to)) return false;
+                if (std::get<Origin>(from) != std::get<Origin>(to)) return false;
+                return !guard.admit(UrlPurpose::authorization, target);
+            }
+            case RedirectRule::none: return false;
+        }
+        return false;
+    }
+
+    // Whether the head is a redirect the loop follows: 307 or 308, one Location that resolves to a URL the request's
+    // rule admits, and the bound not reached. The method and the body are kept; the body of the redirect is dropped.
     bool follows(Transfer& transfer, int status) {
         if (status != status_temporary_redirect && status != status_permanent_redirect) return false;
+        if (transfer.request.redirects == RedirectRule::none) return false;
         if (transfer.redirects >= limits.max_redirects) return false;
         const HttpHeader* location = nullptr;
         for (const HttpHeader& field : transfer.fields) {
@@ -485,7 +510,7 @@ struct TransferLoop::Impl {
         }
         if (location == nullptr) return false;
         auto target = resolve_reference(transfer.request.url, location->value);
-        if (!target || guard.admit(UrlPurpose::redirect, *target)) return false;
+        if (!target || !admits_redirect(transfer, *target)) return false;
         transfer.redirecting = true;
         transfer.location = std::move(*target);
         return true;
@@ -496,7 +521,7 @@ struct TransferLoop::Impl {
         const std::size_t bytes = size * count;
         if (transfer.redirecting || transfer.kind == BodyKind::discard) return bytes;
         Impl& loop = *transfer.loop;
-        const std::size_t bound = loop.limits.max_message_bytes;
+        const std::size_t bound = loop.bound_of(transfer);
         const UnitId unit = transfer.request.unit;
         if (transfer.idle_bounded) transfer.last_byte = Clock::now();
         if (transfer.kind == BodyKind::json) {
@@ -629,7 +654,9 @@ std::optional<std::string> TransferLoop::start() {
 
 void TransferLoop::submit(TransferRequest request) { impl_->command(Submit{std::move(request)}); }
 
-void TransferLoop::remove(UnitId unit) { impl_->command(Remove{unit}); }
+void TransferLoop::remove(UnitId unit) { impl_->command(Remove{unit, false}); }
+
+void TransferLoop::withdraw(UnitId unit) { impl_->command(Remove{unit, true}); }
 
 void TransferLoop::stop() {
     {
