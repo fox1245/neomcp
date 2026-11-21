@@ -344,6 +344,7 @@ public:
     void set_template_scopes(std::size_t index, std::vector<std::string> list);
     void set_prompt_scopes(std::size_t index, std::vector<std::string> list);
     bool declares_scopes() const;
+    std::vector<std::vector<std::string>> scope_declarations() const;
     std::span<const ResourceDefinition> resources() const override;
     std::span<const ResourceTemplateDefinition> resource_templates() const override;
     bool resource_enabled(std::size_t index) const override;
@@ -732,6 +733,19 @@ bool ServerCore::declares_scopes() const {
     };
     return declares(entries_) || declares(prompt_entries_) || slot_declares(resource_slots_) ||
            slot_declares(template_slots_);
+}
+
+std::vector<std::vector<std::string>> ServerCore::scope_declarations() const {
+    serving_.store(true);
+    std::vector<std::vector<std::string>> lists;
+    const auto add = [&](const Callable& entry) {
+        if (!entry.scopes.empty()) lists.push_back(entry.scopes);
+    };
+    for (const auto& entry : entries_) add(*entry);
+    for (const auto& slot : resource_slots_) add(*slot.entry);
+    for (const auto& slot : template_slots_) add(*slot.entry);
+    for (const auto& entry : prompt_entries_) add(*entry);
+    return lists;
 }
 
 bool ServerCore::permits(const CallControl& control, std::span<const std::string> required) const {
@@ -2159,6 +2173,8 @@ bool Server::tool_enabled(std::size_t index) const { return core_->tool_enabled(
 std::span<const std::string> Server::tool_scopes(std::size_t index) const { return core_->tool_scopes(index); }
 
 bool Server::declares_scopes() const { return core_->declares_scopes(); }
+
+std::vector<std::vector<std::string>> Server::scope_declarations() const { return core_->scope_declarations(); }
 
 TaskSupport Server::task_support(std::size_t index) const { return core_->task_support(index); }
 

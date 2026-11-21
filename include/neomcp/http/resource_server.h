@@ -27,9 +27,12 @@
 //   many tokens wait for it
 //
 // The scopes a 403 asks for: those the request lacks, then required_scopes, then the scopes the token holds that the
-// server names itself (in required_scopes or scopes_supported), each once. A token's other scopes are never echoed.
-// When they would exceed what a client reads (ResourceServerDefaults::max_challenge_scopes, max_challenge_scope_bytes),
-// the token's scopes are left out first.
+// server names itself (in required_scopes, in scopes_supported, or in what one of its tools, resources, resource
+// templates or prompts declares), each once. A token's other scopes are never echoed. When they would exceed what a
+// client reads (ResourceServerDefaults::max_challenge_scopes, max_challenge_scope_bytes), the token's scopes are left
+// out first. The endpoint does not start when what one item declares, with required_scopes, would exceed that; what
+// several items need together (a batch, a subscription that names several resources) is cut to fit from its end,
+// keeping required_scopes.
 //
 // The Authorization field never reaches the session: it is removed, and the session gets what was validated (an
 // Authorization, see neomcp/authorization.h), with every call it starts. A session that a request opened belongs to

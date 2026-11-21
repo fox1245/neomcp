@@ -1,6 +1,7 @@
 #include "http/resource_server.h"
 
 #include <algorithm>
+#include <iterator>
 #include <utility>
 
 #include "core/uri.h"
@@ -100,6 +101,16 @@ std::size_t joined_bytes(std::span<const std::string> scopes) {
 bool fits_a_challenge(std::span<const std::string> scopes) {
     return scopes.size() <= ResourceServerDefaults::max_challenge_scopes &&
            joined_bytes(scopes) <= ResourceServerDefaults::max_challenge_scope_bytes;
+}
+
+bool contains(std::span<const std::string> scopes, std::string_view scope) {
+    return std::find(scopes.begin(), scopes.end(), scope) != scopes.end();
+}
+
+// Adds `scope` to `scopes` unless it is there already or is offline_access, which a server does not ask for.
+void add_scope(std::vector<std::string>& scopes, const std::string& scope) {
+    if (scope == offline_access_scope || contains(scopes, scope)) return;
+    scopes.push_back(scope);
 }
 
 std::string check_bounds(const ResourceServerBounds& bounds) {
@@ -257,29 +268,55 @@ TokenProblem check_token(const Authorization& granted, const ResourceServerConfi
     return TokenProblem::none;
 }
 
+std::vector<std::string> needed_scopes(std::span<const std::string> missing, const ResourceServerConfig& config) {
+    std::vector<std::string> scopes;
+    for (const std::string& scope : missing) add_scope(scopes, scope);
+    for (const std::string& scope : config.options.required_scopes) add_scope(scopes, scope);
+    return scopes;
+}
+
+Outcome<bool> adopt_declarations(ResourceServerConfig& config, const std::vector<std::vector<std::string>>& declarations) {
+    std::vector<std::string> declared;
+    for (const std::vector<std::string>& declaration : declarations) {
+        if (!fits_a_challenge(needed_scopes(declaration, config))) {
+            return Outcome<bool>::failure(
+                "an item declares scopes that, with required_scopes, are more than a client reads in one challenge (" +
+                std::to_string(ResourceServerDefaults::max_challenge_scopes) + " scopes, " +
+                std::to_string(ResourceServerDefaults::max_challenge_scope_bytes) + " bytes)");
+        }
+        for (const std::string& scope : declaration) {
+            if (!contains(declared, scope)) declared.push_back(scope);
+        }
+    }
+    config.declared_scopes = std::move(declared);
+    return Outcome<bool>::success(true);
+}
+
 std::vector<std::string> challenge_scopes(std::span<const std::string> missing, const ResourceServerConfig& config,
                                           std::span<const std::string> granted) {
-    std::vector<std::string> scopes;
-    const auto add = [&](const std::string& scope) {
-        if (scope == offline_access_scope) return;
-        if (std::find(scopes.begin(), scopes.end(), scope) == scopes.end()) scopes.push_back(scope);
-    };
+    std::vector<std::string> scopes = needed_scopes(missing, config);
+    // The server names a scope in required_scopes, in scopes_supported (what the metadata document lists) or in the
+    // declaration of one of its items.
     const auto named = [&](const std::string& scope) {
-        const auto& required = config.options.required_scopes;
-        return std::find(required.begin(), required.end(), scope) != required.end() ||
-               std::find(config.scopes_supported.begin(), config.scopes_supported.end(), scope) !=
-                   config.scopes_supported.end();
+        return contains(config.options.required_scopes, scope) || contains(config.scopes_supported, scope) ||
+               contains(config.declared_scopes, scope);
     };
-    for (const std::string& scope : missing) add(scope);
-    for (const std::string& scope : config.options.required_scopes) add(scope);
     const std::size_t needed = scopes.size();
     for (const std::string& scope : granted) {
-        if (named(scope)) add(scope);
+        if (named(scope)) add_scope(scopes, scope);
     }
     if (!fits_a_challenge(scopes)) scopes.resize(needed);
-    // What an item declares may be more than one challenge carries: the scopes it needs are then cut, in their
-    // order, to what fits, so that the answer is never a challenge a client refuses to read.
-    while (!scopes.empty() && !fits_a_challenge(scopes)) scopes.pop_back();
+    // What one item needs always fits (adopt_declarations); what several need together (a batch, a subscription that
+    // names several resources) may not: what the request lacks is then cut from its end to what fits, so that the
+    // answer is never a challenge a client refuses to read. required_scopes stay: they fit on their own (configure),
+    // and a token without them is refused whatever else it holds.
+    while (!fits_a_challenge(scopes)) {
+        const auto last = std::find_if(scopes.rbegin(), scopes.rend(), [&](const std::string& scope) {
+            return !contains(config.options.required_scopes, scope);
+        });
+        if (last == scopes.rend()) break;
+        scopes.erase(std::next(last).base());
+    }
     return scopes;
 }
 

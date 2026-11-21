@@ -12,6 +12,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -195,6 +196,14 @@ TEST(ResourceServerScenarioScope, AGrantedScopeTheServerDoesNotNameIsNeverEchoed
 
 // The scopes the server declares on an item are declared by the server too: a token that holds one is not asked to
 // leave it out when it steps up for another.
+TEST(ResourceServerScenarioScope, AGrantedScopeThatOnlyAnItemDeclaresIsEchoedLikeOneTheMetadataNames) {
+    Harness harness;
+    const std::string token = harness.token("audit", granted(harness.clock, "a", {"mcp:use", "audit:read"}));
+    const Reply reply = call_tool(harness.port, token, "guarded");
+    // audit:read is declared on the tool `audited` and is not in scopes_supported.
+    EXPECT_EQ(scopes_of(reply), (Scopes{"files:write", "mcp:use", "audit:read"})) << reply.everything();
+}
+
 TEST(ResourceServerScenarioScope, TheScopesOfAChallengeAreCutToWhatAClientReadsAtTheEdge) {
     Scopes declared;
     for (int at = 0; at < 70; ++at) declared.push_back("s" + std::to_string(100 + at));
@@ -238,28 +247,76 @@ TEST(ResourceServerScenarioScope, TheBytesOfAChallengesScopesAreCutToWhatAClient
     EXPECT_EQ(scopes_of(cut), (Scopes{"files:write", "mcp:use"})) << "40 x 120 bytes is more than a client reads";
 }
 
-TEST(ResourceServerScenarioScope, AnItemThatDeclaresMoreScopesThanAChallengeCanCarryIsNeverAnsweredWithOneThatIsTooLarge) {
+// What one item needs is asked for in one challenge: the server does not start when that challenge (the item's scopes
+// and required_scopes, here mcp:use) would be more than a client reads, in scopes or in bytes, and starts at the edge.
+bool starts_with_one_item_declaring(const Scopes& declared) {
     FakeClock clock;
     auto table = std::make_shared<Table>();
-    Scopes many;
-    for (int at = 0; at < 70; ++at) many.push_back("m" + std::to_string(100 + at));
     neomcp::Server server(server_options());
-    bool declared = true;
-    try {
-        server.tool("needs-many", "Needs a lot", [] { return std::string("ok"); }).scopes(many);
-    } catch (const std::exception&) {
-        declared = false;  // refused when it is registered: nothing can be asked for that a client cannot read
+    server.tool("needs-many", "Needs a lot", [] { return std::string("ok"); }).scopes(declared);
+    neomcp::HttpServerOptions options = quick_options();
+    options.authorization = resource_options(table, clock);
+    neomcp::HttpServer http(server, std::move(options));
+    const bool started = static_cast<bool>(http.start());
+    http.stop();
+    return started;
+}
+
+TEST(ResourceServerScenarioScope, AnItemThatDeclaresMoreScopesThanAChallengeCanCarryIsRefusedWhenTheServerStarts) {
+    using neomcp::http::ResourceServerDefaults;
+    const auto numbered = [](std::size_t count) {
+        Scopes scopes;
+        for (std::size_t at = 0; at < count; ++at) scopes.push_back("m" + std::to_string(100 + at));
+        return scopes;
+    };
+    // With mcp:use, max_challenge_scopes in all: the edge; one more is past it.
+    EXPECT_TRUE(starts_with_one_item_declaring(numbered(ResourceServerDefaults::max_challenge_scopes - 1)));
+    EXPECT_FALSE(starts_with_one_item_declaring(numbered(ResourceServerDefaults::max_challenge_scopes)));
+    // A scope the item shares with required_scopes is asked for once, so it does not count twice.
+    Scopes shared = numbered(ResourceServerDefaults::max_challenge_scopes - 1);
+    shared.push_back("mcp:use");
+    EXPECT_TRUE(starts_with_one_item_declaring(shared));
+    // Bytes: the item's scope, a space and mcp:use, max_challenge_scope_bytes in all; one byte more is past it.
+    const std::size_t rest = std::string_view(" mcp:use").size();
+    const std::string widest(ResourceServerDefaults::max_challenge_scope_bytes - rest, 'w');
+    EXPECT_TRUE(starts_with_one_item_declaring({widest}));
+    EXPECT_FALSE(starts_with_one_item_declaring({widest + "w"}));
+}
+
+// What several items need together (here a subscription that names three resources) may be more than one challenge
+// carries: the challenge asks for what fits, in order, and keeps the scopes every request needs.
+TEST(ResourceServerScenarioScope, WhatSeveralItemsNeedTogetherIsCutToOneChallengeAClientReads) {
+    using neomcp::http::ResourceServerDefaults;
+    FakeClock clock;
+    auto table = std::make_shared<Table>();
+    neomcp::Server server(server_options());
+    const std::size_t each = ResourceServerDefaults::max_challenge_scopes / 2;
+    Scopes all;
+    for (int resource = 0; resource < 3; ++resource) {
+        Scopes declared;
+        for (std::size_t at = 0; at < each; ++at) declared.push_back("r" + std::to_string(resource) + "-" + std::to_string(at));
+        all.insert(all.end(), declared.begin(), declared.end());
+        server.resource("test://r" + std::to_string(resource), "Needs its own scopes", [] { return std::string("r"); })
+            .scopes(declared);
     }
     neomcp::HttpServerOptions options = quick_options();
     options.authorization = resource_options(table, clock);
     neomcp::HttpServer http(server, std::move(options));
     const auto started = http.start();
-    if (!declared || !started) return;  // refused before it is served: the declaration could never be asked for
+    ASSERT_TRUE(started) << started.error;
     table->set("t", granted(clock, "a", {"mcp:use"}));
-    const Reply reply = call_tool(*started.value, "t", "needs-many");
+    const Reply reply =
+        send(*started.value, "POST", modern_headers("subscriptions/listen", "t"),
+             rpc(5, "subscriptions/listen",
+                 modern_params({{"notifications", {{"resourceSubscriptions", {"test://r0", "test://r1", "test://r2"}}}}})));
     ASSERT_EQ(reply.status, 403) << reply.body;
-    EXPECT_LE(scopes_of(reply).size(), 64u) << "a client reads at most 64 scopes of a challenge";
-    EXPECT_LE(challenge_of(reply).scope.value_or("").size(), 4096u);
+    const Scopes asked = scopes_of(reply);
+    EXPECT_EQ(asked.size(), ResourceServerDefaults::max_challenge_scopes);
+    EXPECT_LE(challenge_of(reply).scope.value_or("").size(), ResourceServerDefaults::max_challenge_scope_bytes);
+    // The first resources' scopes in their order, then what every request needs.
+    EXPECT_EQ(asked.front(), all.front());
+    EXPECT_EQ(asked.back(), "mcp:use");
+    EXPECT_TRUE(std::equal(asked.begin(), asked.end() - 1, all.begin()));
     http.stop();
 }
 

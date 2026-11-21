@@ -107,9 +107,11 @@ struct EndpointProbe;
 
 class Endpoint {
 public:
-    // Fails, with a message, when an option is out of range (the authorization's included) or a session of the
-    // server cannot be served on Streamable HTTP (no enabled revision defines the transport, or a mechanism has no
-    // implementation). The server must outlive the endpoint. Creating it ends the registration of the server's tools.
+    // Fails, with a message, when an option is out of range (the authorization's included), when with authorization
+    // the scopes one item declares cannot be asked for in one challenge (see neomcp/http/resource_server.h), or when a
+    // session of the server cannot be served on Streamable HTTP (no enabled revision defines the transport, or a
+    // mechanism has no implementation). The server must outlive the endpoint. Creating it ends the registration of the
+    // server's tools.
     static Outcome<std::unique_ptr<Endpoint>> create(Server& server, HostPolicy policy, EndpointOptions options = {});
 
     // Calls stop().

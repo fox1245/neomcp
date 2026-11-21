@@ -603,6 +603,11 @@ public:
     // Whether any tool, resource, template or prompt declares scopes: a transport that serves without authorizing its
     // requests can refuse to start then, so that a forgotten option cannot leave a protected item open.
     bool declares_scopes() const;
+    // The scopes each tool, resource, resource template and prompt declares: one list per item that declares any, in
+    // the order of registration (tools, then resources, templates and prompts), switched-off items included. A
+    // transport that authorizes its requests learns from it what it may be asked to name in a challenge. The first use
+    // ends registration, so that the lists stay what the server checks.
+    std::vector<std::vector<std::string>> scope_declarations() const;
 
     // ---- Tasks (see "Tasks" above). Every call is thread-safe.
     // Whether the tool at `index` of tools() may run as a task.

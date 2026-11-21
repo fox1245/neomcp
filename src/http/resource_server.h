@@ -22,6 +22,7 @@ struct ResourceServerConfig {
     std::string metadata_url;                   // the public URL of the document, written in every challenge
     std::string metadata_path;                  // the path the document is served on
     std::vector<std::string> scopes_supported;  // what the document lists
+    std::vector<std::string> declared_scopes;   // every scope an item of the server declares, each once
     std::string no_credentials_challenge;       // the WWW-Authenticate values that do not depend on the request
     std::string invalid_request_challenge;
     std::string invalid_token_challenge;
@@ -35,6 +36,10 @@ Outcome<ResourceServerConfig> configure(ResourceServerOptions options);
 // An empty string when the list is usable as authorization_servers, else what is wrong.
 std::string check_authorization_servers(const std::vector<std::string>& issuers);
 
+// Checks what the server's items declare (Server::scope_declarations, one list per item) and keeps it in `config`: the
+// failure names what is wrong, when the challenge that asks for an item's scopes would be more than a client reads.
+Outcome<bool> adopt_declarations(ResourceServerConfig& config, const std::vector<std::vector<std::string>>& declarations);
+
 // The metadata document, serialized; or why it cannot be served (it would be too large for a client).
 Outcome<std::string> metadata_document(const ResourceServerConfig& config, const std::vector<std::string>& issuers);
 
@@ -47,8 +52,14 @@ enum class TokenProblem { none, shape, issuer, audience, expired, not_yet_valid 
 TokenProblem check_token(const Authorization& granted, const ResourceServerConfig& config,
                          std::span<const std::string> issuers, std::chrono::system_clock::time_point now);
 
-// The scopes a 403 asks for: `missing`, then required_scopes, then the scopes of `granted` the server names, each once
-// and without offline_access; the granted part is left out when the whole would exceed what a client reads.
+// What a 403 must ask for: `missing`, then required_scopes, each once and without offline_access. The start check of
+// each item's declaration and challenge_scopes both use it, so that what is checked is what is written.
+std::vector<std::string> needed_scopes(std::span<const std::string> missing, const ResourceServerConfig& config);
+
+// The scopes a 403 asks for: needed_scopes, then the scopes of `granted` the server names (in required_scopes,
+// scopes_supported or the declaration of an item), each once and without offline_access; the granted part is left out
+// when the whole would exceed what a client reads, and what the request lacks is cut from its end as well when it still
+// would (a batch or a subscription may need what several items declare); required_scopes are kept.
 std::vector<std::string> challenge_scopes(std::span<const std::string> missing, const ResourceServerConfig& config,
                                           std::span<const std::string> granted);
 

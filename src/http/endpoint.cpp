@@ -1820,6 +1820,11 @@ Outcome<std::unique_ptr<Endpoint>> detail::EndpointProbe::create(Server& server,
     if (options.authorization) {
         auto configured = configure(*options.authorization);
         if (!configured) return Result::failure("authorization: " + configured.error);
+        // What the items declare is fixed from here on (asking ends registration): a 403 may echo it, and each item's
+        // challenge must be one a client reads.
+        if (auto adopted = adopt_declarations(*configured.value, server.scope_declarations()); !adopted) {
+            return Result::failure("authorization: " + adopted.error);
+        }
         auto document = metadata_document(*configured.value, configured.value->options.authorization_servers);
         if (!document) return Result::failure("authorization: " + document.error);
         metadata = std::make_shared<const std::string>(std::move(*document.value));

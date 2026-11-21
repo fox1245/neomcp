@@ -98,7 +98,8 @@ public:
     // Binds, starts serving and returns the bound port, or why it could not: an option out of range, an address or
     // port that cannot be bound, a Host check that cannot be built (a non-loopback address without allowed_hosts),
     // revisions that cannot be served on Streamable HTTP, authorization that cannot be served (see `authorization`),
-    // or items that declare scopes without authorization. Starts once; a second call fails.
+    // items that declare scopes without authorization, or an item that declares more scopes than one challenge can
+    // ask for. Starts once; a second call fails.
     http::Outcome<std::uint16_t> start();
 
     // Replaces the authorization servers (see http::Endpoint::update_authorization_servers). Fails before start(),
