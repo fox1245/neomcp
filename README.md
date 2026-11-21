@@ -77,12 +77,12 @@ What exists now:
 - A Streamable HTTP server that asks for OAuth authorization (`neomcp::http::ResourceServerOptions`, in
   `neomcp/http/resource_server.h`): it publishes its protected resource metadata, answers requests without a valid
   token with the challenge clients follow, checks the audience, issuer, lifetime and scope of every token through a
-  validator the application supplies, and checks the scopes that tools, resources, templates and prompts declare
-  before their handlers run.
+  validator the application supplies (or one of the library's: token introspection, RFC 7662, and JWT access
+  tokens, RFC 9068), and checks the scopes that tools, resources, templates and prompts declare before their handlers
+  run.
 
 Still planned:
 
-- Validators for the server: token introspection (RFC 7662) and JWT access tokens (RFC 9068).
 - The tasks extension (long-running tool calls).
 
 [ROADMAP.md](ROADMAP.md) lists the work that is in progress and the work that has not been started.
@@ -289,6 +289,64 @@ Three bounds keep a client from holding these resources longer than it uses them
 These bounds limit how long one connection holds a worker, not how many connections arrive. A server that clients
 outside its own machine or network reach belongs behind a reverse proxy that buffers request bodies and limits
 connections, as it does for TLS.
+
+## A protected server
+
+With `HttpServerOptions::authorization` set, the HTTP server is an OAuth protected resource
+(`neomcp/http/resource_server.h`): every request to its path needs a valid Bearer token in the `Authorization`
+field, and the protected resource metadata document (RFC 9728) that names its authorization servers is served
+without a token on its well-known path. A request without a token gets 401 with the challenge a client follows to
+sign in; a token that is not valid gets 401 `invalid_token`; a token without the scopes the request needs gets 403
+`insufficient_scope` with the scopes to ask for. Every 400, 401 and 403 answer carries `Cache-Control: no-store`.
+
+```cpp
+neomcp::http::ResourceServerOptions authorization;
+authorization.resource = "https://mcp.example.com/mcp";          // the address clients are given, verbatim
+authorization.authorization_servers = {"https://auth.example.com"};
+authorization.required_scopes = {"mcp:use"};                     // every request needs these
+authorization.validator = my_validator;                          // see below
+options.authorization = std::move(authorization);
+
+server.tool("store_note", "Store a note", store_note).scopes({"notes:write"});
+```
+
+The validator says what a token means: its issuer, subject, client, scopes, audiences and lifetime. Three kinds
+exist:
+
+- `neomcp::http::make_validator` wraps a function, and any class may implement `neomcp::http::TokenValidator`
+  itself, answering at once or later from any thread.
+- `neomcp::http::make_introspection_validator` (`neomcp/http/introspection.h`, component
+  `server_auth_introspection`, with libcurl) asks the authorization server's introspection endpoint (RFC 7662),
+  authenticating as the resource.
+- `neomcp::http::make_jwt_validator` (`neomcp/http/jwt.h`, component `server_auth_jwt`, with `NEOMCP_JWT`) checks
+  JWT access tokens (RFC 9068) itself, with the keys the authorization server publishes and the algorithms the
+  application allows.
+
+Whatever the validator is, the library checks that the issuer is one of `authorization_servers`, that the token's
+audience is this resource, that it has not expired (and is valid already), and that it holds `required_scopes`; none
+of these can be switched off. A verdict is remembered by a digest of the token for a bounded time, and a token being
+validated is not validated twice at once.
+
+Scopes. A tool, resource, resource template or prompt may declare the scopes a request for it needs (`.scopes({...})`
+on its handle), all of them; a completion needs those of its prompt or template, and being told of a resource's
+updates needs what reading it needs. A request without them is refused with 403 before anything of the item runs, and
+the challenge asks for what the request lacks, then `required_scopes`, then the granted scopes the server names
+itself (in `required_scopes`, `scopes_supported` or an item's declaration); other scopes of the token are never
+repeated. Scopes are compared exactly: a scope implies another only where `ServerOptions::scope_implications` says
+so, never by its text. Lists (`tools/list` and the others) show every item, whatever the token holds. The server does
+not start when an item declares more scopes than one challenge can carry (64 scopes or 4 KiB with
+`required_scopes`), or when items declare scopes and `authorization` is not set.
+
+The identity. A handler reads who asked with `Context::authorization()`: the issuer, subject, client, scopes and
+whatever else the validator reported, never the token itself, which no handler and no session sees. A session of a
+revision that keeps one belongs to the principal (issuer, subject and client) whose request opened it; another
+principal that names it is answered as if it did not exist. A stream that a request opened (the stream of a session,
+a subscription) ends when the token that opened it expires, with the leeway; the client opens it again with its
+current token.
+
+On stdio and in process there is no token and no identity: credentials come from the environment there, and declared
+scopes are not checked. A server that protects its items serves them only over HTTP with `authorization`.
+[examples/protected_server.cpp](examples/protected_server.cpp) is a complete program.
 
 ## Asking the client
 

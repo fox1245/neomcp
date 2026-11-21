@@ -7,6 +7,17 @@ interface, and a new patch number does not.
 
 ### Server
 
+- Authorization: a validator that asks the authorization server's introspection endpoint (RFC 7662,
+  `neomcp::server_auth_introspection`), and one that checks JWT access tokens with the authorization server's
+  published keys (RFC 9068, `neomcp::server_auth_jwt`, behind `NEOMCP_JWT`).
+- Authorization: a 403 also asks again for the granted scopes that a tool, resource, template or prompt declares, as
+  it does for those in `required_scopes` and `scopes_supported`; `Server::scope_declarations` lists what the items
+  declare.
+- Authorization: the HTTP server does not start when one item declares more scopes than a client reads in one
+  challenge (with `required_scopes`, 64 scopes or 4 KiB); what several items need together is cut to fit and keeps
+  `required_scopes`.
+- The client and the server check scope values with one function, `neomcp::is_scope_token`;
+  `neomcp::http::is_scope_token` is the same function under the name of the HTTP blocks.
 - `neomcp::ApplicationError`: a handler of any kind (tool, resource, resource template, prompt, completer; plain or
   coroutine) answers its request with a JSON-RPC error of its own code, message and data, on every transport and
   revision, and a call that runs as a task fails with them. A code outside the range JSON-RPC reserves, or one of the

@@ -3,7 +3,7 @@
 What is done, what is in progress and what has not been started. The README's Status section says what a user can
 rely on today; this file is the list of work.
 
-Last updated: 2026-11-21.
+Last updated: 2026-11-22.
 
 ## Done
 
@@ -94,6 +94,22 @@ authorization server. Every scored client authorization scenario of the official
 2025-11-25 and 2026-07-28, and the two 2025-03-26 scenarios pass as well; the six extension scenarios
 (client credentials, enterprise-managed authorization, DPoP, workload identity) are not supported.
 
+## Authorization on the server: done
+
+The Streamable HTTP server is an OAuth protected resource when `authorization` is set: the protected resource metadata
+document (RFC 9728), 401, 400 and 403 answers with the Bearer challenge clients follow, the audience, issuer, lifetime
+and scopes of every token checked by the library whatever the validator is, and a cache of verdicts with one validation
+at a time per token. Validators: an interface the application implements, token introspection (RFC 7662,
+`neomcp::server_auth_introspection`) and JWT access tokens checked with the authorization server's keys (RFC 9068,
+`neomcp::server_auth_jwt`). Tools, resources, templates and prompts declare the scopes they need, with implications the
+application declares; a 403 asks for what is missing, the scopes every request needs and the granted ones the server
+names (in its metadata or on an item), and a server whose item needs more than one challenge carries does not start.
+Being told of a resource's updates needs what reading it needs, checked when the subscription is made. The identity
+reaches the handler without the token, sessions and the state of input rounds belong to their principal, and a stream
+ends when the token that opened it expires. Every bound is tested at its edge and one past it (the validation timeout,
+which runs on the wall clock, past its edge only), and the library's own client signs in to this server end to end. On
+stdio and in process there is no identity and declared scopes are not checked.
+
 ## Packaging: done
 
 Install rules and a CMake package configuration (`find_package(neomcp CONFIG COMPONENTS ...)`), static and, on
@@ -101,11 +117,6 @@ Linux, shared libraries; versioned releases from 0.1.0.
 
 ## In progress
 
-- **Authorization on the server.** Done: reading bearer credentials and writing challenges, declared scopes on
-  tools, resources, templates and prompts checked before a handler runs, the identity a handler sees, and the
-  Streamable HTTP endpoint as a protected resource (protected resource metadata, 401 and 403 answers, a validator
-  interface the application implements, a cache of verdicts, a stream closed when its token expires). Still to come:
-  the introspection validator (RFC 7662), the JWT validator (RFC 9068), and tests against the library's own client.
 - **The tasks extension.** Done: the profile data of tasks for 2025-11-25 and of the extension
   `io.modelcontextprotocol/tasks` for 2026-07-28, and the task store. Still to come: running tools as tasks, the
   wire of both revisions on the server, the client, and the conformance suite's `tasks-*` scenarios.
