@@ -13,6 +13,8 @@ name: CI
 # patterns with the answers of V8, and a test executable compares the validator with them.
 # One more job compares the wire data of every profile in profiles/ with the schema the protocol's specification
 # publishes, read at the one commit that NOTICE names.
+# Two more jobs on Linux (GCC with static libraries, Clang with shared ones) and one on Windows install neomcp, move the
+# prefix and build and run a project that uses the installed package.
 
 on:
   push:
@@ -355,6 +357,113 @@ jobs:
       # Not run here: check_http.py ends the server with SIGTERM, which Python cannot send to a process on Windows
       # (terminate() there kills it without letting it exit by itself). The HTTP server is compiled and linked above,
       # and the listener's own tests run in the windows jobs of the main build.
+
+  # neomcp built (the libraries only), installed to a prefix, the prefix moved and the build tree moved away, and the
+  # project in tests/install built against the moved prefix and run: its programs serve and call over every transport
+  # the installed package has, and its package cases check what find_package accepts and refuses.
+  install:
+    name: install-${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64-gcc-static, cc: gcc, cxx: g++, shared: "OFF" }
+          - { name: linux-x64-clang-shared, cc: clang, cxx: clang++, shared: "ON" }
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install libcurl (the client's HTTP transport)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
+      - name: Configure neomcp (Release; the libraries only)
+        run: >-
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_WARNINGS_AS_ERRORS=ON -DNEOMCP_BUILD_TESTS=OFF
+          -DBUILD_SHARED_LIBS=${{ matrix.shared }}
+      - name: Show the compilers and flags the build uses
+        run: grep -E '^(CMAKE_(C|CXX)_(COMPILER|FLAGS)|BUILD_SHARED_LIBS|NEOMCP_INSTALL):' build/CMakeCache.txt
+      - name: Build
+        run: cmake --build build --parallel 4
+      - name: Install
+        run: cmake --install build --prefix "$RUNNER_TEMP/staged"
+      - name: The install tree names neither the checkout (with the build tree) nor its prefix
+        run: |
+          status=0
+          for path in "$GITHUB_WORKSPACE" "$RUNNER_TEMP/staged"; do
+            if grep -rIlF "$path" "$RUNNER_TEMP/staged"; then
+              echo "::error::the install tree names $path"
+              status=1
+            fi
+          done
+          exit "$status"
+      - name: Move the prefix and the build tree
+        run: |
+          mv "$RUNNER_TEMP/staged" "$RUNNER_TEMP/prefix"
+          mv build build-moved
+      - name: Each installed shared library finds what it loads
+        if: matrix.shared == 'ON'
+        run: |
+          status=0
+          for lib in "$RUNNER_TEMP"/prefix/lib/*.so "$RUNNER_TEMP"/prefix/lib/neomcp/*.so; do
+            if ldd "$lib" | grep -F "not found"; then
+              echo "::error::$lib does not find a library it loads"
+              status=1
+            fi
+          done
+          exit "$status"
+      - name: Configure the project that uses the installed package
+        run: cmake -S tests/install -B installed-build -DCMAKE_BUILD_TYPE=Release "-DCMAKE_PREFIX_PATH=$RUNNER_TEMP/prefix"
+      - name: Build
+        run: cmake --build installed-build --parallel 4
+      - name: Test
+        run: ctest --test-dir installed-build --output-on-failure --timeout 300
+
+  install-windows:
+    name: install-windows-x64-msvc
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event.repository.private == false
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Without the client's HTTP transport, so without libcurl: the package then has no client_http, and the project
+      # that uses it builds the other programs.
+      - name: Configure neomcp (the libraries only, without the client's HTTP transport)
+        run: cmake -S . -B build -DNEOMCP_WARNINGS_AS_ERRORS=ON -DNEOMCP_BUILD_TESTS=OFF -DNEOMCP_HTTP_CLIENT=OFF
+      - name: Build (Release)
+        run: cmake --build build --config Release --parallel 4
+      - name: Install
+        run: cmake --install build --config Release --prefix "$(cygpath -m "$RUNNER_TEMP")/staged"
+      - name: The install tree names neither the checkout (with the build tree) nor its prefix
+        run: |
+          status=0
+          staged="$(cygpath -m "$RUNNER_TEMP")/staged"
+          for path in "$(cygpath -m "$GITHUB_WORKSPACE")" "$staged"; do
+            if grep -rIliF "$path" "$staged"; then
+              echo "::error::the install tree names $path"
+              status=1
+            fi
+          done
+          exit "$status"
+      - name: Move the prefix and the build tree
+        run: |
+          mv "$(cygpath -m "$RUNNER_TEMP")/staged" "$(cygpath -m "$RUNNER_TEMP")/prefix"
+          mv build build-moved
+      - name: Configure the project that uses the installed package
+        run: cmake -S tests/install -B installed-build "-DCMAKE_PREFIX_PATH=$(cygpath -m "$RUNNER_TEMP")/prefix"
+      - name: Build (Release)
+        run: cmake --build installed-build --config Release --parallel 4
+      - name: Test
+        run: ctest --test-dir installed-build -C Release --output-on-failure --timeout 300
 
   profile-wire:
     name: profile-wire
