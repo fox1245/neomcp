@@ -309,6 +309,15 @@ class PlainBody {
 public:
     virtual ~PlainBody() = default;
     virtual ToolOutcome run(const json& arguments, Context& context) = 0;
+    // What an entry with `context` would ask for the inputs the tool declares (neomcp/server/inputs.h) before its
+    // handler runs; empty when every one has its outcome, and for a tool that declares none. Runs the question
+    // functions only, never the handler, on the calling thread. Throws what decoding the arguments or a question
+    // throws.
+    virtual std::optional<InputRequired> pending_inputs(const json& arguments, const Context& context) {
+        static_cast<void>(arguments);
+        static_cast<void>(context);
+        return std::nullopt;
+    }
 };
 
 // Runs on the server's coroutine thread; the arguments and the context outlive the coroutine.
@@ -316,6 +325,12 @@ class CoroutineBody {
 public:
     virtual ~CoroutineBody() = default;
     virtual asio::awaitable<ToolOutcome> run(const json& arguments, Context& context) = 0;
+    // As PlainBody::pending_inputs; synchronous, on the calling thread.
+    virtual std::optional<InputRequired> pending_inputs(const json& arguments, const Context& context) {
+        static_cast<void>(arguments);
+        static_cast<void>(context);
+        return std::nullopt;
+    }
 };
 
 using Body = std::variant<std::unique_ptr<PlainBody>, std::unique_ptr<CoroutineBody>>;

@@ -492,7 +492,8 @@ TEST(Creation, BuiltinRegistryImplementsEveryDeclaredName) {
         {profile::Slot::state, neomcp::MechanismSlot::state},
         {profile::Slot::server_input, neomcp::MechanismSlot::server_input},
         {profile::Slot::change_feed, neomcp::MechanismSlot::change_feed},
-        {profile::Slot::batch, neomcp::MechanismSlot::batch}};
+        {profile::Slot::batch, neomcp::MechanismSlot::batch},
+        {profile::Slot::tasks, neomcp::MechanismSlot::tasks}};
     for (const auto& [declared, slot] : slots) {
         for (const auto name : profile::declared_mechanisms(declared)) {
             EXPECT_TRUE(registry.contains(slot, name)) << neomcp::to_string(slot) << " " << name;

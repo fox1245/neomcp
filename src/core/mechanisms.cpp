@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <utility>
 
+#include "core/tasks.h"
+
 namespace neomcp {
 
 std::string_view to_string(MechanismSlot slot) noexcept {
@@ -16,6 +18,7 @@ std::string_view to_string(MechanismSlot slot) noexcept {
         case MechanismSlot::cancel: return "cancel";
         case MechanismSlot::server_input: return "server_input";
         case MechanismSlot::change_feed: return "change_feed";
+        case MechanismSlot::tasks: return "tasks";
     }
     return {};
 }
@@ -572,6 +575,9 @@ MechanismRegistry make_builtin() {
     registry.add_input("server_request", factory<InputMechanism, ServerRequest>());
     registry.add_feed("connection_notifications", factory<ChangeFeedMechanism, ConnectionNotifications>());
     registry.add_feed("subscriptions_listen", factory<ChangeFeedMechanism, SubscriptionsListen>());
+    registry.add_tasks("none", [] { return detail::make_no_tasks(); });
+    registry.add_tasks("augmented_request", [] { return detail::make_no_tasks(); });
+    registry.add_tasks("server_directed", [] { return detail::make_server_directed_tasks(); });
     return registry;
 }
 
@@ -610,6 +616,9 @@ void MechanismRegistry::add_input(std::string name, Factory<InputMechanism> fact
 void MechanismRegistry::add_feed(std::string name, Factory<ChangeFeedMechanism> factory) {
     put(MechanismSlot::change_feed, std::move(name), std::move(factory));
 }
+void MechanismRegistry::add_tasks(std::string name, Factory<TaskMechanism> factory) {
+    put(MechanismSlot::tasks, std::move(name), std::move(factory));
+}
 
 bool MechanismRegistry::remove(MechanismSlot slot, std::string_view name) {
     return factories_.erase(Key(slot, std::string(name))) > 0;
@@ -644,6 +653,9 @@ std::unique_ptr<InputMechanism> MechanismRegistry::make_input(std::string_view n
 }
 std::unique_ptr<ChangeFeedMechanism> MechanismRegistry::make_feed(std::string_view name) const {
     return make<ChangeFeedMechanism>(MechanismSlot::change_feed, name);
+}
+std::unique_ptr<TaskMechanism> MechanismRegistry::make_tasks(std::string_view name) const {
+    return make<TaskMechanism>(MechanismSlot::tasks, name);
 }
 
 const MechanismRegistry& builtin_mechanisms() {

@@ -11,17 +11,6 @@
 
 namespace neomcp {
 
-std::string_view to_string(TaskStatus status) noexcept {
-    switch (status) {
-        case TaskStatus::working: return "working";
-        case TaskStatus::input_required: return "input_required";
-        case TaskStatus::completed: return "completed";
-        case TaskStatus::failed: return "failed";
-        case TaskStatus::cancelled: return "cancelled";
-    }
-    return {};
-}
-
 namespace {
 
 using Clock = std::chrono::system_clock;

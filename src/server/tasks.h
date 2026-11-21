@@ -69,7 +69,9 @@ struct TaskRun {
     bool running = true;  // an entry of the handler is admitted or runs; false while the task waits for answers
     std::size_t rounds = 0;  // rounds of input the handler asked for
     std::optional<InputRequired> asked;  // what it waits for; empty while running
-    InputResponses answers;              // the answers of the round so far
+    // The handler's key of each request asked, by the key the record keeps it under (see TaskStart::round_keys).
+    std::map<std::string, std::string, std::less<>> keys;
+    InputResponses answers;              // the answers of the round so far, by the handler's keys
     std::chrono::steady_clock::time_point deadline{};  // when the wait for the round's answers ends
 };
 
