@@ -82,9 +82,13 @@ What exists now:
   run. A server without an authorization server can take a fixed table of tokens instead
   (`neomcp::http::FixedTokenOptions`, in `neomcp/http/fixed_tokens.h`).
 
-Still planned:
-
-- The tasks extension (long-running tool calls).
+- Long-running tool calls as tasks: a tool declares that it may run as a task (`ToolHandle::task_support`), the
+  server keeps tasks in a store the application chooses (`ServerOptions::tasks`, with `neomcp::make_memory_task_store`
+  or its own `neomcp::TaskStore`), and serves them under 2026-07-28 (the extension `io.modelcontextprotocol/tasks`)
+  and 2025-11-25 (tasks in the core protocol). The client takes tasks under 2026-07-28 when its options say so
+  (`ClientOptions::tasks`): `call_tool` follows the task to its end, and `start_tool` hands over a
+  `neomcp::TaskHandle` to wait for or cancel. The server is run in CI against the official conformance suite's
+  `tasks-*` scenarios.
 
 [ROADMAP.md](ROADMAP.md) lists the work that is in progress and the work that has not been started.
 

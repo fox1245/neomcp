@@ -126,11 +126,19 @@ with the library's own client sending a static token.
 Install rules and a CMake package configuration (`find_package(neomcp CONFIG COMPONENTS ...)`), static and, on
 Linux, shared libraries; versioned releases from 0.1.0.
 
-## In progress
+## Tasks: done
 
-- **The tasks extension.** Done: the profile data of tasks for 2025-11-25 and of the extension
-  `io.modelcontextprotocol/tasks` for 2026-07-28, and the task store. Still to come: running tools as tasks, the
-  wire of both revisions on the server, the client, and the conformance suite's `tasks-*` scenarios.
+- **Running tools as tasks** on the server, with a task store the application chooses (memory, or its own).
+- **The wire of 2026-07-28** (the extension `io.modelcontextprotocol/tasks`) and of 2025-11-25 on the server; the
+  conformance suite's `tasks-*` scenarios pass.
+- **The client half of 2026-07-28**: opted into by the application; `call_tool` follows a task, `start_tool` hands it
+  over, `Client::task` takes one up.
+
+## Not started
+
+- **Tasks of 2025-11-25 on the client** (the core protocol's tasks of that revision; the server serves them).
+- **Notifications of task status through `subscriptions/listen`** under 2026-07-28 (optional in the extension); the
+  conformance suite's scenario for them is skipped.
 
 ## Open items in what exists
 

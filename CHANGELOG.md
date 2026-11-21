@@ -3,7 +3,26 @@
 Versions follow the rule of the package configuration: before 1.0, a release with a new minor number may change the
 interface, and a new patch number does not.
 
-## Unreleased
+## 0.2.0
+
+The interface changed in places (see "Changed"); a project built against 0.1 is rebuilt against 0.2.
+
+### Tasks
+
+- Tools that run as tasks: `ToolHandle::task_support` declares that a tool may (or must) run as one; the server keeps
+  tasks in `ServerOptions::tasks.store`, a `neomcp::TaskStore` (`neomcp::make_memory_task_store`, or the
+  application's own), runs them on its pools and bounds them by the store's limits, and lets the application start,
+  read, cancel and answer tasks itself (`Server::start_task`, `task`, `cancel_task`, `answer_task`, `watch_task`).
+  A handler knows that it runs as a task (`Context::task_id`).
+- The extension `io.modelcontextprotocol/tasks` of 2026-07-28 on the server (`tasks/get`, `tasks/update`,
+  `tasks/cancel`, a task created when the client declares the extension and the tool may run as one) and tasks of
+  2025-11-25 (`params.task`, `tasks/get`, `tasks/result` that waits for the end and carries the task's requests for
+  input, `tasks/cancel`, `tasks/list` per owner, status notifications). The server passes the official conformance
+  suite's `tasks-*` scenarios.
+- The client takes tasks of 2026-07-28 when `ClientOptions::tasks.accept` is set: `call_tool` follows a task to its
+  end, `start_tool` returns the tool's result or a `neomcp::TaskHandle` (`status`, `wait`, `cancel`), and
+  `Client::task` takes up a task by its id. The waits between reads, the whole wait, the number of reads and the
+  length of an id are bounded (`ClientTaskOptions`). A task's requests for input reach the client's input handlers.
 
 ### Server
 
@@ -40,6 +59,21 @@ interface, and a new patch number does not.
   `max_header_field_bytes`. They go with every request to the endpoint, on Streamable HTTP and on the older transport
   of events over HTTP, and not to the documents the authorizer fetches. A field the transport or the enabled revisions
   write (the media types, `Authorization`, the session and version headers, the mirrored fields) is refused.
+
+### Examples
+
+- `examples/`: servers over stdio and HTTP, clients over the in-process, stdio and HTTP transports, a tool that asks
+  the client for input, a client that signs in with OAuth and a protected server; built with
+  `NEOMCP_BUILD_EXAMPLES`, and those that need no person run in CI.
+
+### Changed
+
+- neojson is pinned at 5ee2793. Its `json::array_t` is now a vector with its own allocator: code that holds an
+  array of the library's `json` values as `std::vector<neomcp::json>` names `neomcp::json::array_t` instead.
+- `neomcp::TaskHost` has two more pure virtual functions (`current_task`, `list_tasks`).
+- The introspection and the JWT validators can be linked into one program.
+- The answers of the protected endpoint for a token that cannot be validated now (503) carry
+  `Cache-Control: no-store`, as its other answers do.
 
 ## 0.1.0
 
