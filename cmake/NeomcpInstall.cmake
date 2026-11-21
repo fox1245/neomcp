@@ -42,7 +42,8 @@ set(NEOMCP_PACKAGE_COMPONENTS
     client_in_process
     client_stdio
     client_http
-    client_auth)
+    client_auth
+    server_auth_introspection)
 
 # A 0.x library breaks its interface in a minor release and keeps it in a patch release: a project that asks for
 # 0.y.z gets 0.y.w with w >= z, and no other 0.y. From 1.0 on the rule is SameMajorVersion.
