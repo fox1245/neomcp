@@ -60,8 +60,11 @@ TEST_P(ServerEndToEndStream, IsClosedWhenItsTokenExpiresAndOpenedAgainWithARefre
 
     // The server ends the stream when the first token expires; the client opens it again, is refused for the expired
     // token, refreshes it without the person, and is let in.
-    ASSERT_TRUE(wait_until([&] { return stream_openings(world, subscriptions).size() >= 3; }))
-        << "the stream was not opened again";
+    // A request is logged when it arrives and its status when it is answered, so wait for the answers as well.
+    ASSERT_TRUE(wait_until([&] {
+        const std::vector<Seen> seen = stream_openings(world, subscriptions);
+        return seen.size() >= 3 && seen[0].status != 0 && seen[1].status != 0 && seen[2].status != 0;
+    })) << "the stream was not opened again";
     ASSERT_TRUE(wait_until([&] { return world.as.access_tokens().size() >= 2; }));
     const std::string second = world.as.access_tokens()[1];
     const std::vector<Seen> openings = stream_openings(world, subscriptions);
