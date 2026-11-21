@@ -329,6 +329,34 @@ the person does not finish ends after `OAuthOptions::bounds.authorization_timeou
 `ClientErrorKind::authorization_failed`. [examples/oauth_client.cpp](examples/oauth_client.cpp) is a complete program
 that prints the address to open and reads the one the browser went to from standard input.
 
+## Header fields of your own
+
+A server behind a gateway may want header fields the protocol does not define: a tenant, a trace id, a key the gateway
+checks. `HttpEndpoint::header_fields` lists fields sent with every request the transport makes to the endpoint, and
+`HttpEndpoint::header_fields_for` is a callback that supplies fields for each request, told which kind of request it is
+(`HttpRequestKind`: a message, the stream of the connection, the resumption of a stream, the end of a session).
+
+```cpp
+neomcp::HttpEndpoint endpoint;
+endpoint.url = "https://mcp.example.com/mcp";
+endpoint.header_fields = {{"X-Tenant", "acme"}};
+endpoint.header_fields_for = [&](neomcp::HttpRequestKind kind) -> std::vector<neomcp::HttpHeader> {
+    if (kind == neomcp::HttpRequestKind::end_session) return {};
+    return {{"X-Trace-Id", current_trace_id()}};  // must return promptly: it runs on the client's thread
+};
+```
+
+The fields go to the MCP endpoint only: not to the documents an authorizer fetches, and not to another origin, since a
+redirect is followed within the endpoint's origin only. The transport's own fields cannot be set or replaced: `Accept`,
+`Content-Type`, `Authorization` (the authorizer's), `Last-Event-ID`, `Host`, `Content-Length`, `Transfer-Encoding`,
+`Connection` and the like, and the fields the enabled revisions define, such as the session id, the protocol version and
+the fields that mirror a message's method, name or parameters. A field that collides is refused, never dropped or sent
+twice: `Client::open` fails with `ClientErrorKind::invalid_options` for a fixed field, and one request fails for a
+callback's (a message fails its call with `send_failed`), while the next request asks the callback again. The callback
+is asked when a request is built, and a request sent again as it was keeps its fields. Names must be HTTP tokens, values
+may hold no control character but a tab, and a request carries at most `max_header_fields` fields (default 32) and
+`max_header_field_bytes` bytes of names and values (default 8 KiB).
+
 ## Examples
 
 [examples/](examples/) holds eight small programs, each one source file with comments for a reader who is new to MCP.

@@ -58,6 +58,9 @@ Last updated: 2026-11-21.
 - **The HTTP+SSE transport of 2024-11-05 on the client**: found when a Streamable HTTP endpoint refuses the
   handshake, the endpoint event's URL resolved and held to the endpoint's origin, event names from the profile.
 - **Every bound on what a server controls**, tested exactly at the bound and one past it.
+- **Header fields of the application's own on the client's HTTP transport**: fields, or a callback that supplies them
+  per request, sent with every request to the endpoint on both HTTP transports beside what the authorizer writes, and
+  not to the authorizer's fetches; the transport's own fields cannot be replaced, and a collision is refused.
 - **The client's loopback listener** for the browser's redirect (`neomcp::client_oauth_loopback`, optional).
 - **Examples** (`examples/`), built and partly run in CI.
 - **The client against other servers**: this library's servers over every transport and revision, and the official
@@ -106,9 +109,6 @@ Linux, shared libraries; versioned releases from 0.1.0.
 - **Errors of the application's own.** A tool or another handler answers with a JSON-RPC error whose code and `data`
   the application chooses (a code outside those the protocol reserves), and the client hands the code and the data of
   every error answer to the application.
-- **Header fields of the application's own on the client's HTTP transport**: fields, or a callback that supplies them
-  per request, sent with every MCP request beside what the authorizer writes; the transport's own fields cannot be
-  replaced.
 - **A validator of fixed bearer tokens** for a server without an authorization server: a table of tokens and the scopes
   each grants, whose scopes reach the handler and the declared scopes of items as an OAuth token's do, without
   protected resource metadata.

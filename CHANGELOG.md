@@ -3,6 +3,16 @@
 Versions follow the rule of the package configuration: before 1.0, a release with a new minor number may change the
 interface, and a new patch number does not.
 
+## Unreleased
+
+### Client
+
+- Header fields of the application's own on the HTTP transports: `HttpEndpoint::header_fields` (fixed fields) and
+  `HttpEndpoint::header_fields_for` (a callback told the kind of each request), bounded by `max_header_fields` and
+  `max_header_field_bytes`. They go with every request to the endpoint, on Streamable HTTP and on the older transport
+  of events over HTTP, and not to the documents the authorizer fetches. A field the transport or the enabled revisions
+  write (the media types, `Authorization`, the session and version headers, the mirrored fields) is refused.
+
 ## 0.1.0
 
 The first release.
