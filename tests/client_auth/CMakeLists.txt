@@ -1,10 +1,11 @@
 # The client's OAuth flow without I/O (neomcp::client_auth), driven from tables against scripted peers that answer
 # each request it describes: URLs and their identity, protected resource metadata, authorization server metadata,
-# registration, PKCE and scopes, the callback, the token requests, and the flow as a whole. No socket is opened. The
-# tests reach the flow's internal headers.
+# registration, PKCE and scopes, the callback, the token requests, discovery on the server's origin, and the flow as a
+# whole. No socket is opened. The tests reach the flow's internal headers.
 add_executable(neomcp_client_auth_test
     bounds_test.cpp
     callback_test.cpp
+    flow_fallback_test.cpp
     flow_test.cpp
     pkce_scopes_test.cpp
     registration_test.cpp

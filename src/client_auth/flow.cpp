@@ -220,7 +220,7 @@ FlowStep OAuthFlow::prompted(const PromptAnswer& answer, FlowClock::time_point n
     const std::string& code = std::get<std::string>(checked);
     FlowFetch request = authorization_code_request(server_.token_endpoint, client_, code,
                                                    config_.registration.redirect_uri, pkce_.verifier,
-                                                   resource_.resource, config_.bounds);
+                                                   resource_parameter(), config_.bounds);
     return fetch(std::move(request), Stage::token);
 }
 
@@ -248,9 +248,35 @@ FlowStep OAuthFlow::on_resource_metadata(const FetchResult& result) {
 }
 
 FlowStep OAuthFlow::no_resource_metadata() {
-    // Every candidate answered with a client error. Discovery on the server's origin (config_.origin_metadata) would
-    // start here; it is not supported yet, so the flow ends the same way with or without it.
-    return fail(AuthorizationProblem::discovery_failed, resource_candidates_.back().url);
+    // Every candidate answered with a client error. Only an enabled revision that declares discovery on the server's
+    // origin goes on; a server error or no answer never reaches here.
+    if (!config_.origin_metadata) {
+        return fail(AuthorizationProblem::discovery_failed, resource_candidates_.back().url);
+    }
+    auto discovery = origin_discovery(config_.endpoint_url, *config_.origin_metadata, admission_);
+    if (auto* failure = std::get_if<FlowFailure>(&discovery)) return fail(std::move(*failure));
+    OriginDiscovery origin = std::get<OriginDiscovery>(std::move(discovery));
+    const auto endpoint = read_url(config_.endpoint_url);
+    if (!endpoint) return fail(AuthorizationProblem::discovery_failed, config_.endpoint_url);
+
+    via_origin_ = true;
+    resource_ = ProtectedResource{};
+    resource_.resource = std::string(without_fragment(*endpoint));  // names the credentials only; never sent
+    resource_.authorization_server = origin.issuer;
+    origin_ = std::move(origin);
+    return after_resource_metadata();
+}
+
+FlowStep OAuthFlow::use_default_endpoints() {
+    if (auto refused = refused_default_endpoints(*origin_, admission_)) return fail(std::move(*refused));
+    server_ = origin_->defaults;
+    defaults_used_ = true;
+    return after_server_metadata();
+}
+
+std::optional<std::string> OAuthFlow::resource_parameter() const {
+    if (via_origin_) return std::nullopt;
+    return resource_.resource;
 }
 
 FlowStep OAuthFlow::after_resource_metadata() {
@@ -275,10 +301,15 @@ FlowStep OAuthFlow::after_resource_metadata() {
         server_ = known->second;
         return after_server_metadata();
     }
+    server_index_ = 0;
+    if (via_origin_) {
+        server_candidates_ = {origin_->metadata_url};
+        return metadata_fetch(FetchPurpose::authorization_server_metadata, server_candidates_.front(),
+                              Stage::server_metadata);
+    }
     auto candidates = authorization_server_candidates(key_.issuer, admission_);
     if (auto* failure = std::get_if<FlowFailure>(&candidates)) return fail(std::move(*failure));
     server_candidates_ = std::get<std::vector<std::string>>(std::move(candidates));
-    server_index_ = 0;
     return metadata_fetch(FetchPurpose::authorization_server_metadata, server_candidates_.front(),
                           Stage::server_metadata);
 }
@@ -302,6 +333,8 @@ FlowStep OAuthFlow::on_server_metadata(const FetchResult& result) {
                 return metadata_fetch(FetchPurpose::authorization_server_metadata, server_candidates_[server_index_],
                                       Stage::server_metadata);
             }
+            // On the server's origin only a missing document stands in for the metadata; another client error does not.
+            if (via_origin_ && result.status == status_not_found) return use_default_endpoints();
             {
                 FlowFailure failure;
                 failure.problem = AuthorizationProblem::discovery_failed;
@@ -330,7 +363,7 @@ FlowStep OAuthFlow::after_server_metadata() {
                 client_ = std::move(*client);
                 refreshed_from_ = std::move(tokens);
                 FlowFetch request = refresh_token_request(server_.token_endpoint, client_,
-                                                          *refreshed_from_->refresh_token, resource_.resource,
+                                                          *refreshed_from_->refresh_token, resource_parameter(),
                                                           config_.bounds);
                 return fetch(std::move(request), Stage::refresh);
             }
@@ -433,8 +466,9 @@ FlowStep OAuthFlow::authorize() {
     if (!pkce || !state) return fail(AuthorizationProblem::random_source_failed, server_.authorization_endpoint);
     pkce_ = std::move(*pkce);
 
-    pending_.issuer = server_.issuer;
-    pending_.iss_parameter_supported = server_.authorization_response_iss_parameter_supported;
+    // Without the server's metadata nothing was published to compare an `iss` with: none is recorded.
+    pending_.issuer = defaults_used_ ? std::string() : server_.issuer;
+    pending_.iss_parameter_supported = !defaults_used_ && server_.authorization_response_iss_parameter_supported;
     pending_.state = std::move(*state);
     pending_.redirect_uri = config_.registration.redirect_uri;
 
@@ -444,7 +478,7 @@ FlowStep OAuthFlow::authorize() {
     request.redirect_uri = config_.registration.redirect_uri;
     request.code_challenge = pkce_.challenge;
     request.state = pending_.state;
-    request.resource = resource_.resource;
+    request.resource = resource_parameter();
     request.scopes = scopes_;
 
     PromptRequest prompt;

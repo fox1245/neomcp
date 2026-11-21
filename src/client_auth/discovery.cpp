@@ -22,6 +22,12 @@ FlowFailure failure(AuthorizationProblem problem, std::string_view url) {
     return out;
 }
 
+FlowFailure refused_origin_url(std::string_view issuer, std::string_view url) {
+    FlowFailure out = failure(AuthorizationProblem::refused_url, url);
+    out.issuer = std::string(issuer);
+    return out;
+}
+
 // An authorization server identifier the flow can build metadata URLs from: an absolute URL without query or
 // fragment, https or loopback http, that the policy admits.
 bool usable_issuer(std::string_view identifier, const UrlAdmission& admission) {
@@ -121,6 +127,41 @@ std::variant<ProtectedResource, FlowFailure> read_protected_resource(const json&
         out.scopes_supported = bounded_scopes(*scopes, bounds, diagnostics);
     }
     return out;
+}
+
+std::variant<OriginDiscovery, FlowFailure> origin_discovery(std::string_view endpoint_url,
+                                                            const profile::OriginMetadataDiscovery& declared,
+                                                            const UrlAdmission& admission) {
+    const auto endpoint = read_url(endpoint_url);
+    if (!endpoint) return failure(AuthorizationProblem::discovery_failed, endpoint_url);
+
+    OriginDiscovery out;
+    out.issuer = origin_text(*endpoint);
+    out.metadata_url = out.issuer + declared.metadata_path;
+    out.defaults.issuer = out.issuer;
+    out.defaults.authorization_endpoint = out.issuer + declared.default_endpoints.authorization;
+    out.defaults.token_endpoint = out.issuer + declared.default_endpoints.token;
+    out.defaults.registration_endpoint = out.issuer + declared.default_endpoints.registration;
+
+    if (admission.admit(UrlRole::authorization_server, out.issuer)) return refused_origin_url(out.issuer, out.issuer);
+    if (admission.admit(UrlRole::authorization_server_metadata, out.metadata_url)) {
+        return refused_origin_url(out.issuer, out.metadata_url);
+    }
+    return out;
+}
+
+std::optional<FlowFailure> refused_default_endpoints(const OriginDiscovery& origin, const UrlAdmission& admission) {
+    const AuthorizationServer& defaults = origin.defaults;
+    if (admission.admit(UrlRole::authorization_endpoint, defaults.authorization_endpoint)) {
+        return refused_origin_url(origin.issuer, defaults.authorization_endpoint);
+    }
+    if (admission.admit(UrlRole::token_endpoint, defaults.token_endpoint)) {
+        return refused_origin_url(origin.issuer, defaults.token_endpoint);
+    }
+    if (admission.admit(UrlRole::registration_endpoint, *defaults.registration_endpoint)) {
+        return refused_origin_url(origin.issuer, *defaults.registration_endpoint);
+    }
+    return std::nullopt;
 }
 
 }  // namespace neomcp::detail::oauth

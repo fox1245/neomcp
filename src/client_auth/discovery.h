@@ -10,6 +10,11 @@
 // and host compare without regard to case, everything else character by character. Another value is refused before
 // any authorization server is asked, unless the application's hook accepts it. The first entry of
 // `authorization_servers` that is admitted becomes the authorization server; the identifiers are kept as received.
+//
+// Without protected resource metadata (every URL answered with a client error), an enabled revision may declare that
+// the authorization server is found on the server's origin instead (origin_discovery): the identifier is the
+// endpoint's scheme and authority exactly as written, its metadata is at the declared path of that origin, and the
+// endpoints the revision declares as defaults stand in when the metadata is not there.
 #pragma once
 
 #include <functional>
@@ -21,8 +26,10 @@
 
 #include "client_auth/admission.h"
 #include "client_auth/bounds.h"
+#include "client_auth/metadata.h"
 #include "client_auth/types.h"
 #include "neomcp/json.h"
+#include "neomcp/profile.h"
 
 namespace neomcp::detail::oauth {
 
@@ -58,5 +65,24 @@ std::variant<ProtectedResource, FlowFailure> read_protected_resource(const json&
                                                                      const UrlAdmission& admission,
                                                                      const OAuthBounds& bounds,
                                                                      std::vector<FlowDiagnostic>& diagnostics);
+
+// Where the authorization server of an endpoint is looked for on the endpoint's origin.
+struct OriginDiscovery {
+    std::string issuer;        // the origin as written: scheme, "://" and authority; no path, no trailing slash
+    std::string metadata_url;  // the declared metadata path on that origin
+    // The endpoints at the declared default paths of that origin. Used only when the metadata is not there; nothing
+    // else is known of the server, so the issuer is the only identity it has.
+    AuthorizationServer defaults;
+};
+
+// The origin discovery for `endpoint_url` under what the revision declares, or why it cannot be used (the policy
+// refuses the origin or the metadata URL).
+std::variant<OriginDiscovery, FlowFailure> origin_discovery(std::string_view endpoint_url,
+                                                            const profile::OriginMetadataDiscovery& declared,
+                                                            const UrlAdmission& admission);
+
+// Why the default endpoints cannot be used (the policy refuses one of them); nothing when they can. Asked only when
+// the metadata was not there, so a policy that refuses a path nobody uses does not end a flow.
+std::optional<FlowFailure> refused_default_endpoints(const OriginDiscovery& origin, const UrlAdmission& admission);
 
 }  // namespace neomcp::detail::oauth

@@ -444,21 +444,4 @@ TEST(OAuthFlowResourceMetadata, EveryFlowFetchesTheMetadataAgain) {
     EXPECT_EQ(rig.world.requests_for(FetchPurpose::authorization_server_metadata).size(), 1u);
 }
 
-TEST(OAuthFlowResourceMetadata, WithoutMetadataTheOriginDiscoveryIsNotTriedYet) {
-    // A profile that finds the authorization server on the server's origin is noticed, but discovery ends as without.
-    const neomcp::profile::ProfilePtr origin = neomcp::profile::builtin("2025-03-26");
-    const neomcp::profile::ProfilePtr modern = neomcp::profile::builtin("2025-11-25");
-    ASSERT_TRUE(origin && modern);
-    const std::vector<neomcp::profile::ProfilePtr> both = {modern, origin};
-    const std::vector<neomcp::profile::ProfilePtr> only_modern = {modern};
-    EXPECT_TRUE(origin_metadata_of(both));
-    EXPECT_FALSE(origin_metadata_of(only_modern));
-
-    Rig rig;
-    rig.config.origin_metadata = origin_metadata_of(both);
-    rig.world.documents.clear();
-    EXPECT_EQ(problem_of(rig.run(unauthorized())), AuthorizationProblem::discovery_failed);
-    EXPECT_EQ(rig.world.requests.size(), 2u);
-}
-
 }  // namespace

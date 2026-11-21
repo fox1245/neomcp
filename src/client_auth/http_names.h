@@ -17,5 +17,6 @@ inline constexpr std::string_view media_type_form = "application/x-www-form-urle
 
 inline constexpr int status_unauthorized = 401;
 inline constexpr int status_forbidden = 403;
+inline constexpr int status_not_found = 404;
 
 }  // namespace neomcp::detail::oauth

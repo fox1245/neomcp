@@ -10,7 +10,8 @@
 //
 // The steps of a full flow:
 //   1. protected resource metadata (discovery.h), fetched again by every flow, which is how a changed
-//      authorization server is noticed;
+//      authorization server is noticed; when every URL answered with a client error and an enabled revision declares
+//      discovery on the server's origin, the origin is the authorization server instead (see below);
 //   2. when the resource or the authorization server differs from the one whose tokens are in use, those tokens, and
 //      the dynamic registration at the old server, are dropped: they are never sent to or used at the new one; when
 //      the refused request carried no token and tokens are stored for this resource and server, the flow ends with
@@ -25,6 +26,13 @@
 //      stays within max_scopes and max_scope_bytes, offline_access included;
 //   7. PKCE, state and the authorization URL (callback.h), and the prompt;
 //   8. the callback check, then the token request (tokens.h).
+//
+// Discovery on the server's origin (FlowConfig::origin_metadata), which only the older revisions declare: the
+// authorization server is the endpoint's scheme and authority as written, and its metadata, at the declared path of
+// that origin, is read as in step 3. When that path answers 404 the declared default endpoints of the origin are
+// used. On this path there is no resource identifier, so no `resource` parameter is sent in any request, S256 is
+// still sent, and an `iss` in the callback has nothing to be compared with: it is refused, and none is expected.
+// Credentials are kept under the endpoint's URL as the resource.
 //
 // Bounds: a request may be refused and held at most max_authorizations_per_request times; an operation may start at
 // most max_step_ups_per_operation + 1 flows in a row without a success (FlowMemory::succeeded resets the count); the
@@ -65,8 +73,8 @@ struct FlowConfig {
     bool request_offline_access = true;
     AcceptResource accept_resource;  // not set: a resource that differs is refused
     // Set when an enabled revision finds the authorization server through metadata on the server's origin
-    // (origin_metadata_of). Discovery on the server's origin is not supported yet: without protected resource
-    // metadata the flow ends as it does without this.
+    // (origin_metadata_of). It is used only when every protected resource metadata URL answered with a client error;
+    // without it the flow ends there.
     std::optional<profile::OriginMetadataDiscovery> origin_metadata;
     OAuthBounds bounds;
 };
@@ -139,6 +147,8 @@ private:
 
     FlowStep on_resource_metadata(const FetchResult& result);
     FlowStep no_resource_metadata();
+    FlowStep use_default_endpoints();
+    std::optional<std::string> resource_parameter() const;
     FlowStep after_resource_metadata();
     FlowStep on_server_metadata(const FetchResult& result);
     FlowStep after_server_metadata();
@@ -172,6 +182,10 @@ private:
     std::vector<PrmCandidate> resource_candidates_;
     std::size_t resource_index_ = 0;
     ProtectedResource resource_;
+    // The authorization server is found on the server's origin; no resource identifier exists.
+    bool via_origin_ = false;
+    std::optional<OriginDiscovery> origin_;
+    bool defaults_used_ = false;  // the endpoints are the declared defaults: the server's metadata was not there
     CredentialKey key_;
     std::vector<std::string> server_candidates_;
     std::size_t server_index_ = 0;
