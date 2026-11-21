@@ -81,8 +81,8 @@ INSTANTIATE_TEST_SUITE_P(ApplicationErrors, InProcess, ::testing::ValuesIn(in_pr
 // ---- A task that fails, read back by the Client
 
 // Under 2025-11-25, where tasks belong to the core protocol, the client asks for a task with the request it already
-// has for any method, and tasks/result answers the error the call would have answered. (Under 2026-07-28 the requester
-// declares the extension, which the Client has no option for yet: the wire tests of the server cover that revision.)
+// has for any method, and tasks/result answers the error the call would have answered. Under 2026-07-28 see the test
+// after this one.
 TEST(ApplicationErrorsClientTasks, TheClientReadsTheFailureOfATaskWithItsCodeMessageAndData) {
     neomcp::ServerOptions options = server_options();
     options.tasks.store = neomcp::make_memory_task_store({});
@@ -120,6 +120,41 @@ TEST(ApplicationErrorsClientTasks, TheClientReadsTheFailureOfATaskWithItsCodeMes
         auto created = client->request("tools/call", std::move(params));
         ASSERT_TRUE(created) << created.error().message;
         auto refused = client->request("tasks/result", neomcp::json{{"taskId", (*created).at("task").at("taskId")}});
+        ASSERT_FALSE(refused);
+        EXPECT_EQ(refused.error().code, std::optional<int>(neomcp::error_code::internal_error));
+        EXPECT_TRUE(refused.error().data.is_null());
+    }
+}
+
+// Under 2026-07-28 the client takes tasks when its options say so (ClientOptions::tasks.accept): call_tool follows the
+// task the server starts for a tool that may run as one, and a task that failed with an error of the application's own
+// ends the call with that code, message and data, and the task's id.
+TEST(ApplicationErrorsClientTasks, TheClientFollowingATaskOf20260728EndsWithItsCodeMessageAndData) {
+    neomcp::ServerOptions options = server_options();
+    options.tasks.store = neomcp::make_memory_task_store({});
+    options.tasks.min_poll_interval = std::chrono::milliseconds(1);
+    neomcp::Server server(std::move(options));
+    application_errors::register_task_tools(server);
+    auto peer = neomcp::InProcessServer::create(server, Transport::stdio);
+    neomcp::ClientOptions client_options = application_errors::client_options("2026-07-28");
+    client_options.tasks.accept = true;
+    auto client = neomcp::Client::open(std::move(client_options), peer->transport());
+    ASSERT_TRUE(client) << client.error().message;
+    for (const char* tool : {"task_fail", "task_fail_coroutine"}) {
+        const std::string_view kind = std::string_view(tool) == "task_fail" ? application_errors::kind_tool
+                                                                             : application_errors::kind_tool_coroutine;
+        for (const int code : {-32050, 7, -33000}) {
+            auto called = client->call_tool(tool, neomcp::json{{"code", code}});
+            ASSERT_FALSE(called) << "the call did not fail";
+            const std::string where = std::string(tool) + " " + std::to_string(code);
+            EXPECT_EQ(called.error().kind, neomcp::ClientErrorKind::server_error) << where;
+            EXPECT_EQ(called.error().code, std::optional<int>(code)) << where;
+            EXPECT_EQ(called.error().message, application_errors::message_of(kind)) << where;
+            EXPECT_EQ(called.error().data, application_errors::data_of(kind, code)) << where;
+            EXPECT_TRUE(called.error().task) << where << ": the error names the task";
+        }
+        // A code the revision names: the task fails as an internal error without the application's data.
+        auto refused = client->call_tool(tool, neomcp::json{{"code", -32020}});
         ASSERT_FALSE(refused);
         EXPECT_EQ(refused.error().code, std::optional<int>(neomcp::error_code::internal_error));
         EXPECT_TRUE(refused.error().data.is_null());
