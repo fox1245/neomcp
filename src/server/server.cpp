@@ -479,6 +479,16 @@ ServerCore::ServerCore(ServerOptions options)
     if (options_.max_watched_resources == 0) {
         throw std::invalid_argument("neomcp: ServerOptions::max_watched_resources is zero");
     }
+    if (options_.max_watched_uri_bytes == 0) {
+        throw std::invalid_argument("neomcp: ServerOptions::max_watched_uri_bytes is zero");
+    }
+    if (options_.max_watched_bytes == 0) {
+        throw std::invalid_argument("neomcp: ServerOptions::max_watched_bytes is zero");
+    }
+    if (options_.max_client_info_bytes == 0) {
+        throw std::invalid_argument("neomcp: ServerOptions::max_client_info_bytes is zero");
+    }
+    if (options_.max_token_bytes == 0) throw std::invalid_argument("neomcp: ServerOptions::max_token_bytes is zero");
     if (options_.input_timeout <= std::chrono::milliseconds::zero()) {
         throw std::invalid_argument("neomcp: ServerOptions::input_timeout is not positive");
     }
@@ -848,6 +858,8 @@ SessionOptions ServerCore::session_options(profile::Transport transport, IdleCal
     session.max_message_bytes = options_.max_message_bytes;
     session.max_nesting_depth = options_.max_nesting_depth;
     session.max_queued_notifications = options_.max_queued_notifications;
+    session.max_client_info_bytes = options_.max_client_info_bytes;
+    session.max_token_bytes = options_.max_token_bytes;
     session.expose_error_details = options_.expose_error_details;
     session.max_input_rounds = options_.max_input_rounds;
     session.request_state_keys = options_.request_state_keys;
@@ -857,6 +869,8 @@ SessionOptions ServerCore::session_options(profile::Transport transport, IdleCal
     session.answers_need_state = options_.answers_need_state;
     session.max_subscriptions = options_.max_subscriptions;
     session.max_watched_resources = options_.max_watched_resources;
+    session.max_watched_uri_bytes = options_.max_watched_uri_bytes;
+    session.max_watched_bytes = options_.max_watched_bytes;
     session.on_idle = std::move(on_idle);
     // The session keeps this, and with it the core: the core outlives every session it serves.
     session.check_arguments = [core = shared_from_this()](const ToolDefinition& tool, const json& arguments) {

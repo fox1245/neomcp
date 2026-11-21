@@ -210,6 +210,12 @@ target_link_libraries(neomcp_server_declared_test PRIVATE neomcp::server GTest::
 neomcp_configure_target(neomcp_server_declared_test)
 gtest_discover_tests(neomcp_server_declared_test DISCOVERY_TIMEOUT 120)
 
+# The bounds of ServerOptions that mirror those of SessionOptions, each at its limit and one past it.
+add_executable(neomcp_server_bounds_test server_bounds_test.cpp)
+target_link_libraries(neomcp_server_bounds_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_server_bounds_test)
+gtest_discover_tests(neomcp_server_bounds_test DISCOVERY_TIMEOUT 120)
+
 # ---- The stdio transport ---------------------------------------------------------------------------------------------
 
 add_executable(neomcp_stdio_test stdio_test.cpp)

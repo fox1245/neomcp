@@ -245,6 +245,11 @@ struct ServerOptions {
     std::size_t max_message_bytes = SessionDefaults::max_message_bytes;
     std::size_t max_nesting_depth = SessionDefaults::max_nesting_depth;
     std::size_t max_queued_notifications = SessionDefaults::max_queued_notifications;
+    // The bytes of what a handshake says about the client, and the longest string a client may give as a progress
+    // token or as the id of a request that opens a subscription (see SessionOptions). Zero is an error. Defaults
+    // 256 KiB and 1 KiB.
+    std::size_t max_client_info_bytes = SessionDefaults::max_client_info_bytes;
+    std::size_t max_token_bytes = SessionDefaults::max_token_bytes;
 
     // The bounds of the JSON Schema validator that checks arguments and structured results.
     json_schema::Limits schema_limits{};
@@ -278,6 +283,10 @@ struct ServerOptions {
     // The resources a connection watches at once, and the resources one subscription names. Zero is an error.
     // Default 256.
     std::size_t max_watched_resources = FeedDefaults::max_watched_resources;
+    // The bytes of one resource URI a client asks to be told of, and the bytes of the URIs a connection watches at
+    // once or one subscription names (see SessionOptions). Zero is an error. Defaults 8 KiB and 128 KiB.
+    std::size_t max_watched_uri_bytes = FeedDefaults::max_watched_uri_bytes;
+    std::size_t max_watched_bytes = FeedDefaults::max_watched_bytes;
     // Told, with no lock held, after the number of sessions registered for the server's changes changed; read
     // Server::change_watchers() for it. For tests and diagnostics; it must not block.
     std::function<void()> on_change_watchers{};

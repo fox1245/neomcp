@@ -84,8 +84,6 @@ times in a row at most; certificate verification cannot be switched off; libcurl
 
 ## Open items in what exists
 
-- `ServerOptions` does not carry the newer bounds of `SessionOptions` (`max_watched_uri_bytes`, `max_watched_bytes`,
-  `max_client_info_bytes`, `max_token_bytes`); a `Server`'s sessions use the defaults.
 - The keywords a form of elicitation may use are written out in `src/server/form_schema.cpp` for the newest
   revision; they should come from the profile's types, so that a revision whose types differ (2025-06-18 has no
   `default` for strings) gets the form it defines.
