@@ -50,6 +50,8 @@ if(NOT TARGET re2::re2)
         FetchContent_MakeAvailable(neomcp_abseil)
         # Only the parts of Abseil that RE2 reaches are built.
         set_property(DIRECTORY "${neomcp_abseil_SOURCE_DIR}" PROPERTY EXCLUDE_FROM_ALL TRUE)
+        # Read by cmake/NeomcpInstall.cmake, which installs the libraries of a static build.
+        set(NEOMCP_ABSEIL_FETCHED ON)
     endif()
 
     FetchContent_Declare(neomcp_re2
@@ -73,4 +75,7 @@ if(NOT TARGET re2::re2)
     # marked by its ABSL_USE_SYSTEM_INCLUDES; this is RE2's.)
     get_target_property(NEOMCP_RE2_INCLUDES re2 INTERFACE_INCLUDE_DIRECTORIES)
     set_target_properties(re2 PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${NEOMCP_RE2_INCLUDES}")
+
+    # Read by cmake/NeomcpInstall.cmake, which installs the libraries of a static build.
+    set(NEOMCP_RE2_FETCHED ON)
 endif()

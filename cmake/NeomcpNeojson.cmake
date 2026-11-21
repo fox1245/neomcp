@@ -20,6 +20,10 @@ if(NOT TARGET neojson::neojson)
         unset(NEOJSON_BUILD_TESTS)
     endif()
 
+    # Read by cmake/NeomcpInstall.cmake, which installs the library and its headers.
+    set(NEOMCP_NEOJSON_FETCHED ON)
+    set(NEOMCP_NEOJSON_HEADER_DIR "${neojson_SOURCE_DIR}/include")
+
     # Warnings in the headers of a fetched dependency are not this project's to report.
     get_target_property(NEOMCP_NEOJSON_INCLUDES neojson INTERFACE_INCLUDE_DIRECTORIES)
     set_target_properties(neojson PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${NEOMCP_NEOJSON_INCLUDES}")

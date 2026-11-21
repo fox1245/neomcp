@@ -11,10 +11,13 @@ if(NOT TARGET asio::asio)
     find_package(Threads REQUIRED)
     add_library(neomcp_asio INTERFACE)
     add_library(asio::asio ALIAS neomcp_asio)
-    # Warnings in the headers of a fetched dependency are not this project's to report.
+    # Read by cmake/NeomcpInstall.cmake, which installs the headers.
+    set(NEOMCP_ASIO_FETCHED ON)
     # The headers are under asio/include; the include entry at the repository root is a symbolic link to it, which a
     # checkout on Windows may not follow.
-    target_include_directories(neomcp_asio SYSTEM INTERFACE "${neomcp_asio_SOURCE_DIR}/asio/include")
+    set(NEOMCP_ASIO_HEADER_DIR "${neomcp_asio_SOURCE_DIR}/asio/include")
+    # Warnings in the headers of a fetched dependency are not this project's to report.
+    target_include_directories(neomcp_asio SYSTEM INTERFACE "$<BUILD_INTERFACE:${NEOMCP_ASIO_HEADER_DIR}>")
     target_compile_definitions(neomcp_asio INTERFACE ASIO_STANDALONE)
     target_link_libraries(neomcp_asio INTERFACE Threads::Threads)
     if(WIN32)

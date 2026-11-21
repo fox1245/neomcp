@@ -8,9 +8,10 @@
 #
 # Included only when NEOMCP_HTTP_CLIENT is ON (cmake/targets/client_http.cmake). Without libcurl the configuration
 # stops here and says how to go on: install it, point CMake at it, or build without the HTTP client.
+set(NEOMCP_CURL_PACKAGE CURL)
 set(NEOMCP_CURL_MINIMUM_VERSION 8.5.0)
 
-find_package(CURL ${NEOMCP_CURL_MINIMUM_VERSION} QUIET)
+find_package(${NEOMCP_CURL_PACKAGE} ${NEOMCP_CURL_MINIMUM_VERSION} QUIET)
 if(NOT CURL_FOUND OR NOT TARGET CURL::libcurl)
     if(DEFINED CURL_VERSION_STRING AND NOT CURL_VERSION_STRING STREQUAL "")
         set(neomcp_curl_seen " (found ${CURL_VERSION_STRING})")

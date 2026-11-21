@@ -8,6 +8,7 @@ else()
 endif()
 
 option(NEOMCP_BUILD_TESTS "Build the tests" ${NEOMCP_IS_TOP_LEVEL})
+option(NEOMCP_INSTALL "Generate the install rules and the CMake package configuration" ${NEOMCP_IS_TOP_LEVEL})
 option(NEOMCP_WARNINGS_AS_ERRORS "Treat warnings in neomcp's own targets as errors" OFF)
 option(NEOMCP_INTEROP_TESTS
     "Register the interoperability test, which drives the fixture server with the official Python SDK's client. Needs NEOMCP_INTEROP_PYTHON"
@@ -17,6 +18,12 @@ set(NEOMCP_INTEROP_PYTHON "" CACHE FILEPATH
 option(NEOMCP_TEST_TIME_BOUNDS
     "Give the tests that check how cost grows with size a short time limit. Turn it off for instrumented builds, whose slowdown is not uniform across platforms"
     ON)
+
+# The libraries are static by default. Shared ones (BUILD_SHARED_LIBS) are built where every symbol is visible by
+# default (ELF and Mach-O); a Windows DLL exports only what the code marks for export, and neomcp marks nothing.
+if(BUILD_SHARED_LIBS AND WIN32)
+    message(FATAL_ERROR "neomcp: shared libraries are not supported on Windows; configure with BUILD_SHARED_LIBS=OFF")
+endif()
 
 include(cmake/NeomcpNeojson.cmake)
 include(cmake/NeomcpRe2.cmake)
@@ -229,7 +236,10 @@ add_library(neomcp::http ALIAS neomcp_http)
 target_include_directories(neomcp_http
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(neomcp_http PUBLIC neomcp::server neomcp::http_base neomcp::crypto Threads::Threads PRIVATE neomcp_httplib asio::asio)
+# The HTTP library's header is needed to build, not to link, so it is no part of an installed copy (its thread and
+# socket libraries are linked here as well).
+target_link_libraries(neomcp_http PUBLIC neomcp::server neomcp::http_base neomcp::crypto Threads::Threads
+    PRIVATE $<BUILD_INTERFACE:neomcp_httplib> asio::asio)
 # The version the listener checks the library's header against (see cmake/NeomcpHttplib.cmake).
 target_compile_definitions(neomcp_http PRIVATE "NEOMCP_HTTPLIB_VERSION=\"${NEOMCP_HTTPLIB_VERSION}\"")
 if(WIN32)
@@ -249,6 +259,10 @@ foreach(neomcp_target_file IN LISTS NEOMCP_TARGET_FILES)
     include("${neomcp_target_file}")
 endforeach()
 unset(neomcp_target_file)
+
+if(NEOMCP_INSTALL)
+    include(cmake/NeomcpInstall.cmake)
+endif()
 
 if(NEOMCP_BUILD_TESTS)
     enable_testing()

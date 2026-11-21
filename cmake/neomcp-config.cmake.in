@@ -1,0 +1,54 @@
+# The package configuration of an installed @PROJECT_NAME@ (generated from cmake/neomcp-config.cmake.in).
+#
+#   find_package(@PROJECT_NAME@ CONFIG REQUIRED COMPONENTS server stdio)
+#
+# Each component is the target @PROJECT_NAME@::<component>. The packages a component needs are found only when it is
+# asked for; without COMPONENTS every installed component is, and so are the packages of each.
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+set(_neomcp_installed "@NEOMCP_INSTALLED_COMPONENTS@")
+@NEOMCP_PACKAGE_COMPONENT_DEPENDENCIES@
+set(_neomcp_wanted ${${CMAKE_FIND_PACKAGE_NAME}_FIND_COMPONENTS})
+if(NOT _neomcp_wanted)
+    set(_neomcp_wanted ${_neomcp_installed})
+endif()
+
+set(_neomcp_packages "")
+foreach(_neomcp_component IN LISTS _neomcp_wanted)
+    if(_neomcp_component IN_LIST _neomcp_installed)
+        set(${CMAKE_FIND_PACKAGE_NAME}_${_neomcp_component}_FOUND TRUE)
+        foreach(_neomcp_package IN LISTS _neomcp_packages_${_neomcp_component})
+            if(NOT _neomcp_package IN_LIST _neomcp_packages)
+                list(APPEND _neomcp_packages ${_neomcp_package})
+            endif()
+        endforeach()
+    else()
+        set(${CMAKE_FIND_PACKAGE_NAME}_${_neomcp_component}_FOUND FALSE)
+    endif()
+endforeach()
+
+# Every library links the thread library.
+find_dependency(Threads)
+foreach(_neomcp_package IN LISTS _neomcp_packages)
+    find_dependency(${_neomcp_package} ${_neomcp_version_${_neomcp_package}})
+endforeach()
+
+include("${CMAKE_CURRENT_LIST_DIR}/@PROJECT_NAME@-targets.cmake")
+
+foreach(_neomcp_component IN LISTS _neomcp_installed)
+    unset(_neomcp_packages_${_neomcp_component})
+endforeach()
+foreach(_neomcp_package IN LISTS _neomcp_all_packages)
+    unset(_neomcp_version_${_neomcp_package})
+endforeach()
+unset(_neomcp_all_packages)
+unset(_neomcp_installed)
+unset(_neomcp_wanted)
+unset(_neomcp_packages)
+unset(_neomcp_component)
+unset(_neomcp_package)
+
+check_required_components(${CMAKE_FIND_PACKAGE_NAME})
