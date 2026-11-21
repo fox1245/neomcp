@@ -139,8 +139,17 @@ TEST(ClientHeaderFields, EveryRequestOfStreamableHttpCarriesTheFixedFieldsAndThe
     EXPECT_EQ(posts, 2u);
     EXPECT_EQ(gets, 1u);
     EXPECT_EQ(deletes, 1u);
-    EXPECT_EQ(supplier.kinds(), (std::vector<HttpRequestKind>{HttpRequestKind::message, HttpRequestKind::connection_stream,
-                                                              HttpRequestKind::message, HttpRequestKind::end_session}));
+    // The callback was asked for each request that went out, in order. When the held stream ends just before the
+    // close, the transport may also ask for the stream it would open again; that request is never sent.
+    std::vector<HttpRequestKind> asked = supplier.kinds();
+    ASSERT_GE(asked.size(), 4u);
+    EXPECT_EQ(std::vector<HttpRequestKind>(asked.begin(), asked.begin() + 3),
+              (std::vector<HttpRequestKind>{HttpRequestKind::message, HttpRequestKind::connection_stream,
+                                            HttpRequestKind::message}));
+    EXPECT_EQ(asked.back(), HttpRequestKind::end_session);
+    for (std::size_t n = 3; n + 1 < asked.size(); ++n) {
+        EXPECT_EQ(asked[n], HttpRequestKind::connection_stream) << "only a stream opened again may be asked for between";
+    }
 }
 
 TEST(ClientHeaderFields, TheRequestThatResumesAStreamCarriesThem) {
