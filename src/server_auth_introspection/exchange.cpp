@@ -201,7 +201,7 @@ struct ExchangeLoop::Impl {
             ExchangeResult outcome;
             if (result == CURLE_OK && owned->abort == Abort::none) {
                 outcome.end = ExchangeEnd::response;
-                outcome.status = status > std::numeric_limits<int>::max() ? 0 : static_cast<int>(status);
+                outcome.status = status > (std::numeric_limits<int>::max)() ? 0 : static_cast<int>(status);
                 outcome.body = std::move(owned->body);
             } else if (owned->abort != Abort::none || result == CURLE_FILESIZE_EXCEEDED) {
                 outcome.end = ExchangeEnd::body_too_large;
