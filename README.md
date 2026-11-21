@@ -79,7 +79,8 @@ What exists now:
   token with the challenge clients follow, checks the audience, issuer, lifetime and scope of every token through a
   validator the application supplies (or one of the library's: token introspection, RFC 7662, and JWT access
   tokens, RFC 9068), and checks the scopes that tools, resources, templates and prompts declare before their handlers
-  run.
+  run. A server without an authorization server can take a fixed table of tokens instead
+  (`neomcp::http::FixedTokenOptions`, in `neomcp/http/fixed_tokens.h`).
 
 Still planned:
 
@@ -335,7 +336,7 @@ itself (in `required_scopes`, `scopes_supported` or an item's declaration); othe
 repeated. Scopes are compared exactly: a scope implies another only where `ServerOptions::scope_implications` says
 so, never by its text. Lists (`tools/list` and the others) show every item, whatever the token holds. The server does
 not start when an item declares more scopes than one challenge can carry (64 scopes or 4 KiB with
-`required_scopes`), or when items declare scopes and `authorization` is not set.
+`required_scopes`), or when items declare scopes and neither `authorization` nor `fixed_tokens` (below) is set.
 
 The identity. A handler reads who asked with `Context::authorization()`: the issuer, subject, client, scopes and
 whatever else the validator reported, never the token itself, which no handler and no session sees. A session of a
@@ -344,9 +345,35 @@ principal that names it is answered as if it did not exist. A stream that a requ
 a subscription) ends when the token that opened it expires, with the leeway; the client opens it again with its
 current token.
 
+Fixed tokens. A server without an authorization server sets `HttpServerOptions::fixed_tokens` instead
+(`neomcp/http/fixed_tokens.h`): a table of tokens the application gives, each with the subject it acts for, the
+scopes it grants and, when it has one, its expiry.
+
+```cpp
+std::vector<neomcp::http::FixedToken> tokens;
+tokens.push_back({.token = read_secret("ci"), .subject = "ci", .scopes = {"mcp:use", "notes:write"}});
+auto table = neomcp::http::FixedTokenTable::create(std::move(tokens));  // or a FixedTokenError: what, and which entry
+neomcp::http::FixedTokenOptions fixed;
+fixed.tokens = std::get<neomcp::http::FixedTokenTable>(std::move(table));
+fixed.required_scopes = {"mcp:use"};
+options.fixed_tokens = std::move(fixed);
+```
+
+The grants reach `Context::authorization()` (with an empty issuer) and the scopes items declare as an OAuth token's
+do, and `required_scopes`, the 403 and its scopes are the same. No metadata document is published and the challenges
+carry no `resource_metadata`: a request without a token gets 401 with a plain `Bearer` challenge (with `scope` when
+`required_scopes` is not empty). The table keeps SHA-256 digests of the tokens, never their text, and compares the
+digest of a presented token with every entry in a time that does not depend on their bytes. `create` refuses an
+empty, duplicate or malformed token (one a client cannot send as a Bearer token), an empty subject, a value that is
+not a scope token, and more tokens or scopes than its bounds (1024 tokens and 256 scopes each by default).
+`HttpServer::replace_fixed_tokens` swaps the whole table while the server runs: a request sees the old table or the
+new one, and a token that is gone is refused from the next request on. A stream already open stays open until the
+expiry of the token that opened it, so tokens that may be removed should have one. `authorization` and `fixed_tokens`
+are not set together.
+
 On stdio and in process there is no token and no identity: credentials come from the environment there, and declared
-scopes are not checked. A server that protects its items serves them only over HTTP with `authorization`.
-[examples/protected_server.cpp](examples/protected_server.cpp) is a complete program.
+scopes are not checked. A server that protects its items serves them only over HTTP with `authorization` or
+`fixed_tokens`. [examples/protected_server.cpp](examples/protected_server.cpp) is a complete program.
 
 ## Asking the client
 

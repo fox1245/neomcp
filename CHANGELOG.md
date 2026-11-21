@@ -25,6 +25,13 @@ interface, and a new patch number does not.
   `errors`, the extensions in force and the codes it forbids a sender to use); a request whose handler uses another
   code, or whose answer is longer than `max_message_bytes`, is answered with an internal error whose message is fixed.
 - A host (`neomcp::ToolHost`) completes a call with `neomcp::ApplicationFailure` for the same.
+- Fixed bearer tokens for a server without an authorization server: `HttpServerOptions::fixed_tokens` (and
+  `EndpointOptions::fixed_tokens`) take a `neomcp::http::FixedTokenTable` of tokens, each with its subject, scopes and
+  optional expiry (`neomcp/http/fixed_tokens.h`). The grants reach `Context::authorization()` and the declared scopes
+  of items as an OAuth token's do; no protected resource metadata is served and the challenges carry no
+  `resource_metadata`. The table keeps SHA-256 digests only and compares in constant time over every entry;
+  `FixedTokenTable::create` refuses what it cannot serve with a `FixedTokenError`; `replace_fixed_tokens` swaps the
+  table while the server runs.
 
 ### Client
 

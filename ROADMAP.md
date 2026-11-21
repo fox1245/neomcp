@@ -110,6 +110,17 @@ ends when the token that opened it expires. Every bound is tested at its edge an
 which runs on the wall clock, past its edge only), and the library's own client signs in to this server end to end. On
 stdio and in process there is no identity and declared scopes are not checked.
 
+## Fixed bearer tokens on the server: done
+
+A server without an authorization server takes a table of tokens the application gives
+(`neomcp::http::FixedTokenOptions`), each with its subject, scopes and optional expiry. The grants reach the handler
+and the scopes items declare as an OAuth token's do; no metadata document is published and the challenges are plain
+Bearer challenges. The table keeps SHA-256 digests and compares a presented token's digest with every entry in
+constant time; it refuses at creation what it cannot serve (empty, duplicate or malformed tokens, empty subjects,
+values that are not scope tokens, more tokens or scopes than its bounds) with a typed error, and is replaced whole
+while the server runs. Tested over every revision the HTTP endpoint serves, under replacement while requests run, and
+with the library's own client sending a static token.
+
 ## Packaging: done
 
 Install rules and a CMake package configuration (`find_package(neomcp CONFIG COMPONENTS ...)`), static and, on
@@ -120,12 +131,6 @@ Linux, shared libraries; versioned releases from 0.1.0.
 - **The tasks extension.** Done: the profile data of tasks for 2025-11-25 and of the extension
   `io.modelcontextprotocol/tasks` for 2026-07-28, and the task store. Still to come: running tools as tasks, the
   wire of both revisions on the server, the client, and the conformance suite's `tasks-*` scenarios.
-
-## Not started: later steps
-
-- **A validator of fixed bearer tokens** for a server without an authorization server: a table of tokens and the scopes
-  each grants, whose scopes reach the handler and the declared scopes of items as an OAuth token's do, without
-  protected resource metadata.
 
 ## Open items in what exists
 
