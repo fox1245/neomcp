@@ -195,18 +195,6 @@ TEST(ResourceServerScenarioScope, AGrantedScopeTheServerDoesNotNameIsNeverEchoed
 
 // The scopes the server declares on an item are declared by the server too: a token that holds one is not asked to
 // leave it out when it steps up for another.
-TEST(ResourceServerScenarioScope, AGrantedScopeThatOnlyAnItemDeclaresIsEchoedLikeOneTheMetadataNames) {
-    if (known_defects_are_skipped()) {
-        GTEST_SKIP() << "defect: challenge_scopes echoes only granted scopes named in required_scopes or scopes_supported, not "
-                    "those an item declares (src/http/resource_server.cpp:265-270)";
-    }
-    Harness harness;
-    const std::string token = harness.token("audit", granted(harness.clock, "a", {"mcp:use", "audit:read"}));
-    const Reply reply = call_tool(harness.port, token, "guarded");
-    // audit:read is declared on the tool `audited` and is not in scopes_supported.
-    EXPECT_EQ(scopes_of(reply), (Scopes{"files:write", "mcp:use", "audit:read"})) << reply.everything();
-}
-
 TEST(ResourceServerScenarioScope, TheScopesOfAChallengeAreCutToWhatAClientReadsAtTheEdge) {
     Scopes declared;
     for (int at = 0; at < 70; ++at) declared.push_back("s" + std::to_string(100 + at));

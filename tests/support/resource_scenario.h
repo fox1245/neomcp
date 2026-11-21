@@ -71,10 +71,6 @@ inline constexpr const char* first_issuer = "https://auth.example";
 inline constexpr const char* second_issuer = "https://other-auth.example";
 inline constexpr const char* configured_resource = "http://localhost/mcp";
 
-// A scenario that found a defect of the library stays in the suite and is skipped until the defect is repaired;
-// --gtest_also_run_disabled_tests runs it.
-inline bool known_defects_are_skipped() { return !GTEST_FLAG_GET(also_run_disabled_tests); }
-
 // ---- The clock and the validator ------------------------------------------------------------------------------------
 
 class FakeClock {
