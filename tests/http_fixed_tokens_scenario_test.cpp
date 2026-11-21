@@ -1,15 +1,18 @@
 // Scenarios of the Streamable HTTP endpoint protected by fixed tokens, over loopback sockets: a token of the table
 // reaches the handler with its subject and scopes on every revision; the plain challenges (no resource_metadata) for
 // no token, an unreadable field, and a token that is unknown, expired, removed or replaced; no metadata document;
-// required_scopes and the scopes items declare; the owner of a session; the end of a stream; and what start() refuses.
+// required_scopes and the scopes items declare; the owner of a session; the end of a stream; what start() refuses;
+// and the endpoint on its own: both kinds of tokens refused, fixed tokens in its options, a request while it stops.
 #include <chrono>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#include "neomcp/http/endpoint.h"
 #include "support/fixed_tokens_scenario.h"
 
 namespace {
@@ -292,6 +295,78 @@ TEST(FixedTokensServer, RequiredScopesWithWhatOneItemDeclaresFitOneChallengeAtTh
     neomcp::Server server(server_options());
     server.tool("guarded", "Needs files:write", [] { return std::string("w"); }).scopes({"files:write"});
     EXPECT_NE(start_error(server, quick_options()).find("fixed_tokens"), std::string::npos);
+}
+
+// ---- The endpoint on its own ----------------------------------------------------------------------------------------
+
+neomcp::http::HostPolicy any_policy() {
+    auto policy = neomcp::http::HostPolicy::create({});
+    if (!policy) throw std::runtime_error(policy.error);
+    return std::move(*policy.value);
+}
+
+TEST(FixedTokensEndpoint, CreateRefusesAuthorizationAndFixedTokensTogether) {
+    neomcp::Server server(server_options());
+    const auto table = std::make_shared<Table>();
+    FakeClock clock;
+    neomcp::http::EndpointOptions options;
+    options.fixed_tokens = some_tokens();
+    options.authorization = resource_options(table, clock);
+    auto made = neomcp::http::Endpoint::create(server, any_policy(), std::move(options));
+    ASSERT_FALSE(made);
+    EXPECT_NE(made.error.find("both set"), std::string::npos);
+}
+
+TEST(FixedTokensEndpoint, FixedTokensInTheEndpointOptionsAloneServeAsInTheServerOptions) {
+    neomcp::Server server(server_options());
+    Items items;
+    register_items(server, items);
+    neomcp::HttpServerOptions options = quick_options();
+    options.endpoint.fixed_tokens = some_tokens();
+    neomcp::HttpServer http(server, std::move(options));
+    auto started = http.start();
+    ASSERT_TRUE(started) << started.error;
+    const Reply reply = call_tool(*started.value, "t", "whoami");
+    ASSERT_EQ(reply.status, 200) << reply.body;
+    EXPECT_EQ(who_of(reply).at("subject"), "alice");
+    expect_refusal(list_tools(*started.value, std::nullopt), 401, plain_challenge);
+    expect_invalid_token(list_tools(*started.value, "other"));
+    EXPECT_EQ(send(*started.value, "GET", {}, {}, document_path_of_endpoint).status, 404);
+    EXPECT_TRUE(http.replace_fixed_tokens(fixed_table({fixed("u", "bob", {"mcp:use"})})));
+    expect_invalid_token(list_tools(*started.value, "t"));
+    EXPECT_EQ(list_tools(*started.value, "u").status, 200);
+    http.stop();
+}
+
+TEST(FixedTokensEndpoint, ARequestWithATableTokenWhileTheEndpointStopsGets503) {
+    neomcp::Server server(server_options());
+    neomcp::http::EndpointOptions options;
+    options.fixed_tokens = some_tokens();
+    auto made = neomcp::http::Endpoint::create(server, any_policy(), std::move(options));
+    ASSERT_TRUE(made) << made.error;
+    neomcp::http::Endpoint& endpoint = **made.value;
+    endpoint.stop();
+    neomcp::http::Request request;
+    request.method = "POST";
+    request.path = endpoint_path;
+    request.headers = {{"Host", "localhost"},
+                       {"Content-Type", json_media_type},
+                       {"Accept", both_media_types},
+                       {"MCP-Protocol-Version", modern_revision},
+                       {"Mcp-Method", "tools/list"},
+                       {"Authorization", "Bearer t"}};
+    request.body = rpc(1, "tools/list", modern_params());
+    std::optional<neomcp::http::Response> answer;
+    endpoint.handle(std::move(request), neomcp::http::Responder([&answer](neomcp::http::Response&& response) {
+                        answer = std::move(response);
+                        return true;
+                    }));
+    ASSERT_TRUE(answer) << "answered at once";
+    EXPECT_EQ(answer->status, 503);
+    const json body = json::parse(answer->body);
+    EXPECT_EQ(body.at("jsonrpc"), "2.0");
+    EXPECT_TRUE(body.contains("error"));
+    EXPECT_FALSE(answer->headers.get("WWW-Authenticate"));
 }
 
 }  // namespace
