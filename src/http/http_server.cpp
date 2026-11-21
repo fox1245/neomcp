@@ -73,13 +73,23 @@ http::Outcome<std::uint16_t> HttpServer::start() {
         }
         endpoint_options.authorization = options_.authorization;
     }
+    if (options_.fixed_tokens) {
+        if (endpoint_options.fixed_tokens) {
+            return Result::failure("fixed_tokens is set twice: in the options and in their endpoint options");
+        }
+        endpoint_options.fixed_tokens = options_.fixed_tokens;
+    }
+    if (endpoint_options.authorization && endpoint_options.fixed_tokens) {
+        return Result::failure("authorization and fixed_tokens are both set: the server has one kind of tokens");
+    }
     if (endpoint_options.authorization) {
         if (endpoint_options.authorization->bounds.max_token_bytes > http::ResourceServerDefaults::max_token_bytes) {
             return Result::failure("authorization: max_token_bytes is more than the listener lets through (" +
                                    std::to_string(http::ResourceServerDefaults::max_token_bytes) + " bytes)");
         }
-    } else if (server_.declares_scopes()) {
-        return Result::failure("items declare scopes, which need authorization: set the authorization options");
+    } else if (!endpoint_options.fixed_tokens && server_.declares_scopes()) {
+        return Result::failure(
+            "items declare scopes, which need authorization: set the authorization or the fixed_tokens options");
     }
     auto endpoint = http::Endpoint::create(server_, std::move(*provisional.value), std::move(endpoint_options));
     if (!endpoint) return Result::failure(endpoint.error);
@@ -125,6 +135,11 @@ void HttpServer::stop() noexcept {
 http::Outcome<bool> HttpServer::update_authorization_servers(std::vector<std::string> issuers) {
     if (!endpoint_) return http::Outcome<bool>::failure("the server has not started");
     return endpoint_->update_authorization_servers(std::move(issuers));
+}
+
+http::Outcome<bool> HttpServer::replace_fixed_tokens(http::FixedTokenTable tokens) {
+    if (!endpoint_) return http::Outcome<bool>::failure("the server has not started");
+    return endpoint_->replace_fixed_tokens(std::move(tokens));
 }
 
 std::uint16_t HttpServer::port() const noexcept { return listener_ ? listener_->port() : 0; }

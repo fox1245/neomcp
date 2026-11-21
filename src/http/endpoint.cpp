@@ -18,6 +18,8 @@
 // its timeout on the timer, or stop()); the thread that settles it hands the waiters on one at a time, without the
 // lock, and a request with the same token that arrives meanwhile joins the end of the list. Only when the list is
 // empty does the flight end and its verdict become a remembered one, so no later request overtakes a waiting one.
+// With fixed tokens there is no validator, nothing waits and nothing is remembered: the request takes the table that is
+// current (Impl::fixed_table, under gate_mutex), looks its token up outside the lock and is delivered at once.
 //
 // Sessions nobody used. A kept entry is listed in Impl::unused, in the order it was kept, until a request names it
 // (find) or it ends; the list and the entry's place in it are guarded by Impl::mutex, so a newcomer that takes the
@@ -392,6 +394,7 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
           policy(std::make_shared<const HostPolicy>(std::move(host_policy))),
           document(std::move(metadata)) {
         if (resource_server) issuers = resource_server->options.authorization_servers;
+        if (options.fixed_tokens) fixed_table = options.fixed_tokens->tokens;
         const auto add_name = [](std::vector<std::string>& names, const std::string& name) {
             const bool known = std::any_of(names.begin(), names.end(),
                                            [&](const std::string& seen) { return equal_ignoring_case(seen, name); });
@@ -424,6 +427,7 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
 
     // ---- the gate
     void authorize(Request request, Responder responder);
+    void authorize_fixed(Request request, Responder responder, std::string_view token);
     void validate(const TokenKey& key, const std::shared_ptr<Flight>& flight, std::string& token);
     void settle(const TokenKey& key, const std::shared_ptr<Flight>& flight, TokenVerdict reported);
     void deliver(Waiter waiter, const Verdict& verdict);
@@ -524,6 +528,7 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
     std::shared_ptr<const std::string> document;  // the metadata document now
     std::map<TokenKey, std::shared_ptr<Flight>> flights;
     std::map<TokenKey, Remembered> remembered;
+    FixedTokenTable fixed_table;  // with fixed tokens: the table now
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1474,6 +1479,11 @@ void Endpoint::Impl::authorize(Request request, Responder responder) {
         return;
     }
     std::string token = std::move(std::get<BearerCredentials>(credentials).token);
+    if (config.fixed_tokens) {
+        authorize_fixed(std::move(request), std::move(responder), token);
+        neomcp::detail::wipe(token.data(), token.size());
+        return;
+    }
     const TokenKey key{neomcp::detail::sha256(token), token.size()};
 
     std::optional<Verdict> known;
@@ -1515,6 +1525,27 @@ void Endpoint::Impl::authorize(Request request, Responder responder) {
     } else if (known) {
         deliver(Waiter{std::move(request), std::move(responder)}, *known);
     }
+}
+
+void Endpoint::Impl::authorize_fixed(Request request, Responder responder, std::string_view token) {
+    std::optional<FixedTokenTable> table;
+    {
+        std::lock_guard lock(gate_mutex);
+        if (!gate_stopped) table = fixed_table;
+    }
+    if (!table) {
+        refuse(responder, reason::stopping, nullptr, "Service unavailable: the server is stopping",
+               error_code::internal_error);
+        return;
+    }
+    Verdict verdict{Verdict::Kind::invalid, nullptr};
+    if (std::shared_ptr<const Authorization> granted = table->find(token)) {
+        // The expiry is the application's, on the endpoint's clock: no leeway.
+        if (!granted->expires || resource_server->now() < *granted->expires) {
+            verdict = Verdict{Verdict::Kind::valid, std::move(granted)};
+        }
+    }
+    deliver(Waiter{std::move(request), std::move(responder)}, verdict);
 }
 
 void Endpoint::Impl::validate(const TokenKey& key, const std::shared_ptr<Flight>& flight, std::string& token) {
@@ -1655,7 +1686,7 @@ Response Endpoint::Impl::scope_response(std::span<const std::string> missing, co
     const detail::ResourceServerConfig& config = *resource_server;
     std::vector<std::string> scopes = detail::challenge_scopes(
         missing, config, granted != nullptr ? std::span<const std::string>(granted->scopes) : std::span<const std::string>());
-    auto written = write_bearer_challenge(BearerChallengeParts{config.metadata_url, std::move(scopes),
+    auto written = write_bearer_challenge(BearerChallengeParts{config.resource_metadata(), std::move(scopes),
                                                                std::string(bearer_error_insufficient_scope),
                                                                std::nullopt});
     auto* challenge = std::get_if<std::string>(&written);
@@ -1822,6 +1853,17 @@ Outcome<std::unique_ptr<Endpoint>> detail::EndpointProbe::create(Server& server,
     }
     std::unique_ptr<const ResourceServerConfig> gate;
     std::shared_ptr<const std::string> metadata;
+    if (options.authorization && options.fixed_tokens) {
+        return Result::failure("authorization and fixed_tokens are both set: the endpoint has one kind of tokens");
+    }
+    if (options.fixed_tokens) {
+        auto configured = configure_fixed(*options.fixed_tokens);
+        if (!configured) return Result::failure("fixed_tokens: " + configured.error);
+        if (auto adopted = adopt_declarations(*configured.value, server.scope_declarations()); !adopted) {
+            return Result::failure("fixed_tokens: " + adopted.error);
+        }
+        gate = std::make_unique<const ResourceServerConfig>(std::move(*configured.value));
+    }
     if (options.authorization) {
         auto configured = configure(*options.authorization);
         if (!configured) return Result::failure("authorization: " + configured.error);
@@ -1875,17 +1917,20 @@ void Endpoint::set_policy(HostPolicy policy) {
 void Endpoint::stop() noexcept { impl_->stop(); }
 
 Handler Endpoint::metadata_handler() {
-    if (!impl_->resource_server) return {};
+    if (!impl_->resource_server || impl_->resource_server->fixed_tokens) return {};
     return [impl = impl_](Request request, Responder responder) { impl->serve_metadata(request, responder); };
 }
 
 std::optional<std::string> Endpoint::metadata_path() const {
-    if (!impl_->resource_server) return std::nullopt;
+    if (!impl_->resource_server || impl_->resource_server->fixed_tokens) return std::nullopt;
     return impl_->resource_server->metadata_path;
 }
 
 Outcome<bool> Endpoint::update_authorization_servers(std::vector<std::string> issuers) {
     if (!impl_->resource_server) return Outcome<bool>::failure("the endpoint has no authorization");
+    if (impl_->resource_server->fixed_tokens) {
+        return Outcome<bool>::failure("the endpoint has fixed tokens, and no authorization servers");
+    }
     if (std::string problem = detail::check_authorization_servers(issuers); !problem.empty()) {
         return Outcome<bool>::failure(problem);
     }
@@ -1895,6 +1940,18 @@ Outcome<bool> Endpoint::update_authorization_servers(std::vector<std::string> is
     std::lock_guard lock(impl_->gate_mutex);
     impl_->issuers = std::move(issuers);
     impl_->document = std::move(replacement);
+    return Outcome<bool>::success(true);
+}
+
+Outcome<bool> Endpoint::replace_fixed_tokens(FixedTokenTable tokens) {
+    if (!impl_->resource_server || !impl_->resource_server->fixed_tokens) {
+        return Outcome<bool>::failure("the endpoint has no fixed tokens");
+    }
+    {
+        std::lock_guard lock(impl_->gate_mutex);
+        std::swap(impl_->fixed_table, tokens);
+    }
+    // The table before is let go here, outside the lock (a request that took it still holds it).
     return Outcome<bool>::success(true);
 }
 

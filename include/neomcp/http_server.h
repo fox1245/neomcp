@@ -21,8 +21,10 @@
 //
 // Authorization. With `authorization` set, the server is an OAuth protected resource (neomcp/http/resource_server.h):
 // every request to `path` needs a valid Bearer token, and the protected resource metadata document is served on its
-// own path. A server whose tools, resources, templates or prompts declare scopes does not start without it, so that a
-// forgotten option cannot leave a protected item open.
+// own path. With `fixed_tokens` set instead, the tokens are a table the application gives, without an authorization
+// server and without a metadata document (neomcp/http/fixed_tokens.h). A server whose tools, resources, templates or
+// prompts declare scopes does not start without one of the two, so that a forgotten option cannot leave a protected
+// item open.
 #pragma once
 
 #include <chrono>
@@ -35,6 +37,7 @@
 #include <vector>
 
 #include "neomcp/http/endpoint.h"
+#include "neomcp/http/fixed_tokens.h"
 #include "neomcp/http/listener.h"
 #include "neomcp/http/outcome.h"
 #include "neomcp/http/policy.h"
@@ -67,6 +70,11 @@ struct HttpServerOptions {
     // pass the Host check (every request would be refused). Empty: no token is needed or read.
     std::optional<http::ResourceServerOptions> authorization{};
 
+    // When set, every request needs a token of the application's table (see neomcp/http/fixed_tokens.h), and no
+    // metadata document is served. start() fails when endpoint.fixed_tokens is set as well, or when `authorization`
+    // (here or in the endpoint options) is set too.
+    std::optional<http::FixedTokenOptions> fixed_tokens{};
+
     // The listener (see http::ListenerOptions). The body bound is the server's max_message_bytes.
     std::size_t worker_threads = http::ListenerDefaults::worker_threads;
     std::size_t max_worker_threads = http::ListenerDefaults::max_worker_threads;
@@ -97,14 +105,18 @@ public:
 
     // Binds, starts serving and returns the bound port, or why it could not: an option out of range, an address or
     // port that cannot be bound, a Host check that cannot be built (a non-loopback address without allowed_hosts),
-    // revisions that cannot be served on Streamable HTTP, authorization that cannot be served (see `authorization`),
-    // items that declare scopes without authorization, or an item that declares more scopes than one challenge can
-    // ask for. Starts once; a second call fails.
+    // revisions that cannot be served on Streamable HTTP, authorization that cannot be served (see `authorization`
+    // and `fixed_tokens`), items that declare scopes without either, or an item that declares more scopes than one
+    // challenge can ask for. Starts once; a second call fails.
     http::Outcome<std::uint16_t> start();
 
     // Replaces the authorization servers (see http::Endpoint::update_authorization_servers). Fails before start(),
     // without authorization, or for a list that cannot be used.
     http::Outcome<bool> update_authorization_servers(std::vector<std::string> issuers);
+
+    // Replaces the table of fixed tokens (see http::Endpoint::replace_fixed_tokens). Fails before start(), or without
+    // fixed_tokens.
+    http::Outcome<bool> replace_fixed_tokens(http::FixedTokenTable tokens);
 
     // Closes every session and stream (an open subscription ends gracefully, and its end is written out within the
     // write timeout), stops listening and returns when the listener's threads have left (within about the read and

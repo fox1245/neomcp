@@ -45,6 +45,8 @@
 // method check (step 2, for any other method than POST, GET and DELETE) and the rest, every request needs a valid
 // Bearer token, and a session belongs to the principal of the request that opened it; neomcp/http/resource_server.h
 // says what is checked and answered. The metadata document is served by metadata_handler(), on metadata_path().
+// With EndpointOptions::fixed_tokens set instead, the tokens are a table the application gives, without an
+// authorization server and without a metadata document (see neomcp/http/fixed_tokens.h).
 //
 // Threads: the endpoint has one thread of its own, which runs its deadlines. It never holds a lock while it calls
 // into a session, a responder, a stream or a validator. A request whose token is being validated goes on on the
@@ -59,6 +61,7 @@
 #include <vector>
 
 #include "neomcp/http/body_stream.h"
+#include "neomcp/http/fixed_tokens.h"
 #include "neomcp/http/message.h"
 #include "neomcp/http/outcome.h"
 #include "neomcp/http/policy.h"
@@ -97,8 +100,12 @@ struct EndpointOptions {
     std::size_t max_stream_buffer_bytes = BodyStream::default_max_buffered_bytes;
 
     // When set, the endpoint is an OAuth protected resource (see neomcp/http/resource_server.h). Empty: no request
-    // needs a token, and none is read.
+    // needs a token, and none is read (unless fixed_tokens is set).
     std::optional<ResourceServerOptions> authorization{};
+
+    // When set, every request needs a token of the application's table (see neomcp/http/fixed_tokens.h). Not with
+    // `authorization`.
+    std::optional<FixedTokenOptions> fixed_tokens{};
 };
 
 namespace detail {
@@ -107,11 +114,11 @@ struct EndpointProbe;
 
 class Endpoint {
 public:
-    // Fails, with a message, when an option is out of range (the authorization's included), when with authorization
-    // the scopes one item declares cannot be asked for in one challenge (see neomcp/http/resource_server.h), or when a
-    // session of the server cannot be served on Streamable HTTP (no enabled revision defines the transport, or a
-    // mechanism has no implementation). The server must outlive the endpoint. Creating it ends the registration of the
-    // server's tools.
+    // Fails, with a message, when an option is out of range (the authorization's included), when both authorization
+    // and fixed_tokens are set, when with either the scopes one item declares cannot be asked for in one challenge
+    // (see neomcp/http/resource_server.h), or when a session of the server cannot be served on Streamable HTTP (no
+    // enabled revision defines the transport, or a mechanism has no implementation). The server must outlive the
+    // endpoint. Creating it ends the registration of the server's tools.
     static Outcome<std::unique_ptr<Endpoint>> create(Server& server, HostPolicy policy, EndpointOptions options = {});
 
     // Calls stop().
@@ -130,8 +137,8 @@ public:
     void set_policy(HostPolicy policy);
 
     // With authorization: the handler of the protected resource metadata document (GET and HEAD, under the same Host
-    // and Origin policy, no token needed; another method is answered 405), and the path to serve it on. Without: an
-    // empty handler and no path. The endpoint must outlive every use of the handler.
+    // and Origin policy, no token needed; another method is answered 405), and the path to serve it on. Without, and
+    // with fixed tokens: an empty handler and no path. The endpoint must outlive every use of the handler.
     Handler metadata_handler();
     std::optional<std::string> metadata_path() const;
 
@@ -139,6 +146,11 @@ public:
     // tokens of these issuers are accepted. Fails without authorization, or for a list that cannot be used (and then
     // nothing changes).
     Outcome<bool> update_authorization_servers(std::vector<std::string> issuers);
+
+    // Replaces the table of fixed tokens at once: a request sees the table before or this one, and from the next
+    // request on only the tokens of this one are accepted, with what this one grants. Thread-safe. Fails without
+    // fixed_tokens (and then nothing changes).
+    Outcome<bool> replace_fixed_tokens(FixedTokenTable tokens);
 
     // Closes every session and every stream: requests waiting for an answer are answered 503, an open subscription
     // ends gracefully (its stream gets the end and then ends), the other open streams are cut, and a request that

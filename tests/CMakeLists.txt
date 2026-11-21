@@ -389,12 +389,35 @@ foreach(scenario_name IN ITEMS token scope session bounds)
     gtest_discover_tests(neomcp_http_resource_server_scenario_${scenario_name}_test DISCOVERY_TIMEOUT 120)
 endforeach()
 
-# The table of fixed tokens on its own; it reaches the internal scan of its digests.
+# The endpoint protected by a fixed table of tokens: the table on its own (which reaches the internal scan of its
+# digests), the scenarios over loopback sockets, the table replaced while requests run, and the library's own client
+# with a static token (with the HTTP client only). The scenarios share tests/support/fixed_tokens_scenario.h.
 add_executable(neomcp_http_fixed_tokens_table_test http_fixed_tokens_table_test.cpp)
 target_link_libraries(neomcp_http_fixed_tokens_table_test PRIVATE neomcp::http GTest::gtest_main)
 target_include_directories(neomcp_http_fixed_tokens_table_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
 neomcp_configure_target(neomcp_http_fixed_tokens_table_test)
 gtest_discover_tests(neomcp_http_fixed_tokens_table_test DISCOVERY_TIMEOUT 120)
+
+foreach(fixed_tokens_name IN ITEMS scenario replace)
+    add_executable(neomcp_http_fixed_tokens_${fixed_tokens_name}_test http_fixed_tokens_${fixed_tokens_name}_test.cpp)
+    target_link_libraries(neomcp_http_fixed_tokens_${fixed_tokens_name}_test
+        PRIVATE neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)
+    target_include_directories(neomcp_http_fixed_tokens_${fixed_tokens_name}_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    neomcp_configure_target(neomcp_http_fixed_tokens_${fixed_tokens_name}_test)
+    gtest_discover_tests(neomcp_http_fixed_tokens_${fixed_tokens_name}_test DISCOVERY_TIMEOUT 120)
+endforeach()
+
+if(NEOMCP_HTTP_CLIENT)
+    add_executable(neomcp_http_fixed_tokens_client_test http_fixed_tokens_client_test.cpp)
+    target_link_libraries(neomcp_http_fixed_tokens_client_test
+        PRIVATE neomcp::client_http neomcp::client neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)
+    target_include_directories(neomcp_http_fixed_tokens_client_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(WIN32)
+        target_link_libraries(neomcp_http_fixed_tokens_client_test PRIVATE ws2_32)
+    endif()
+    neomcp_configure_target(neomcp_http_fixed_tokens_client_test)
+    gtest_discover_tests(neomcp_http_fixed_tokens_client_test DISCOVERY_TIMEOUT 120)
+endif()
 
 # A tool call whose argument a schema `pattern` checks, next to another client's request, on a listener with one worker.
 add_executable(neomcp_http_pattern_check_test http_pattern_check_test.cpp)

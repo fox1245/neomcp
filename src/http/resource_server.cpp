@@ -139,6 +139,11 @@ std::chrono::system_clock::time_point ResourceServerConfig::now() const {
     return options.clock ? options.clock() : std::chrono::system_clock::now();
 }
 
+std::optional<std::string> ResourceServerConfig::resource_metadata() const {
+    if (fixed_tokens) return std::nullopt;
+    return metadata_url;
+}
+
 std::string check_authorization_servers(const std::vector<std::string>& issuers) {
     if (issuers.empty()) return "authorization_servers must name one authorization server at least";
     if (issuers.size() > ResourceServerDefaults::max_authorization_servers) {
@@ -215,6 +220,34 @@ Outcome<ResourceServerConfig> configure(ResourceServerOptions options) {
     if (auto document = metadata_document(config, config.options.authorization_servers); !document) {
         return Result::failure(document.error);
     }
+    return Result::success(std::move(config));
+}
+
+Outcome<ResourceServerConfig> configure_fixed(const FixedTokenOptions& options) {
+    using Result = Outcome<ResourceServerConfig>;
+    if (std::string problem = check_scopes(options.required_scopes, "required_scopes"); !problem.empty()) {
+        return Result::failure(problem);
+    }
+    if (!fits_a_challenge(options.required_scopes)) {
+        return Result::failure("required_scopes are more than a client reads in one challenge");
+    }
+    ResourceServerConfig config;
+    config.fixed_tokens = true;
+    config.options.required_scopes = options.required_scopes;
+    config.options.clock = options.clock;
+    config.options.bounds.leeway = std::chrono::seconds::zero();
+    // What a 403 may echo of the granted scopes, besides what the items declare: what every request needs.
+    config.scopes_supported = options.required_scopes;
+    const auto no_credentials = challenge({std::nullopt, options.required_scopes, std::nullopt, std::nullopt});
+    const auto invalid_request = challenge({std::nullopt, {}, std::string(bearer_error_invalid_request), std::nullopt});
+    const auto invalid_token =
+        challenge({std::nullopt, options.required_scopes, std::string(bearer_error_invalid_token), std::nullopt});
+    if (!no_credentials || !invalid_request || !invalid_token) {
+        return Result::failure("the challenges cannot be written");
+    }
+    config.no_credentials_challenge = *no_credentials;
+    config.invalid_request_challenge = *invalid_request;
+    config.invalid_token_challenge = *invalid_token;
     return Result::success(std::move(config));
 }
 

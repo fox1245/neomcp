@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "neomcp/authorization.h"
+#include "neomcp/http/fixed_tokens.h"
 #include "neomcp/http/outcome.h"
 #include "neomcp/http/resource_server.h"
 
@@ -26,12 +27,21 @@ struct ResourceServerConfig {
     std::string no_credentials_challenge;       // the WWW-Authenticate values that do not depend on the request
     std::string invalid_request_challenge;
     std::string invalid_token_challenge;
+    // Made by configure_fixed: the tokens are the application's table (see neomcp/http/fixed_tokens.h); `options` holds
+    // only required_scopes, the bounds and the clock, and there is no metadata document, no metadata URL and no issuer.
+    bool fixed_tokens = false;
 
     std::chrono::system_clock::time_point now() const;
+    // The resource_metadata of a challenge: the metadata URL; none with fixed tokens.
+    std::optional<std::string> resource_metadata() const;
 };
 
 // Checks the options and derives the rest; the failure names what is wrong.
 Outcome<ResourceServerConfig> configure(ResourceServerOptions options);
+
+// The same for fixed tokens: checks required_scopes and writes the challenges without resource_metadata. The bounds
+// are the defaults, but for the leeway, which is 0 (the expiries are the application's, on the endpoint's clock).
+Outcome<ResourceServerConfig> configure_fixed(const FixedTokenOptions& options);
 
 // An empty string when the list is usable as authorization_servers, else what is wrong.
 std::string check_authorization_servers(const std::vector<std::string>& issuers);
