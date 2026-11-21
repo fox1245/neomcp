@@ -73,14 +73,37 @@ settings of the environment are honoured; a stdio server that exited is started 
 times in a row at most; certificate verification cannot be switched off; libcurl comes from the system
 (`find_package(CURL)`), behind an option, so that a server-only build needs none.
 
+## The client's authorization: done
+
+`neomcp::OAuthAuthorizer` signs the HTTP client in where a server asks for OAuth authorization: discovery through
+protected resource metadata (and, for 2025-03-26 servers, the authorization server metadata on the server's own
+origin with its default endpoints), registration by a client ID metadata document, by dynamic registration or with
+credentials registered beforehand, PKCE, the issuer of the callback, refresh, step-up of scope and a change of
+authorization server. Every scored client authorization scenario of the official conformance suite passes at
+2025-11-25 and 2026-07-28, and the two 2025-03-26 scenarios pass as well; the six extension scenarios
+(client credentials, enterprise-managed authorization, DPoP, workload identity) are not supported.
+
+## Packaging: done
+
+Install rules and a CMake package configuration (`find_package(neomcp CONFIG COMPONENTS ...)`), static and, on
+Linux, shared libraries; versioned releases from 0.1.0.
+
+## In progress
+
+- **Authorization on the server.** Done: reading bearer credentials and writing challenges, declared scopes on
+  tools, resources, templates and prompts checked before a handler runs, the identity a handler sees, and the
+  Streamable HTTP endpoint as a protected resource (protected resource metadata, 401 and 403 answers, a validator
+  interface the application implements, a cache of verdicts, a stream closed when its token expires). Still to come:
+  the introspection validator (RFC 7662), the JWT validator (RFC 9068), and tests against the library's own client.
+- **The tasks extension.** Done: the profile data of tasks for 2025-11-25 and of the extension
+  `io.modelcontextprotocol/tasks` for 2026-07-28, and the task store. Still to come: running tools as tasks, the
+  wire of both revisions on the server, the client, and the conformance suite's `tasks-*` scenarios.
+
 ## Not started: later steps
 
-- **Authorization on the client** (OAuth: discovery, registration, scopes, token handling) and the conformance
-  suite's authorization scenarios.
-- **Authorization on the server** (validation of access tokens, protected resource metadata).
-- **The tasks extension.** The conformance suite's `tasks-*` scenarios are not scored and do not pass.
-- **Examples** (`examples/`): after everything above.
-- **Packaging**: install rules and a package configuration file; versioned releases.
+- **The client's loopback listener** for the browser's redirect (an optional target; the application's own handler
+  works today).
+- **Examples** (`examples/`).
 
 ## Open items in what exists
 

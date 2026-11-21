@@ -14,8 +14,9 @@
 ---
 
 neomcp is a C++ library for writing [Model Context Protocol](https://modelcontextprotocol.io) (MCP) servers and
-clients. Work in progress: servers and clients over stdio and HTTP work today, the client signs in to servers that
-ask for OAuth authorization, the server does not ask for it yet, and the interface may still change.
+clients. Servers and clients over stdio and HTTP work today, the client signs in to servers that ask for OAuth
+authorization, and a server can ask for it with a token validator the application supplies. The interface may still
+change before 1.0.
 
 ## Status
 
@@ -59,8 +60,9 @@ What exists now:
   of the application's environment reaches the server only when the application passes it. The HTTP client honours
   the proxy settings of the environment unless told otherwise, follows redirects only within the endpoint's origin,
   and always verifies certificates.
-- The client is run in CI against the official conformance suite: every client scenario that needs no
-  authorization passes at 2025-11-25 and 2026-07-28. It is also run against the library's own servers over every
+- The client is run in CI against the official conformance suite: every scored client scenario passes at
+  2025-11-25 and 2026-07-28, the authorization scenarios included, and so do the two 2025-03-26 authorization
+  scenarios. It is also run against the library's own servers over every
   transport and revision, against servers that serve only one of the two eras, and against the official Python
   SDK's servers over stdio, Streamable HTTP and the older transport of events over HTTP.
 
@@ -69,10 +71,16 @@ What exists now:
   hands the application the URL to open in a browser, and sends the tokens it obtains, refreshing them or asking for
   more scope as the server requires.
 
+- A Streamable HTTP server that asks for OAuth authorization (`neomcp::http::ResourceServerOptions`, in
+  `neomcp/http/resource_server.h`): it publishes its protected resource metadata, answers requests without a valid
+  token with the challenge clients follow, checks the audience, issuer, lifetime and scope of every token through a
+  validator the application supplies, and checks the scopes that tools, resources, templates and prompts declare
+  before their handlers run.
+
 Still planned:
 
-- Authorization for the server.
-- Running the client's sign-in in CI against the authorization scenarios of the official conformance suite.
+- Validators for the server: token introspection (RFC 7662) and JWT access tokens (RFC 9068).
+- The tasks extension (long-running tool calls).
 
 [ROADMAP.md](ROADMAP.md) lists the work that is in progress and the work that has not been started.
 
