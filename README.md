@@ -100,6 +100,40 @@ client that only starts servers as child processes, can be built with the option
 Python SDK's client, and the official Python SDK's servers with this library's client. Install
 `tests/interop/requirements.txt` into a Python environment and pass its interpreter as `NEOMCP_INTEROP_PYTHON`.
 
+## Using an installed neomcp
+
+`NEOMCP_INSTALL` (default ON when neomcp is the top-level project) generates the install rules and a CMake package
+configuration:
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNEOMCP_BUILD_TESTS=OFF
+cmake --build build
+cmake --install build --prefix /opt/neomcp
+```
+
+A project then finds the package and links the components it uses (add the prefix to `CMAKE_PREFIX_PATH` when CMake
+does not search it by itself):
+
+```cmake
+find_package(neomcp CONFIG REQUIRED COMPONENTS server stdio)
+target_link_libraries(app PRIVATE neomcp::server neomcp::stdio)
+```
+
+Each component is the target of the same name: `server`, `stdio`, `http`, `http_base`, `client`,
+`client_in_process`, `client_stdio`, `client_http`, `client_auth`, `core`, `profile`, `schema`, `describe`, `crypto`.
+A component the build left out (`client_http` without `NEOMCP_HTTP_CLIENT`) is reported as not found. The packages a
+component needs are looked for only when it is asked for: `client_http` needs libcurl, found as the build found it, and
+every component needs the thread library. Without `COMPONENTS` every installed component is asked for.
+
+The headers of standalone Asio and of neojson, which neomcp's own headers include, are installed with it in
+`include/neomcp/deps`, and neojson's library in `lib/neomcp`; in a static build, the libraries of RE2 and Abseil that
+neomcp's libraries link are installed there as well, without their headers. A version asked for in `find_package`
+matches an installed version with the same major and minor numbers and a patch number at least as high.
+
+Libraries are static by default. `BUILD_SHARED_LIBS=ON` builds shared ones where symbols are visible by default (the
+installed libraries find each other through their run path); CI checks this on Linux, and macOS may work but no build
+checks it. Windows supports static libraries only.
+
 ## A first server
 
 ```cpp
