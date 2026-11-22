@@ -216,6 +216,7 @@ gtest_discover_tests(neomcp_server_features_test DISCOVERY_TIMEOUT 120)
 # Items switched while the server serves, updated resources, and what the sessions of each revision tell.
 add_executable(neomcp_server_feed_test server_feed_test.cpp)
 target_link_libraries(neomcp_server_feed_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
+target_include_directories(neomcp_server_feed_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 neomcp_configure_target(neomcp_server_feed_test)
 gtest_discover_tests(neomcp_server_feed_test DISCOVERY_TIMEOUT 120)
 
@@ -468,6 +469,14 @@ target_link_libraries(neomcp_http_session_header_era_test
 target_include_directories(neomcp_http_session_header_era_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 neomcp_configure_target(neomcp_http_session_header_era_test)
 gtest_discover_tests(neomcp_http_session_header_era_test DISCOVERY_TIMEOUT 120)
+
+# A burst of change notifications held in the server's feed, then carried by the stream of a session and of a
+# subscription, over loopback sockets.
+add_executable(neomcp_http_change_burst_test http_change_burst_test.cpp)
+target_link_libraries(neomcp_http_change_burst_test PRIVATE neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)
+target_include_directories(neomcp_http_change_burst_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+neomcp_configure_target(neomcp_http_change_burst_test)
+gtest_discover_tests(neomcp_http_change_burst_test DISCOVERY_TIMEOUT 120)
 
 # The bytes a legacy session keeps for the resources its client watches.
 add_executable(neomcp_http_watch_bytes_test http_watch_bytes_test.cpp)

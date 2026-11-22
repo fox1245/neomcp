@@ -25,12 +25,12 @@
 //   cancel them all, so that the io_context runs out of work.
 // - What a client sees can change while the server serves: every registered item has an atomic switch (in a deque,
 //   which never moves its elements), and a switch that changes a list reports the change. Changes go to the sessions
-//   through the feed: the listeners the sessions registered, the changes not yet told (each kind of change, and each
-//   updated URI, once), and one thread that tells them, so that the thread that reports never waits for a client. The
-//   feed's mutex (feed_mutex_) is taken alone, never together with mutex_ or io_mutex_, and is not held while a
-//   listener is called or the watcher callback runs. shutdown() closes the feed first: the thread tells what is still
-//   pending, then tells every listener that the feed ended (each session ends its subscriptions gracefully), and
-//   leaves.
+//   through the feed: the listeners the sessions registered, the changes not yet told (each kind of list change once
+//   and each updated URI once, none dropped; the list changes are told first), and one thread that tells them, so
+//   that the thread that reports never waits for a client. The feed's mutex (feed_mutex_) is taken alone, never
+//   together with mutex_ or io_mutex_, and is not held while a listener is called or the watcher callback runs.
+//   shutdown() closes the feed first: the thread tells what is still pending, then tells every listener that the feed
+//   ended (each session ends its subscriptions gracefully), and leaves.
 // - Tasks (when ServerOptions::tasks has a store): the runner (tasks.h) keeps the records, and a task's handler runs
 //   here as a call does, in a CallRecord that has no Completion and follows the task's stop source instead of the
 //   session's. A task takes its place in the pools before its record is made (reserved_ for the workers, coroutines_
@@ -520,8 +520,11 @@ private:
     std::condition_variable feed_ready_;
     std::map<std::uint64_t, std::weak_ptr<ChangeListener>> watchers_;
     std::uint64_t next_watcher_ = 1;
-    std::deque<Change> pending_;                                  // in the order reported
-    std::set<std::pair<ChangeKind, std::string>, std::less<>> pending_keys_;  // what pending_ holds
+    // The changes not yet told: the list changes, each kind once, and the resource updates, each URI once; each in the
+    // order reported. The list changes are told first.
+    std::deque<Change> pending_lists_;
+    std::deque<Change> pending_updates_;
+    std::set<std::pair<ChangeKind, std::string>, std::less<>> pending_keys_;  // what the two hold
     bool feed_open_ = true;  // false once shutdown() began: no registration and no change is taken any more
     std::thread feed_thread_;
 
@@ -1140,9 +1143,17 @@ void ServerCore::report(Change change) {
         const std::lock_guard<std::mutex> lock(feed_mutex_);
         // Nobody listens, or nobody will: the change reaches no client.
         if (!feed_open_ || watchers_.empty()) return;
-        // A change that is pending already is told once.
-        if (!pending_keys_.emplace(change.kind, change.uri).second) return;
-        pending_.push_back(std::move(change));
+        const bool updated = change.kind == ChangeKind::resource_updated;
+        if (!updated) change.uri.clear();
+        // A change that is pending already is told once: the notification that tells it says that something changed
+        // since the client last looked, which covers this change too.
+        if (pending_keys_.find(std::pair<ChangeKind, std::string>(change.kind, change.uri)) != pending_keys_.end()) {
+            return;
+        }
+        // Nothing is dropped here: what waits is one change per list kind and one per URI the host reported, which the
+        // host controls. What reaches a client is bounded by its session's queue (max_queued_notifications).
+        pending_keys_.emplace(change.kind, change.uri);
+        (updated ? pending_updates_ : pending_lists_).push_back(std::move(change));
     }
     feed_ready_.notify_one();
 }
@@ -1150,7 +1161,8 @@ void ServerCore::report(Change change) {
 void ServerCore::run_feed() {
     std::unique_lock<std::mutex> lock(feed_mutex_);
     for (;;) {
-        feed_ready_.wait(lock, [&] { return !pending_.empty() || !feed_open_; });
+        feed_ready_.wait(lock,
+                         [&] { return !pending_lists_.empty() || !pending_updates_.empty() || !feed_open_; });
         // The listeners alive now; the expired ones (a session that went without closing) are dropped.
         std::vector<std::shared_ptr<ChangeListener>> listeners;
         bool dropped = false;
@@ -1163,9 +1175,11 @@ void ServerCore::run_feed() {
                 dropped = true;
             }
         }
-        if (!pending_.empty()) {
-            Change change = std::move(pending_.front());
-            pending_.pop_front();
+        // A list change is not held behind updates reported before it: either tells only that something changed.
+        std::deque<Change>& next = pending_lists_.empty() ? pending_updates_ : pending_lists_;
+        if (!next.empty()) {
+            Change change = std::move(next.front());
+            next.pop_front();
             pending_keys_.erase(std::pair<ChangeKind, std::string>(change.kind, change.uri));
             lock.unlock();
             if (dropped) watchers_changed();

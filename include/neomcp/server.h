@@ -149,8 +149,13 @@
 // has and `subscribe` for resources, and each session tells its client the way the revision it is served under
 // prescribes: notifications of the connection after resources/subscribe (2025-11-25 and earlier), or the subscriptions
 // a client opens with subscriptions/listen (2026-07-28). The server tells the sessions on a thread of its own, so the
-// thread that reports a change never waits for a client; a session whose client reads slowly drops the notification
-// when its output queue is full. When the server shuts down, every open subscription ends gracefully.
+// thread that reports a change never waits for a client. A change waiting to be told, in the server or in a session's
+// output queue, stands for every later one of the same list or resource; a list change is told before the resource
+// updates that wait with it, and neither the server nor a session drops it (over HTTP, an event stream whose buffer is
+// full drops any notification: EndpointOptions::max_stream_buffer_bytes). The feed keeps one pending update per URI
+// reported and drops none; what reaches a client is bounded by its session's queue: while the client reads slowly,
+// an update of a distinct resource beyond max_queued_notifications is dropped for that session. When the server shuts
+// down, every open subscription ends gracefully.
 //
 // Authorization. A tool, resource, template or prompt may declare the scopes a request for it needs, all of them:
 //
@@ -330,8 +335,9 @@ struct ServerOptions {
     // Prompts per prompts/list page; empty: one page with every prompt. Zero is an error.
     std::optional<std::size_t> prompts_page_size{};
     // Input bounds of a session (see SessionOptions): 8 MiB per line, 128 levels of nesting, and 1024 lines waiting
-    // to be written before progress and log notifications are dropped. An error answer of a handler's own
-    // (neomcp::ApplicationError) longer than max_message_bytes is answered with an internal error instead.
+    // to be written before progress, log and resource update notifications are dropped. An error answer of a
+    // handler's own (neomcp::ApplicationError) longer than max_message_bytes is answered with an internal error
+    // instead.
     std::size_t max_message_bytes = SessionDefaults::max_message_bytes;
     std::size_t max_nesting_depth = SessionDefaults::max_nesting_depth;
     std::size_t max_queued_notifications = SessionDefaults::max_queued_notifications;

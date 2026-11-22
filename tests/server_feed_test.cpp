@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -21,6 +22,7 @@
 
 #include "neomcp/server.h"
 #include "neomcp/testing/peer.h"
+#include "support/feed_gate.h"
 
 struct ItemParams {
     std::string id;
@@ -359,6 +361,73 @@ TEST(ServerFeed, SwitchingRacesListsAndCalls) {
     // The watcher heard of at least one change (the switcher changed the list many times).
     const auto heard = watcher.next_change();
     EXPECT_EQ(heard, changed("notifications/tools/list_changed"));
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// A burst of changes while the server's feed is held (support/feed_gate.h): the changes wait in the server.
+
+constexpr std::size_t burst_bound = 4;  // max_queued_notifications of the server's sessions here
+
+std::string burst_item(std::size_t index) { return "test://item/" + std::to_string(index); }
+constexpr const char* burst_last = "test://item/last";
+
+std::vector<std::string> burst_uris() {
+    std::vector<std::string> uris{burst_last};
+    for (std::size_t i = 0; i < 2 * burst_bound; ++i) uris.push_back(burst_item(i));
+    return uris;
+}
+
+// The next `count` changes the client hears of.
+std::vector<json> next_changes(Client& client, std::size_t count) {
+    std::vector<json> heard;
+    while (heard.size() < count) {
+        auto change = client.next_change();
+        if (!change) break;
+        heard.push_back(std::move(*change));
+    }
+    return heard;
+}
+
+std::vector<std::string> every_revision() {
+    std::vector<std::string> out;
+    for (const std::string_view revision : profile::builtin_revisions()) out.emplace_back(revision);
+    return out;
+}
+
+std::string revision_name(const ::testing::TestParamInfo<std::string>& info) {
+    std::string name = "r";
+    for (const char c : info.param) name += (c >= '0' && c <= '9') ? c : '_';
+    return name;
+}
+
+class Burst : public ::testing::TestWithParam<std::string> {};
+
+INSTANTIATE_TEST_SUITE_P(EveryBuiltinRevision, Burst, ::testing::ValuesIn(every_revision()), revision_name);
+
+// Repeated updates of one resource, then distinct ones up to twice the sessions' bound, then two changes of the tool
+// list: the list change is told first and once, the repeated resource once, and every distinct resource: the feed
+// drops none, and the client's session, which the feed writes to without waiting, never fills.
+TEST_P(Burst, AListChangeWaitingInTheServerIsToldFirstAndNoUpdateIsDropped) {
+    neomcp::ServerOptions options{.name = "feed-server", .version = "1.0.0"};
+    options.max_queued_notifications = burst_bound;
+    Fixture fixture(std::move(options));
+    Client client(fixture.server, GetParam());
+    client.listen(burst_uris());
+    neomcp::testing::FeedGate gate(fixture.server, "test://watched", legacy_revision);
+
+    gate.hold(fixture.server);
+    for (std::size_t round = 0; round < burst_bound + 2; ++round) fixture.server.notify_resource_updated(burst_item(0));
+    for (std::size_t i = 1; i < 2 * burst_bound; ++i) fixture.server.notify_resource_updated(burst_item(i));
+    fixture.beta->enable(true);
+    fixture.beta->enable(false);
+    gate.release();
+
+    std::vector<json> expected{changed("notifications/tools/list_changed")};
+    for (std::size_t i = 0; i < 2 * burst_bound; ++i) expected.push_back(updated(burst_item(i)));
+    EXPECT_EQ(next_changes(client, expected.size()), expected);
+    // Nothing else was pending: an update reported now is the next change.
+    fixture.server.notify_resource_updated(burst_last);
+    EXPECT_EQ(client.next_change(), updated(burst_last));
 }
 
 }  // namespace
