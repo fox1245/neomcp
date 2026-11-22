@@ -299,10 +299,9 @@ neomcp::ClientOptions client_options(const std::vector<std::string>& revisions) 
     });
     options.handlers.sampling([](const neomcp::SamplingRequest&) {
         neomcp::SamplingAnswer answer;
-        json content = json::object();
-        content["type"] = "text";
-        content["text"] = std::string(model_answer);
-        answer.content = std::move(content);
+        neomcp::TextContent said;
+        said.text = std::string(model_answer);
+        answer.content.push_back(std::move(said));
         answer.model = "client-matrix";
         return answer;
     });

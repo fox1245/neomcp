@@ -27,6 +27,11 @@ inline constexpr std::string_view prompt_message_type = "PromptMessage";
 inline constexpr std::string_view prompt_result_type = "GetPromptResult";
 inline constexpr std::string_view complete_result_type = "CompleteResult";
 inline constexpr std::string_view tool_result_type = "CallToolResult";
+// The blocks of sampling only, and the `type` each has on the wire.
+inline constexpr std::string_view tool_use_content_type = "ToolUseContent";
+inline constexpr std::string_view tool_result_content_type = "ToolResultContent";
+inline constexpr std::string_view tool_use_kind = "tool_use";
+inline constexpr std::string_view tool_result_kind = "tool_result";
 
 // ---- Members
 inline constexpr std::string_view name_member = "name";
@@ -70,6 +75,9 @@ inline constexpr std::string_view total_member = "total";
 inline constexpr std::string_view has_more_member = "hasMore";
 inline constexpr std::string_view structured_content_member = "structuredContent";
 inline constexpr std::string_view is_error_member = "isError";
+inline constexpr std::string_view id_member = "id";
+inline constexpr std::string_view input_member = "input";
+inline constexpr std::string_view tool_use_id_member = "toolUseId";
 
 // The members the protocol engine adds to a result: the writers leave them out and the readers of the model's values
 // do not read them. The cache hints have a reader of their own.

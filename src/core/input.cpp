@@ -21,8 +21,13 @@ constexpr std::string_view roots_method = "roots/list";
 // The params types of the two elicitation modes, where a revision names them.
 constexpr std::string_view form_params_type = "ElicitRequestFormParams";
 constexpr std::string_view url_params_type = "ElicitRequestURLParams";
-// The union of the blocks a sampling message holds as an array, where a revision allows an array.
+// The union of the blocks a sampling message holds as an array, where a revision allows an array. Where a revision
+// has it, its alternatives are the types of the blocks its sampling carries.
 constexpr std::string_view sampling_blocks_union = "SamplingMessageContentBlock";
+// The kinds of block a sampling message holds in a revision without that union: its schema writes the union inline in
+// SamplingMessage.content, and the wire tables keep no union written inline. A kind is carried there where the
+// revision also defines its type.
+constexpr std::array<ContentKind, 3> inline_sampling_kinds{ContentKind::text, ContentKind::image, ContentKind::audio};
 
 // The result type of each request a server asks with. The wire tables list the types and what each requires, but do
 // not say which request a result type answers: that link is the specification's, and this is it.
@@ -143,7 +148,114 @@ std::optional<IncludeContext> parse_include_context(std::string_view text) noexc
     return std::nullopt;
 }
 
-bool uses_tools(const SamplingRequest& request) { return !request.tools.empty() || request.tool_choice.has_value(); }
+bool is_tool_block(const SamplingContent& block) {
+    return std::holds_alternative<ToolUseContent>(block) || std::holds_alternative<ToolResultContent>(block);
+}
+
+bool holds_tool_blocks(const SamplingMessage& message) {
+    return std::any_of(message.content.begin(), message.content.end(), is_tool_block);
+}
+
+// A request with tools: it offers tools, says how to use them, or carries the tool uses and results of a conversation
+// with tools.
+bool uses_tools(const SamplingRequest& request) {
+    return !request.tools.empty() || request.tool_choice.has_value() ||
+           std::any_of(request.messages.begin(), request.messages.end(), holds_tool_blocks);
+}
+
+// The name of the block's type in the revisions' schemas.
+std::string_view sampling_type_of(const SamplingContent& block) {
+    return std::visit(
+        [](const auto& value) -> std::string_view {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, ToolUseContent>) {
+                return wire::tool_use_content_type;
+            } else if constexpr (std::is_same_v<T, ToolResultContent>) {
+                return wire::tool_result_content_type;
+            } else {
+                return type_name(T::kind);
+            }
+        },
+        block);
+}
+
+// Whether the revision's sampling carries blocks of the type: the profile defines the type, and its union of sampling
+// blocks lists it (where it has none, the type is one of the inline kinds).
+bool sampling_carries(std::string_view type, const profile::Profile& profile) {
+    if (profile.type(type) == nullptr) return false;
+    if (const profile::Union* blocks = profile.union_type(sampling_blocks_union)) {
+        return std::find(blocks->alternatives.begin(), blocks->alternatives.end(), type) != blocks->alternatives.end();
+    }
+    return std::any_of(inline_sampling_kinds.begin(), inline_sampling_kinds.end(),
+                       [&](ContentKind kind) { return type_name(kind) == type; });
+}
+
+// What keeps a block from being written for the profile, or nothing.
+std::optional<std::string> sampling_block_problem(const SamplingContent& block, const profile::Profile& profile) {
+    const std::string_view type = sampling_type_of(block);
+    if (!sampling_carries(type, profile)) {
+        return "a sampling block of the type " + std::string(type) + ", which the revision's sampling does not carry";
+    }
+    if (const auto* use = std::get_if<ToolUseContent>(&block); use != nullptr && !use->input.is_object()) {
+        return std::string("a tool use whose input is not an object");
+    }
+    return std::nullopt;
+}
+
+bool same_ids(std::vector<std::string> a, std::vector<std::string> b) {
+    std::sort(a.begin(), a.end());
+    std::sort(b.begin(), b.end());
+    return a == b;
+}
+
+// What breaks the rules the pages give the messages of a conversation with tools, or nothing: a message that holds
+// tool results is the user's and holds nothing else; every message of the assistant that holds tool uses (with ids that
+// differ) is followed at once by such a message whose results answer each of those tool uses by id and nothing more.
+// The description names the message by its index and repeats nothing the messages hold.
+std::optional<std::string> tool_flow_problem(const std::vector<SamplingMessage>& messages) {
+    std::vector<std::string> asked;  // the ids of the tool uses that the next message must answer
+    bool answering = false;
+    for (std::size_t i = 0; i < messages.size(); ++i) {
+        const SamplingMessage& message = messages[i];
+        const std::string where = "messages[" + std::to_string(i) + "]";
+        std::vector<std::string> uses;
+        std::vector<std::string> results;
+        bool other = false;
+        for (const SamplingContent& block : message.content) {
+            if (const auto* use = std::get_if<ToolUseContent>(&block)) {
+                uses.push_back(use->id);
+            } else if (const auto* result = std::get_if<ToolResultContent>(&block)) {
+                results.push_back(result->tool_use_id);
+            } else {
+                other = true;
+            }
+        }
+        if (!results.empty() && (other || !uses.empty() || message.role != Role::user)) {
+            return where + ": a message that holds tool results is the user's and holds nothing else";
+        }
+        if (answering) {
+            if (results.empty()) return where + ": the tool uses of the message before it are not answered";
+            if (!same_ids(asked, results)) {
+                return where + ": its tool results do not answer exactly the tool uses of the message before it";
+            }
+            answering = false;
+        } else if (!results.empty()) {
+            return where + ": its tool results follow no message of the assistant that holds tool uses";
+        }
+        if (!uses.empty()) {
+            if (message.role != Role::assistant) return where + ": a message that holds tool uses is the assistant's";
+            std::vector<std::string> sorted = uses;
+            std::sort(sorted.begin(), sorted.end());
+            if (std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end()) {
+                return where + ": two of its tool uses have the same id";
+            }
+            asked = std::move(uses);
+            answering = true;
+        }
+    }
+    if (answering) return "messages[" + std::to_string(messages.size() - 1) + "]: its tool uses are not answered";
+    return std::nullopt;
+}
 
 bool uses_context(const SamplingRequest& request) {
     return request.include_context && *request.include_context != IncludeContext::none;
@@ -198,17 +310,14 @@ Written write_sampling(const SamplingRequest& sampling, const profile::Profile& 
                                  (sampling.tool_choice && !type->has_property(tool_choice_member)))) {
         return std::string("the revision's sampling takes no tools");
     }
+    if (auto problem = tool_flow_problem(sampling.messages)) return std::move(*problem);
     const bool arrays = profile.union_type(sampling_blocks_union) != nullptr;
     json messages = json::array();
     for (const auto& message : sampling.messages) {
         json blocks = json::array();
         for (const auto& block : message.content) {
-            const ContentKind kind = kind_of(block);
-            if (kind != ContentKind::text && kind != ContentKind::image && kind != ContentKind::audio) {
-                return "a sampling message holds a " + std::string(wire_name(kind)) +
-                       " block; sampling carries text, image and audio";
-            }
-            blocks.push_back(neomcp::to_wire(block, profile));
+            if (auto problem = sampling_block_problem(block, profile)) return "a sampling message holds " + *problem;
+            blocks.push_back(write_sampling_block(block, profile));
         }
         json entry = json::object();
         entry[std::string(role_member)] = std::string(wire::role_name(message.role));
@@ -293,9 +402,6 @@ Written write(const InputRequest& request, const profile::Profile& profile, cons
     return written;
 }
 
-// A content block as a client writes one: an object with a string `type`.
-bool is_block(const json& value) { return value.is_object() && text_member(value, type_member) != nullptr; }
-
 // What is wrong with the content of an elicitation result, or empty when it has the shape a form's answer has: an
 // object whose values are strings, numbers, booleans or arrays of strings.
 std::optional<std::string> elicitation_content_problem(const json& content) {
@@ -313,16 +419,6 @@ std::optional<std::string> elicitation_content_problem(const json& content) {
         }
     }
     return std::nullopt;
-}
-
-// Whether the value is a content block or a non-empty array of them, as a client writes them in a sampling result.
-bool is_block_or_blocks(const json& content) {
-    if (const auto* items = content.get_ptr<const json::array_t*>()) {
-        bool blocks = !items->empty();
-        for (const auto& item : *items) blocks = blocks && is_block(item);
-        return blocks;
-    }
-    return is_block(content);
 }
 
 std::variant<InputResponse, std::string> read_elicitation(const json& result) {
@@ -346,17 +442,33 @@ std::variant<InputResponse, std::string> read_elicitation(const json& result) {
     return InputResponse(std::move(answer));
 }
 
-std::variant<InputResponse, std::string> read_sampling(const json& result) {
+std::string read_sampling_block(const json& block_wire, const profile::Profile& profile, const std::string& where,
+                                std::vector<SamplingContent>& out);
+
+std::variant<InputResponse, std::string> read_sampling(const json& result, const profile::Profile& profile) {
     const std::string* role = text_member(result, role_member);
     const std::string* model = text_member(result, model_member);
     const json* content = member(result, content_member);
     const std::optional<Role> parsed_role = role == nullptr ? std::nullopt : wire::parse_role(*role);
     if (!parsed_role) return std::string("the role of a sampling result is user or assistant");
     if (model == nullptr) return std::string("a sampling result names its model");
-    if (content == nullptr || !is_block_or_blocks(*content)) return std::string("the content of a sampling result is a content block or an array of them");
+    if (content == nullptr) return std::string("a sampling result has content");
     SamplingAnswer answer;
+    if (const auto* blocks = content->get_ptr<const json::array_t*>()) {
+        if (profile.union_type(sampling_blocks_union) == nullptr) {
+            return std::string("content: the revision takes one content block in a sampling result");
+        }
+        if (blocks->empty()) return std::string("content must not be empty");
+        for (std::size_t i = 0; i < blocks->size(); ++i) {
+            std::string problem =
+                read_sampling_block((*blocks)[i], profile, "content[" + std::to_string(i) + "]", answer.content);
+            if (!problem.empty()) return problem;
+        }
+    } else {
+        std::string problem = read_sampling_block(*content, profile, std::string(content_member), answer.content);
+        if (!problem.empty()) return problem;
+    }
     answer.role = *parsed_role;
-    answer.content = *content;
     answer.model = *model;
     if (const json* reason = member(result, stop_reason_member)) {
         const auto* text = reason->get_ptr<const std::string*>();
@@ -485,17 +597,40 @@ ReadRequest read_elicitation_request(const json& params, const profile::Profile&
     return InputRequest(std::move(request));
 }
 
-// One block of a sampling message, read for the profile; `where` names it for a message.
+// One block of a sampling message or result, read for the profile; `where` names it for a message. The block's `type`
+// chooses its reader; a block of a kind the revision's sampling does not carry is an error.
 std::string read_sampling_block(const json& block_wire, const profile::Profile& profile, const std::string& where,
-                                std::vector<ContentBlock>& out) {
-    auto block = from_wire<ContentBlock>(block_wire, profile, where);
-    if (auto* problem = std::get_if<std::string>(&block)) return std::move(*problem);
-    const ContentKind kind = kind_of(std::get<ContentBlock>(block));
-    if (kind != ContentKind::text && kind != ContentKind::image && kind != ContentKind::audio) {
-        return where + ": a sampling message holds a " + std::string(wire_name(kind)) +
-               " block; sampling carries text, image and audio";
+                                std::vector<SamplingContent>& out) {
+    const std::string* kind = text_member(block_wire, type_member);
+    std::optional<SamplingContent> read;
+    if (kind != nullptr && *kind == wire::tool_use_kind) {
+        auto block = from_wire<ToolUseContent>(block_wire, profile, where);
+        if (auto* problem = std::get_if<std::string>(&block)) return std::move(*problem);
+        read.emplace(std::get<ToolUseContent>(std::move(block)));
+    } else if (kind != nullptr && *kind == wire::tool_result_kind) {
+        auto block = from_wire<ToolResultContent>(block_wire, profile, where);
+        if (auto* problem = std::get_if<std::string>(&block)) return std::move(*problem);
+        read.emplace(std::get<ToolResultContent>(std::move(block)));
+    } else {
+        auto block = from_wire<ContentBlock>(block_wire, profile, where);
+        if (auto* problem = std::get_if<std::string>(&block)) return std::move(*problem);
+        const ContentKind block_kind = kind_of(std::get<ContentBlock>(block));
+        std::visit(
+            [&](auto&& value) {
+                using T = std::decay_t<decltype(value)>;
+                if constexpr (std::is_same_v<T, TextContent> || std::is_same_v<T, ImageContent> ||
+                              std::is_same_v<T, AudioContent>) {
+                    read.emplace(std::forward<decltype(value)>(value));
+                }
+            },
+            std::get<ContentBlock>(std::move(block)));
+        if (!read) {
+            return where + ": a sampling block of the type " + std::string(type_name(block_kind)) +
+                   ", which the revision's sampling does not carry";
+        }
     }
-    out.push_back(std::move(std::get<ContentBlock>(block)));
+    if (auto problem = sampling_block_problem(*read, profile)) return where + ": " + *problem;
+    out.push_back(std::move(*read));
     return {};
 }
 
@@ -536,6 +671,7 @@ ReadRequest read_sampling_request(const json& params, const profile::Profile& pr
                 }
                 request.messages.push_back(std::move(message));
             }
+            if (auto problem = tool_flow_problem(request.messages)) return std::move(*problem);
         }
     }
     if (allows(type, max_tokens_member)) {
@@ -652,20 +788,11 @@ WrittenAnswer write_elicitation_answer(const ElicitationAnswer& answer) {
 }
 
 WrittenAnswer write_sampling_answer(const SamplingAnswer& answer, const profile::Profile& profile) {
-    if (!is_block_or_blocks(answer.content)) {
-        return std::string("the content of a sampling result is a content block or an array of them");
-    }
-    // A revision whose sampling messages take one content block (it has no union of sampling blocks) takes one in the
-    // result as well: an array of one block is written as that block.
-    json content = answer.content;
-    if (const auto* blocks = answer.content.get_ptr<const json::array_t*>();
-        blocks != nullptr && profile.union_type(sampling_blocks_union) == nullptr) {
-        if (blocks->size() != 1) return std::string("the revision takes one content block in a sampling result");
-        content = blocks->front();
-    }
+    auto content = write_sampling_content(answer.content, profile);
+    if (auto* problem = std::get_if<std::string>(&content)) return std::move(*problem);
     json result = json::object();
     result[std::string(role_member)] = std::string(wire::role_name(answer.role));
-    result[std::string(content_member)] = std::move(content);
+    result[std::string(content_member)] = std::get<json>(std::move(content));
     result[std::string(model_member)] = answer.model;
     if (answer.stop_reason) result[std::string(stop_reason_member)] = *answer.stop_reason;
     return result;
@@ -830,10 +957,11 @@ std::optional<std::string_view> answer_method(const json& result, const profile:
     return fitting;
 }
 
-std::variant<InputResponse, std::string> read_answer(std::string_view method, const json& result) {
+std::variant<InputResponse, std::string> read_answer(std::string_view method, const json& result,
+                                                     const profile::Profile& profile) {
     if (!result.is_object()) return std::string("an answer is an object");
     if (method == elicit_method) return read_elicitation(result);
-    if (method == sampling_method) return read_sampling(result);
+    if (method == sampling_method) return read_sampling(result, profile);
     if (method == roots_method) return read_roots(result);
     return std::string("no request of this kind was asked");
 }
@@ -884,6 +1012,36 @@ json declared_capabilities(std::span<const InputRequest> kinds, bool roots_list_
     }
     keep_members(capabilities, client_capabilities_type, profile);
     return capabilities;
+}
+
+json write_sampling_block(const SamplingContent& block, const profile::Profile& profile) {
+    return std::visit(
+        [&](const auto& value) -> json {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, ToolUseContent> || std::is_same_v<T, ToolResultContent>) {
+                return neomcp::to_wire(value, profile);
+            } else {
+                return neomcp::to_wire(ContentBlock(value), profile);
+            }
+        },
+        block);
+}
+
+std::variant<json, std::string> write_sampling_content(std::span<const SamplingContent> blocks,
+                                                       const profile::Profile& profile) {
+    if (blocks.empty()) return std::string("a sampling result holds no content block");
+    // A revision whose sampling messages take one content block (it has no union of sampling blocks) takes one in the
+    // result as well.
+    if (blocks.size() > 1 && profile.union_type(sampling_blocks_union) == nullptr) {
+        return std::string("the revision takes one content block in a sampling result");
+    }
+    json written = json::array();
+    for (const SamplingContent& block : blocks) {
+        if (auto problem = sampling_block_problem(block, profile)) return "a sampling result holds " + *problem;
+        written.push_back(write_sampling_block(block, profile));
+    }
+    if (written.size() == 1) return json(std::move(written.front()));
+    return written;
 }
 
 std::string_view capability_of(const InputRequest& request) {

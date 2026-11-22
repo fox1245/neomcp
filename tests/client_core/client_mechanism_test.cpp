@@ -212,7 +212,9 @@ neomcp::InputResponse answer_for(const neomcp::InputRequest& request) {
     }
     if (std::holds_alternative<neomcp::SamplingRequest>(request)) {
         neomcp::SamplingAnswer answer;
-        answer.content = J(R"({"type":"text","text":"Hi"})");
+        neomcp::TextContent said;
+        said.text = "Hi";
+        answer.content.push_back(std::move(said));
         answer.model = "test-model";
         return answer;
     }

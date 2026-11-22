@@ -225,6 +225,45 @@ json to_wire(const ContentBlock& block, const profile::Profile& profile) {
     return object;
 }
 
+namespace {
+
+// The members a block of sampling has besides its own: extra members first (as block_base), then _meta.
+json sampling_block_base(std::string_view kind, const json& extra) {
+    json object = json::object();
+    at(object, wire::type_member) = std::string(kind);
+    if (const auto* members = extra.get_ptr<const json::object_t*>()) {
+        for (const auto& [name, value] : *members) {
+            if (name != wire::type_member) object[name] = value;
+        }
+    }
+    return object;
+}
+
+}  // namespace
+
+json to_wire(const ToolUseContent& block, const profile::Profile& profile) {
+    json object = sampling_block_base(wire::tool_use_kind, block.extra);
+    at(object, wire::id_member) = block.id;
+    at(object, wire::name_member) = block.name;
+    at(object, wire::input_member) = block.input;
+    put(object, wire::meta_member, block.meta);
+    keep_members(object, wire::tool_use_content_type, profile);
+    return object;
+}
+
+json to_wire(const ToolResultContent& block, const profile::Profile& profile) {
+    json object = sampling_block_base(wire::tool_result_kind, block.extra);
+    at(object, wire::tool_use_id_member) = block.tool_use_id;
+    json content = json::array();
+    for (const auto& item : block.content) content.push_back(to_wire(item, profile));
+    at(object, wire::content_member) = std::move(content);
+    put(object, wire::structured_content_member, block.structured_content);
+    if (block.is_error) at(object, wire::is_error_member) = true;
+    put(object, wire::meta_member, block.meta);
+    keep_members(object, wire::tool_result_content_type, profile);
+    return object;
+}
+
 json to_wire(const ResourceDefinition& resource, const profile::Profile& profile) {
     json object = json::object();
     at(object, wire::uri_member) = resource.uri;

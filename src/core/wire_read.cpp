@@ -459,6 +459,75 @@ bool read_block(Reader& reader, const json& wire, const Step* at, ContentBlock& 
     return reader.fail(&type_at, "names a content block kind that is not known");
 }
 
+// A block of sampling only, of the profile's type `type_label` and the wire `type` `kind`. A revision without the type
+// does not define the block: an error, like a content block of a kind the revision does not define.
+const profile::Type* sampling_block_type(Reader& reader, const json& wire, const Step* at, std::string_view type_label,
+                                         std::string_view kind) {
+    const auto* members = wire.get_ptr<const json::object_t*>();
+    if (members == nullptr) {
+        reader.fail(at, "must be an object");
+        return nullptr;
+    }
+    const Step type_at = member_step(at, names::type_member);
+    const auto found = members->find(std::string(names::type_member));
+    if (found == members->end()) {
+        reader.fail(&type_at, "is required");
+        return nullptr;
+    }
+    const auto* kind_name = found->second.get_ptr<const std::string*>();
+    if (kind_name == nullptr) {
+        reader.fail(&type_at, "must be a string");
+        return nullptr;
+    }
+    if (*kind_name != kind) {
+        reader.fail(&type_at, "names another kind of block");
+        return nullptr;
+    }
+    const profile::Type* type = reader.type(type_label);
+    if (type == nullptr) reader.fail(&type_at, "names a content block kind that the revision does not define");
+    return type;
+}
+
+bool read_tool_use(Reader& reader, const json& wire, const Step* at, ToolUseContent& out) {
+    const profile::Type* type = sampling_block_type(reader, wire, at, names::tool_use_content_type, names::tool_use_kind);
+    if (type == nullptr) return false;
+    Fields fields(reader, wire, at, type);
+    fields.mark_asked(names::type_member);
+    if (!fields.text(names::id_member, true, out.id) || !fields.text(names::name_member, true, out.name) ||
+        !fields.object_value(names::input_member, true, out.input) || !fields.meta(out.meta)) {
+        return false;
+    }
+    out.extra = fields.unasked(names::type_member);
+    return true;
+}
+
+bool read_tool_result_block(Reader& reader, const json& wire, const Step* at, ToolResultContent& out) {
+    const profile::Type* type =
+        sampling_block_type(reader, wire, at, names::tool_result_content_type, names::tool_result_kind);
+    if (type == nullptr) return false;
+    Fields fields(reader, wire, at, type);
+    fields.mark_asked(names::type_member);
+    if (!fields.text(names::tool_use_id_member, true, out.tool_use_id)) return false;
+    const json::array_t* content = nullptr;
+    if (!fields.array(names::content_member, true, content)) return false;
+    if (content != nullptr) {
+        const Step list = member_step(at, names::content_member);
+        for (std::size_t i = 0; i < content->size(); ++i) {
+            const Step element = index_step(&list, i);
+            ContentBlock block;
+            if (!read_block(reader, (*content)[i], &element, block)) return false;
+            out.content.push_back(std::move(block));
+        }
+    }
+    // Any JSON value: one revision's schema says an object, a later one any value; the profile does not tell them apart.
+    const json* structured = nullptr;
+    if (!fields.find(names::structured_content_member, false, structured)) return false;
+    if (structured != nullptr) out.structured_content = *structured;
+    if (!fields.flag(names::is_error_member, out.is_error) || !fields.meta(out.meta)) return false;
+    out.extra = fields.unasked(names::type_member);
+    return true;
+}
+
 bool read_tool_annotations(Reader& reader, const json& wire, const Step* at, ToolAnnotations& out) {
     Fields fields(reader, wire, at, names::tool_annotations_type);
     if (!fields.valid()) return false;
@@ -727,6 +796,18 @@ template <>
 WireRead<ContentBlock> from_wire<ContentBlock>(const json& wire, const profile::Profile& profile,
                                                std::string_view at) {
     return run<ContentBlock>(wire, profile, at, read_block);
+}
+
+template <>
+WireRead<ToolUseContent> from_wire<ToolUseContent>(const json& wire, const profile::Profile& profile,
+                                                   std::string_view at) {
+    return run<ToolUseContent>(wire, profile, at, read_tool_use);
+}
+
+template <>
+WireRead<ToolResultContent> from_wire<ToolResultContent>(const json& wire, const profile::Profile& profile,
+                                                         std::string_view at) {
+    return run<ToolResultContent>(wire, profile, at, read_tool_result_block);
 }
 
 template <>

@@ -56,10 +56,10 @@ std::string_view action_text(ElicitationAction action) noexcept {
     return "cancel";
 }
 
-// The answer as a client writes it, which read_answer reads back.
-json answer_json(const InputResponse& response) {
+// The answer as a client writes it for the call's revision, which read_answer reads back.
+json answer_json(const InputResponse& response, const profile::Profile& profile) {
     return std::visit(
-        [](const auto& answer) -> json {
+        [&](const auto& answer) -> json {
             using T = std::decay_t<decltype(answer)>;
             json written = json::object();
             if constexpr (std::is_same_v<T, ElicitationAnswer>) {
@@ -67,7 +67,9 @@ json answer_json(const InputResponse& response) {
                 if (answer.action == ElicitationAction::accept) written["content"] = answer.content;
             } else if constexpr (std::is_same_v<T, SamplingAnswer>) {
                 written["role"] = std::string(role_text(answer.role));
-                written["content"] = answer.content;
+                // The answer was read for this revision, so its content can be written for it.
+                auto content = write_sampling_content(answer.content, profile);
+                if (auto* blocks = std::get_if<json>(&content)) written["content"] = std::move(*blocks);
                 written["model"] = answer.model;
                 if (answer.stop_reason) written["stopReason"] = *answer.stop_reason;
             } else {
@@ -105,7 +107,9 @@ json question_json(const InputRequest& request, const profile::Profile& profile)
                 json messages = json::array();
                 for (const SamplingMessage& message : asked.messages) {
                     json blocks = json::array();
-                    for (const ContentBlock& block : message.content) blocks.push_back(to_wire(block, profile));
+                    for (const SamplingContent& block : message.content) {
+                        blocks.push_back(write_sampling_block(block, profile));
+                    }
                     json entry = json::object();
                     entry["role"] = std::string(role_text(message.role));
                     entry["content"] = std::move(blocks);
@@ -216,7 +220,7 @@ InputRound::InputRound(const Context& context, std::size_t max_state_bytes)
         const std::string* method = text_member(outcome, method_member);
         const json* answer = member(outcome, answer_member);
         if (digest == nullptr || method == nullptr || answer == nullptr) return;
-        auto read = read_answer(*method, *answer);
+        auto read = read_answer(*method, *answer, context.control_.profile());
         if (!std::holds_alternative<InputResponse>(read)) return;
         recorded.emplace(outcome_key, Recorded{*digest, *method, std::get<InputResponse>(std::move(read))});
     }
@@ -291,7 +295,7 @@ InputRequired InputRound::ask() const {
         json entry = json::object();
         entry[std::string(digest_member)] = outcome.digest;
         entry[std::string(method_member)] = outcome.method;
-        entry[std::string(answer_member)] = answer_json(outcome.answer);
+        entry[std::string(answer_member)] = answer_json(outcome.answer, context_.control_.profile());
         outcomes[outcome_key] = std::move(entry);
     };
     for (const auto& [outcome_key, outcome] : kept_) write(outcome_key, outcome);

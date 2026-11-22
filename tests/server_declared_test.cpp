@@ -530,7 +530,7 @@ TEST(Declared, InputsAreAskedTogetherAndADependentOneInALaterRound) {
         [&bodies](const neomcp::Answer<sdt::Destination>& where, const neomcp::Answer<neomcp::SamplingAnswer>& idea,
                   const neomcp::Answer<neomcp::RootsAnswer>& listed, neomcp::Context&) {
             ++bodies;
-            return where->city + ": " + idea->content.at("text").get<std::string>() + " (" +
+            return where->city + ": " + std::get<neomcp::TextContent>(idea->content.at(0)).text + " (" +
                    std::to_string(listed->roots.size()) + " roots)";
         },
         neomcp::elicit<sdt::Destination>("where", [] { return std::string("Where to?"); }),

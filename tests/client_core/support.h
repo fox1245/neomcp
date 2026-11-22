@@ -14,6 +14,7 @@
 #include <variant>
 #include <vector>
 
+#include "neomcp/input.h"
 #include "neomcp/model.h"
 #include "neomcp/profile.h"
 #include "neomcp/wire.h"
@@ -71,6 +72,9 @@ public:
     neomcp::PromptResult prompt_result();
     neomcp::CompletionResult completion();
     neomcp::ToolResult tool_result();
+    // The blocks of sampling only. The id of a tool use and the id a tool result answers are the caller's to set.
+    neomcp::ToolUseContent tool_use();
+    neomcp::ToolResultContent tool_result_block();
 
     // Pieces the input tests use too.
     std::string text();
@@ -121,6 +125,9 @@ bool same(const neomcp::PromptMessage& a, const neomcp::PromptMessage& b);
 bool same(const neomcp::PromptResult& a, const neomcp::PromptResult& b);
 bool same(const neomcp::CompletionResult& a, const neomcp::CompletionResult& b);
 bool same(const neomcp::ToolResult& a, const neomcp::ToolResult& b);
+bool same(const neomcp::ToolUseContent& a, const neomcp::ToolUseContent& b);
+bool same(const neomcp::ToolResultContent& a, const neomcp::ToolResultContent& b);
+bool same(const neomcp::SamplingContent& a, const neomcp::SamplingContent& b);
 
 // The members of the types above that are not themselves compared by a function above.
 template <typename T>

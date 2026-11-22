@@ -14,6 +14,7 @@ add_executable(neomcp_client_core_test
     header_value_test.cpp
     support.cpp
     input_inverse_test.cpp
+    sampling_tools_test.cpp
     wire_read_test.cpp)
 target_link_libraries(neomcp_client_core_test PRIVATE neomcp::client neomcp::core neomcp::server GTest::gtest_main
     Threads::Threads)

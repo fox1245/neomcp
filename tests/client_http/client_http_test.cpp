@@ -115,7 +115,9 @@ TEST_P(RoundTrip, AsksTheClientForInput) {
     });
     options.handlers.sampling([](const neomcp::SamplingRequest&) {
         neomcp::SamplingAnswer answer;
-        answer.content = json{{"type", "text"}, {"text", "Paris"}};
+        neomcp::TextContent said;
+        said.text = "Paris";
+        answer.content.push_back(std::move(said));
         answer.model = "scripted";
         return answer;
     });

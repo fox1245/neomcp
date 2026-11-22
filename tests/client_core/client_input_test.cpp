@@ -366,7 +366,9 @@ ElicitationAnswer accepting(json content) { return ElicitationAnswer{Elicitation
 
 neomcp::SamplingAnswer completion(std::string model) {
     neomcp::SamplingAnswer answer;
-    answer.content = J(R"({"type":"text","text":"hello"})");
+    neomcp::TextContent said;
+    said.text = "hello";
+    answer.content.push_back(std::move(said));
     answer.model = std::move(model);
     return answer;
 }

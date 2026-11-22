@@ -64,8 +64,20 @@ std::variant<InputRequest, std::string> read_request(std::string_view method, co
 std::variant<json, std::string> write_answer(const InputResponse& response, const profile::Profile& profile,
                                              const InputMechanism& mechanism);
 
-// An answer to a request of `method`, read from the client's result: the answer, or what is wrong with its shape.
-std::variant<InputResponse, std::string> read_answer(std::string_view method, const json& result);
+// An answer to a request of `method`, read from the client's result under the profile: the answer, or what is wrong
+// with its shape. The blocks of a sampling result are read as the revision's types have them, of the kinds its
+// sampling carries.
+std::variant<InputResponse, std::string> read_answer(std::string_view method, const json& result,
+                                                     const profile::Profile& profile);
+
+// A block of a sampling message or result written as its type in the profile has it. Whether the revision's sampling
+// carries the block is not checked here (write_params and write_answer check it).
+json write_sampling_block(const SamplingContent& block, const profile::Profile& profile);
+
+// The content of a sampling result as written for the profile: one block as itself, several as an array; or why the
+// revision cannot carry it (no block, several where it takes one, a kind its sampling does not carry).
+std::variant<json, std::string> write_sampling_content(std::span<const SamplingContent> blocks,
+                                                       const profile::Profile& profile);
 
 // The method of the request whose answer `result` is, decided from its members alone: of the requests the mechanism
 // lets a server ask with under the profile, the one whose result type in the profile's wire tables has all its

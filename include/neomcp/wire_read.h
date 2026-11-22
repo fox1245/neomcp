@@ -38,12 +38,15 @@ using WireRead = std::variant<T, std::string>;
 
 // Reads a T that the writer to_wire(const T&, profile) writes; `at` is the path of `wire` in a larger value (the
 // description of a problem starts with it). Defined for Icon, Implementation, ToolAnnotations, ToolDefinition,
-// ContentBlock, ResourceDefinition, ResourceTemplateDefinition, ResourceContents, ReadResult, PromptDefinition,
-// PromptMessage, PromptResult, CompletionResult and ToolResult; any other T does not link.
+// ContentBlock, ToolUseContent, ToolResultContent, ResourceDefinition, ResourceTemplateDefinition, ResourceContents,
+// ReadResult, PromptDefinition, PromptMessage, PromptResult, CompletionResult and ToolResult; any other T does not link.
 //
 // A ContentBlock is read by its `type`. A kind the revision does not define, and a `type` this library has no block
 // for, are errors: the pages say nothing of how a client treats a block it does not know, and a block read wrongly
-// would put wrong content before the user. A ReadResult also gets the caching hints of its result when it has them.
+// would put wrong content before the user. A ToolUseContent or a ToolResultContent is read where the revision defines
+// its type and is an error elsewhere; its `type` must be its own. The `input` of a tool use must be an object; the
+// structured content of a tool result is kept whatever JSON value it is, as the schemas differ in what they allow. A
+// ReadResult also gets the caching hints of its result when it has them.
 template <typename T>
 WireRead<T> from_wire(const json& wire, const profile::Profile& profile, std::string_view at = wire_root_path);
 
@@ -57,6 +60,10 @@ template <>
 WireRead<ToolDefinition> from_wire<ToolDefinition>(const json&, const profile::Profile&, std::string_view);
 template <>
 WireRead<ContentBlock> from_wire<ContentBlock>(const json&, const profile::Profile&, std::string_view);
+template <>
+WireRead<ToolUseContent> from_wire<ToolUseContent>(const json&, const profile::Profile&, std::string_view);
+template <>
+WireRead<ToolResultContent> from_wire<ToolResultContent>(const json&, const profile::Profile&, std::string_view);
 template <>
 WireRead<ResourceDefinition> from_wire<ResourceDefinition>(const json&, const profile::Profile&, std::string_view);
 template <>

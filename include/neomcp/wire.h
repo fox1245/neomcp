@@ -35,6 +35,12 @@ json to_wire(const Icon& icon, const profile::Profile& profile);
 // embedded resource as `TextResourceContents` or `BlobResourceContents`. A block of a kind the revision does not
 // define is written as a text block that names the kind.
 json to_wire(const ContentBlock& block, const profile::Profile& profile);
+// Type `ToolUseContent`, a block of sampling only. A revision without the type writes the block with every member,
+// as the model has it: the writers of sampling refuse such a block before they get here.
+json to_wire(const ToolUseContent& block, const profile::Profile& profile);
+// Type `ToolResultContent`, a block of sampling only, its content blocks as above. As for ToolUseContent, a revision
+// without the type keeps every member.
+json to_wire(const ToolResultContent& block, const profile::Profile& profile);
 // Type `Resource`; its annotations as the type it has for them, and its icons as `Icon`.
 json to_wire(const ResourceDefinition& resource, const profile::Profile& profile);
 // Type `ResourceTemplate`.

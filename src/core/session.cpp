@@ -2152,7 +2152,7 @@ std::optional<Answer> SessionCore::on_task(Message& request, const Served& serve
                     }
                     const auto method = served.tasks->input_method(*entry);
                     if (!method) continue;
-                    auto answer = read_answer(*method, item.value());
+                    auto answer = read_answer(*method, item.value(), profile);
                     if (const auto* why = std::get_if<std::string>(&answer)) {
                         return served_answer(make_error(id, error_code::invalid_params,
                                                         "Invalid params: the answer " + item.key() +
@@ -3317,7 +3317,7 @@ std::optional<Answer> SessionCore::take_retry(const Message& request, const Serv
         if (const auto* given = retry.responses->get_ptr<const json::object_t*>()) {
             for (const auto& [key, value] : *given) {
                 const auto method = answer_method(value, *served.profile, *served.input);
-                auto answer = method ? read_answer(*method, value)
+                auto answer = method ? read_answer(*method, value, *served.profile)
                                      : std::variant<InputResponse, std::string>(
                                            std::string("it is the answer of no request, or of more than one"));
                 if (const auto* why = std::get_if<std::string>(&answer)) {
@@ -3359,7 +3359,7 @@ std::optional<Answer> SessionCore::take_retry(const Message& request, const Serv
         for (const auto& [key, method] : claims.asked) {
             const json* given = member(*retry.responses, key);
             if (given == nullptr) continue;
-            auto answer = read_answer(method, *given);
+            auto answer = read_answer(method, *given, *served.profile);
             if (const auto* why = std::get_if<std::string>(&answer)) {
                 return served_answer(make_error(id, error_code::invalid_params,
                                                 "Invalid params: the answer " + key + " in params.inputResponses is "
@@ -3553,6 +3553,7 @@ void SessionCore::on_response(const Message& response) {
     std::shared_ptr<WaitState> wait;
     std::string key;
     std::string method;
+    profile::ProfilePtr profile;  // the call's: the answer is read for its revision
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         const auto found = outgoing_.find(*response.id);
@@ -3561,14 +3562,15 @@ void SessionCore::on_response(const Message& response) {
         key = found->second.key;
         if (!wait->open) return;
         method = wait->asked.at(key);
+        if (const auto asking = wait->call.lock()) profile = asking->profile;
     }
     // Read without the lock; whatever happened meanwhile is decided below.
     std::optional<std::string> failure;
     std::optional<InputResponse> answer;
     if (response.failed) {
         failure = "the client answered the input request " + key + " with an error";
-    } else {
-        auto read = read_answer(method, response.outcome);
+    } else if (profile) {
+        auto read = read_answer(method, response.outcome, *profile);
         if (const auto* why = std::get_if<std::string>(&read)) {
             failure = "the client's answer to the input request " + key + " is malformed: " + *why;
         } else {

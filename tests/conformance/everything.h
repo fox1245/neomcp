@@ -233,17 +233,10 @@ const Answer* answer_to(const neomcp::Context& call, const std::string& key) {
     return found == call.input_responses().end() ? nullptr : std::get_if<Answer>(&found->second);
 }
 
-// The text of a content block, or of the first block of an array, that has one.
-inline std::string text_in(const neomcp::json& content) {
-    if (content.is_array()) {
-        for (const neomcp::json& item : content) {
-            const std::string found = text_in(item);
-            if (!found.empty()) return found;
-        }
-        return std::string();
-    }
-    if (content.is_object() && content.contains("text") && content.at("text").is_string()) {
-        return content.at("text").get<std::string>();
+// The text of the first text block of a sampling result that has one.
+inline std::string text_in(const std::vector<neomcp::SamplingContent>& content) {
+    for (const neomcp::SamplingContent& block : content) {
+        if (const auto* found = std::get_if<neomcp::TextContent>(&block)) return found->text;
     }
     return std::string();
 }

@@ -14,6 +14,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -52,11 +53,18 @@ struct ElicitationUrl {
 // Whether the client should include context from MCP servers in a sampling request.
 enum class IncludeContext { none, this_server, all_servers };
 
-// One message of a sampling request: who says it, and one or more text, image or audio blocks. Several blocks are
-// written as an array only where the revision allows one.
+// A block of a sampling message or of a sampling result: text, an image or audio, and where the revision's sampling
+// carries them (its union `SamplingMessageContentBlock` lists their types) a tool use or a tool result.
+using SamplingContent = std::variant<TextContent, ImageContent, AudioContent, ToolUseContent, ToolResultContent>;
+
+// One message of a sampling request: who says it, and one or more blocks. Several blocks are written as an array only
+// where the revision allows one. Where tools take part, the pages bind the messages: a message that holds tool
+// results is the user's and holds nothing else, and every message of the assistant that holds tool uses is followed
+// at once by such a message that answers each of its tool uses by id and nothing more. A request that breaks this is
+// neither sent nor accepted.
 struct SamplingMessage {
     Role role = Role::user;
-    std::vector<ContentBlock> content;
+    std::vector<SamplingContent> content;
 };
 
 // The server's preferences for the model the client picks; every member is a hint the client may ignore.
@@ -68,7 +76,9 @@ struct ModelPreferences {
 };
 
 // Asks the client's model for a completion (sampling). Needs the client's `sampling` capability; a request with
-// tools needs its `sampling.tools`, and context from servers (this_server, all_servers) its `sampling.context`.
+// tools (tools, a tool choice, or a message that holds a tool use or a tool result) needs its `sampling.tools`, and
+// context from servers (this_server, all_servers) its `sampling.context`. A revision whose sampling has no tools
+// carries no such request: it is never sent.
 struct SamplingRequest {
     std::vector<SamplingMessage> messages;
     std::uint64_t max_tokens = 0;
@@ -103,10 +113,21 @@ struct ElicitationAnswer {
     json content = json::object();
 };
 
-// The completion the client's model produced.
+// Reasons a sampling result may give for where the model stopped. The member is an open string: a provider may give
+// others.
+namespace stop_reasons {
+inline constexpr std::string_view end_turn = "endTurn";
+inline constexpr std::string_view stop_sequence = "stopSequence";
+inline constexpr std::string_view max_tokens = "maxTokens";
+inline constexpr std::string_view tool_use = "toolUse";  // the content asks to use tools
+}  // namespace stop_reasons
+
+// The completion the client's model produced: one block or more, of the kinds the revision's sampling carries (a
+// model that asks to use tools answers with tool uses). One block is written as itself; several as an array, which
+// only a revision that allows one takes.
 struct SamplingAnswer {
     Role role = Role::assistant;
-    json content;  // the content block, or the array of blocks, as the client sent it
+    std::vector<SamplingContent> content;
     std::string model;  // the model that produced it
     std::optional<std::string> stop_reason;
 };

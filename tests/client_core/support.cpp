@@ -368,6 +368,27 @@ ToolResult Generator::tool_result() {
     return out;
 }
 
+ToolUseContent Generator::tool_use() {
+    ToolUseContent out;
+    out.name = text();
+    out.input = object();
+    out.meta = meta("ToolUseContent");
+    out.extra = extra();
+    return out;
+}
+
+ToolResultContent Generator::tool_result_block() {
+    ToolResultContent out;
+    for (std::size_t i = 0, n = items(3); i < n; ++i) out.content.push_back(block());
+    // Any value: the revisions' schemas differ in what they allow, and the reader keeps what it is given.
+    if (on("ToolResultContent", "structuredContent")) out.structured_content = random_.chance() ? object() : scalar();
+    out.is_error = on("ToolResultContent", "isError") && random_.chance();
+    if (fill_ == Fill::all && has("ToolResultContent", "isError")) out.is_error = true;
+    out.meta = meta("ToolResultContent");
+    out.extra = extra();
+    return out;
+}
+
 // ---- Equality
 
 bool same(const json& a, const json& b) { return a == b; }
@@ -501,6 +522,31 @@ bool same(const CompletionResult& a, const CompletionResult& b) {
 bool same(const ToolResult& a, const ToolResult& b) {
     return same(a.content, b.content) && same(a.structured_content, b.structured_content) &&
            same(a.is_error, b.is_error) && same(a.meta, b.meta);
+}
+
+bool same(const ToolUseContent& a, const ToolUseContent& b) {
+    return same(a.id, b.id) && same(a.name, b.name) && same(a.input, b.input) && same(a.meta, b.meta) &&
+           same(a.extra, b.extra);
+}
+
+bool same(const ToolResultContent& a, const ToolResultContent& b) {
+    return same(a.tool_use_id, b.tool_use_id) && same(a.content, b.content) &&
+           same(a.structured_content, b.structured_content) && same(a.is_error, b.is_error) && same(a.meta, b.meta) &&
+           same(a.extra, b.extra);
+}
+
+bool same(const SamplingContent& a, const SamplingContent& b) {
+    if (a.index() != b.index()) return false;
+    return std::visit(
+        [&](const auto& left) {
+            using T = std::decay_t<decltype(left)>;
+            if constexpr (std::is_same_v<T, ToolUseContent> || std::is_same_v<T, ToolResultContent>) {
+                return same(left, std::get<T>(b));
+            } else {
+                return same(ContentBlock(left), ContentBlock(std::get<T>(b)));
+            }
+        },
+        a);
 }
 
 }  // namespace client_core_test

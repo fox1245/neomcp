@@ -133,6 +133,30 @@ struct EmbeddedResource {
 
 using ContentBlock = std::variant<TextContent, ImageContent, AudioContent, ResourceLink, EmbeddedResource>;
 
+// The blocks below belong to sampling only (neomcp/input.h): a message of the model may ask to use a tool, and the
+// message that follows it gives the tool's result. They exist where the revision's schema defines their types
+// (`ToolUseContent`, `ToolResultContent`); they are never part of a tool's result or a prompt. Like the blocks above,
+// each has `meta` (written as `_meta`) and `extra`, the members the revision's type has and this model does not know.
+
+// The model asks to use a tool (`type: "tool_use"`).
+struct ToolUseContent {
+    std::string id;               // unique within the conversation; the result that answers it names it
+    std::string name;             // the tool's name
+    json input = json::object();  // the arguments, an object that fits the tool's input schema
+    std::optional<json> meta;
+    json extra = json::object();
+};
+
+// The result of a tool use, given back to the model (`type: "tool_result"`).
+struct ToolResultContent {
+    std::string tool_use_id;                  // the id of the tool use this answers
+    std::vector<ContentBlock> content;        // as a tool's result holds them
+    std::optional<json> structured_content;  // kept as given: the revisions' schemas differ in what they allow
+    bool is_error = false;
+    std::optional<json> meta;
+    json extra = json::object();
+};
+
 ContentKind kind_of(const ContentBlock& block) noexcept;
 // The block's `type` on the wire ("text", "image", "audio", "resource_link", "resource").
 std::string_view wire_name(ContentKind kind) noexcept;

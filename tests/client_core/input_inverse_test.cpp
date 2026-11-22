@@ -1,5 +1,6 @@
 // read_request and write_answer: the inverses of write_params and read_answer, for every revision and for both
 // mechanisms of the slot `server_input`. The tests reach the internal header of the core.
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstdint>
@@ -51,6 +52,41 @@ bool starts_with(const std::string& text, const std::string& prefix) { return te
 
 InputResponse make_answer(Generator& g, const profile::Profile& profile, std::string_view method);
 
+// ---- Sampling blocks
+
+// Whether the revision's sampling carries blocks of the type: its union of sampling blocks lists it.
+bool sampling_takes(const profile::Profile& profile, std::string_view type) {
+    const profile::Union* blocks = profile.union_type("SamplingMessageContentBlock");
+    if (blocks == nullptr || profile.type(type) == nullptr) return false;
+    return std::find(blocks->alternatives.begin(), blocks->alternatives.end(), type) != blocks->alternatives.end();
+}
+
+bool takes_tool_blocks(const profile::Profile& profile) {
+    return sampling_takes(profile, "ToolUseContent") && sampling_takes(profile, "ToolResultContent");
+}
+
+// A text, image or audio block of a kind the revision defines.
+SamplingContent plain_block(Generator& g, const profile::Profile& profile) {
+    const std::array<ContentKind, 3> kinds{ContentKind::text, ContentKind::image, ContentKind::audio};
+    ContentKind kind = kinds[g.random().below(kinds.size())];
+    if (!has_content_kind(kind, profile)) kind = ContentKind::text;
+    const ContentBlock block = g.block(kind);
+    if (const auto* text = std::get_if<TextContent>(&block)) return *text;
+    if (const auto* image = std::get_if<ImageContent>(&block)) return *image;
+    return std::get<AudioContent>(block);
+}
+
+// Tool uses with ids that differ.
+std::vector<SamplingContent> tool_uses(Generator& g, std::size_t count) {
+    std::vector<SamplingContent> out;
+    for (std::size_t i = 0; i < count; ++i) {
+        ToolUseContent use = g.tool_use();
+        use.id = g.text() + "-use-" + std::to_string(i);
+        out.emplace_back(std::move(use));
+    }
+    return out;
+}
+
 // ---- Requests
 
 const profile::Type* params_type_of(const profile::Profile& profile, const InputMechanism& mechanism,
@@ -80,16 +116,29 @@ InputRequest make_request(Generator& g, const profile::Profile& profile, const I
     SamplingRequest request;
     const profile::Type* type = params_type_of(profile, mechanism, sampling);
     const bool arrays = profile.union_type("SamplingMessageContentBlock") != nullptr;
-    const std::array<ContentKind, 3> kinds{ContentKind::text, ContentKind::image, ContentKind::audio};
     for (std::size_t i = 0, n = 1 + g.random().below(3); i < n; ++i) {
         SamplingMessage message;
         message.role = g.random().chance() ? Role::user : Role::assistant;
         for (std::size_t j = 0, blocks = arrays ? 1 + g.random().below(3) : 1; j < blocks; ++j) {
-            ContentKind kind = kinds[g.random().below(kinds.size())];
-            if (!has_content_kind(kind, profile)) kind = ContentKind::text;
-            message.content.push_back(g.block(kind));
+            message.content.push_back(plain_block(g, profile));
         }
         request.messages.push_back(std::move(message));
+    }
+    // Where the revision's sampling carries them, a round of tools: the assistant's tool uses, then the user's results
+    // that answer each of them, in another order.
+    if (takes_tool_blocks(profile) && (g.random().chance() || g.some())) {
+        SamplingMessage uses;
+        uses.role = Role::assistant;
+        uses.content = tool_uses(g, 1 + g.random().below(2));
+        SamplingMessage results;
+        results.role = Role::user;
+        for (auto block = uses.content.rbegin(); block != uses.content.rend(); ++block) {
+            ToolResultContent result = g.tool_result_block();
+            result.tool_use_id = std::get<ToolUseContent>(*block).id;
+            results.content.emplace_back(std::move(result));
+        }
+        request.messages.push_back(std::move(uses));
+        request.messages.push_back(std::move(results));
     }
     request.max_tokens = g.count_value();
     if (g.some()) request.system_prompt = g.text();
@@ -584,17 +633,19 @@ InputResponse make_answer(Generator& g, const profile::Profile& profile, std::st
     }
     SamplingAnswer answer;
     answer.role = g.random().chance() ? Role::user : Role::assistant;
-    const std::array<ContentKind, 3> kinds{ContentKind::text, ContentKind::image, ContentKind::audio};
-    json blocks = json::array();
-    // Several blocks only where the revision takes them (write_answer writes one otherwise).
+    // Several blocks only where the revision takes them (write_answer refuses several otherwise).
     const bool block_arrays = profile.union_type("SamplingMessageContentBlock") != nullptr;
-    for (std::size_t i = 0, n = 1 + (block_arrays ? g.random().below(2) : 0); i < n; ++i) {
-        ContentKind kind = kinds[g.random().below(kinds.size())];
-        if (!has_content_kind(kind, profile)) kind = ContentKind::text;
-        blocks.push_back(to_wire(g.block(kind), profile));
-    }
-    answer.content = blocks.size() == 1 && (!block_arrays || g.random().chance()) ? blocks[0] : blocks;
     answer.model = g.text();
+    if (takes_tool_blocks(profile) && g.random().chance()) {
+        // The model asks to use tools.
+        answer.role = Role::assistant;
+        answer.content = tool_uses(g, 1 + g.random().below(2));
+        answer.stop_reason = std::string(stop_reasons::tool_use);
+        return answer;
+    }
+    for (std::size_t i = 0, n = 1 + (block_arrays ? g.random().below(2) : 0); i < n; ++i) {
+        answer.content.push_back(plain_block(g, profile));
+    }
     if (g.some()) answer.stop_reason = g.text();
     return answer;
 }
@@ -636,7 +687,7 @@ TEST(WriteAnswer, EveryAnswerAClientWritesIsReadBack) {
                     const json* result = std::get_if<json>(&written);
                     ASSERT_NE(result, nullptr) << std::get<std::string>(written);
                     for (const json& sent : {*result, json::parse(result->dump())}) {
-                        auto read = read_answer(method, sent);
+                        auto read = read_answer(method, sent, *profile);
                         const InputResponse* value = std::get_if<InputResponse>(&read);
                         ASSERT_NE(value, nullptr) << std::get<std::string>(read) << "\nresult: " << result->dump();
                         EXPECT_TRUE(same_answer(original, *value, *profile)) << "result: " << result->dump();
@@ -673,12 +724,17 @@ TEST(WriteAnswer, AResultAsAClientWritesItIsWrittenAsItWas) {
             {elicit, json{{"action", "cancel"}}},
             {roots, json{{"roots", json::array({json{{"uri", "file:///a"}}, json{{"uri", "file:///b"}, {"name", "b"}}})}}},
         };
+        const json tool_use{{"type", "tool_use"}, {"id", "call-1"}, {"name", "add"}, {"input", json{{"a", 2}}}};
+        if (takes_tool_blocks(*profile)) {
+            cases.push_back({sampling, json{{"role", "assistant"}, {"content", tool_use}, {"model", "m"}, {"stopReason", "toolUse"}}});
+            cases.push_back({sampling, json{{"role", "assistant"}, {"content", json::array({tool_use, json{{"type", "tool_use"}, {"id", "call-2"}, {"name", "add"}, {"input", json::object()}}})}, {"model", "m"}}});
+        }
         const bool block_arrays = profile->union_type("SamplingMessageContentBlock") != nullptr;
         for (const Case& item : cases) {
             if (!mechanism->carries(*profile, item.method)) continue;
             // An array of blocks is a sampling result only where the revision takes several blocks.
             if (item.method == sampling && item.result.at("content").is_array() && !block_arrays) continue;
-            auto read = read_answer(item.method, item.result);
+            auto read = read_answer(item.method, item.result, *profile);
             ASSERT_TRUE(std::holds_alternative<InputResponse>(read)) << std::get<std::string>(read);
             auto written = write_answer(std::get<InputResponse>(read), *profile, *mechanism);
             ASSERT_TRUE(std::holds_alternative<json>(written)) << std::get<std::string>(written);
@@ -696,15 +752,27 @@ TEST(WriteAnswer, ASamplingResultHasOneBlockWhereTheRevisionTakesOne) {
         if (!mechanism->carries(*profile, sampling)) continue;
         SCOPED_TRACE(profile->revision());
         const bool block_arrays = profile->union_type("SamplingMessageContentBlock") != nullptr;
+        TextContent text;
+        text.text = "a";
+        ImageContent image;
+        image.data = "AAAA";
+        image.mime_type = "image/png";
         SamplingAnswer one;
         one.model = "m";
-        one.content = json::array({text_block});
+        one.content.emplace_back(text);
         auto written = write_answer(InputResponse(one), *profile, *mechanism);
         ASSERT_TRUE(std::holds_alternative<json>(written)) << std::get<std::string>(written);
-        EXPECT_EQ(std::get<json>(written).at("content"), block_arrays ? json::array({text_block}) : text_block);
+        EXPECT_EQ(std::get<json>(written).at("content"), text_block);  // one block is written as itself
         SamplingAnswer two = one;
-        two.content = json::array({text_block, image_block});
-        EXPECT_EQ(std::holds_alternative<json>(write_answer(InputResponse(two), *profile, *mechanism)), block_arrays);
+        two.content.emplace_back(image);
+        const auto both = write_answer(InputResponse(two), *profile, *mechanism);
+        EXPECT_EQ(std::holds_alternative<json>(both), block_arrays);
+        if (block_arrays) {
+            EXPECT_EQ(std::get<json>(both).at("content"), json::array({text_block, image_block}));
+        }
+        // An array is read only where the revision takes one.
+        const json result{{"role", "assistant"}, {"content", json::array({text_block})}, {"model", "m"}};
+        EXPECT_EQ(std::holds_alternative<InputResponse>(read_answer(sampling, result, *profile)), block_arrays);
         ++checked;
     }
     EXPECT_GT(checked, 0U);
@@ -762,26 +830,26 @@ TEST(WriteAnswer, TheFieldsOfAnAcceptanceAreStringsNumbersBooleansOrListsOfStrin
     EXPECT_FALSE(writes(json{{"a", json::object()}}));
 }
 
-TEST(WriteAnswer, TheContentOfASamplingResultIsBlocksThatAllHaveAType) {
+TEST(ReadAnswer, TheContentOfASamplingResultIsBlocksThatSamplingCarries) {
     const auto modern = profile::builtin(profile::builtin_revisions().back());
-    const auto mechanism = make_mechanism(modern->mechanism(profile::Slot::server_input));
     ASSERT_NE(modern->union_type("SamplingMessageContentBlock"), nullptr);
     const json block{{"type", "text"}, {"text", "a"}};
-    const auto writes = [&](const json& content) {
-        SamplingAnswer answer;
-        answer.model = "m";
-        answer.content = content;
-        return std::holds_alternative<json>(write_answer(InputResponse(answer), *modern, *mechanism));
+    const auto reads = [&](const json& content) {
+        const json result{{"role", "assistant"}, {"content", content}, {"model", "m"}};
+        return std::holds_alternative<InputResponse>(read_answer(sampling, result, *modern));
     };
-    EXPECT_TRUE(writes(block));
-    EXPECT_TRUE(writes(json::array({block, block})));
-    EXPECT_FALSE(writes(json::array({block, json(5)})));
-    EXPECT_FALSE(writes(json::array({json(5), block})));
-    EXPECT_FALSE(writes(json::array({json(5)})));
-    EXPECT_FALSE(writes(json::array({json::object()})));
-    EXPECT_FALSE(writes(json::array({block, json{{"text", "no type"}}})));
-    EXPECT_FALSE(writes(json{{"text", "no type"}}));
-    EXPECT_FALSE(writes(json{{"type", 5}, {"text", "type is not a string"}}));
+    EXPECT_TRUE(reads(block));
+    EXPECT_TRUE(reads(json::array({block, block})));
+    EXPECT_FALSE(reads(json::array()));
+    EXPECT_FALSE(reads(json::array({block, json(5)})));
+    EXPECT_FALSE(reads(json::array({json(5), block})));
+    EXPECT_FALSE(reads(json::array({json::object()})));
+    EXPECT_FALSE(reads(json::array({block, json{{"text", "no type"}}})));
+    EXPECT_FALSE(reads(json{{"text", "no type"}}));
+    EXPECT_FALSE(reads(json{{"type", 5}, {"text", "type is not a string"}}));
+    // A resource link is a content block, but not one that sampling carries.
+    EXPECT_FALSE(reads(json{{"type", "resource_link"}, {"uri", "file:///a"}, {"name", "a"}}));
+    EXPECT_FALSE(reads(json{{"type", "tool_use"}, {"id", "x"}, {"name", "n"}, {"input", "not an object"}}));
 }
 
 TEST(WriteAnswer, WhatTheResultTypeOfTheRevisionHasIsWritten) {
@@ -814,8 +882,10 @@ TEST(WriteAnswer, AResultHoldsOnlyTheMembersOfTheRevisionsResultTypeAndAllItRequ
     const auto mechanism = make_mechanism(without_reason->mechanism(profile::Slot::server_input));
     SamplingAnswer sampled;
     sampled.model = "m";
-    sampled.content = json{{"type", "text"}, {"text", "a"}};
-    sampled.stop_reason = "endTurn";
+    TextContent text;
+    text.text = "a";
+    sampled.content.emplace_back(text);
+    sampled.stop_reason = std::string(stop_reasons::end_turn);
     auto written = write_answer(InputResponse(sampled), *without_reason, *mechanism);
     ASSERT_TRUE(std::holds_alternative<json>(written)) << std::get<std::string>(written);
     EXPECT_FALSE(std::get<json>(written).contains("stopReason"));
@@ -843,10 +913,13 @@ TEST(WriteAnswer, AnswersThatCannotBeWrittenAreErrors) {
     EXPECT_TRUE(std::holds_alternative<std::string>(write_answer(InputResponse(bad_content), *modern, *mechanism)));
     bad_content.content = json::array();
     EXPECT_TRUE(std::holds_alternative<std::string>(write_answer(InputResponse(bad_content), *modern, *mechanism)));
-    SamplingAnswer bad_sampling;
-    bad_sampling.content = json("text");
+    SamplingAnswer bad_sampling;  // no content
     EXPECT_TRUE(std::holds_alternative<std::string>(write_answer(InputResponse(bad_sampling), *modern, *mechanism)));
-    bad_sampling.content = json::array();
+    ToolUseContent use;
+    use.id = "call-1";
+    use.name = "add";
+    use.input = json::array();  // not an object
+    bad_sampling.content.emplace_back(use);
     EXPECT_TRUE(std::holds_alternative<std::string>(write_answer(InputResponse(bad_sampling), *modern, *mechanism)));
     Root bad_root;
     bad_root.uri = "file:///a";
