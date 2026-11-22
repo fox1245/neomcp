@@ -1,6 +1,7 @@
 // What the servers of the client matrix serve: the tools, resources, resource template, prompts and completer of the
 // conformance fixture (tests/conformance/everything.h), a tool whose result is a described struct (for the typed
-// call), and a tool that waits until it is cancelled. Every list comes in pages of one item, so that a client that
+// call), a tool that waits until it is cancelled, and a tool that asks the client's model in two rounds with a tool to
+// use (tests/support/sampling_tool_loop.h). Every list comes in pages of one item, so that a client that
 // lists follows several pages.
 //
 // The stdio program of the matrix (server.cpp) and the tests that serve over HTTP in process register the same.
@@ -18,6 +19,7 @@
 #include <asio/use_awaitable.hpp>
 
 #include "../conformance/everything.h"
+#include "../support/sampling_tool_loop.h"
 #include "neomcp/profile.h"
 #include "neomcp/server.h"
 
@@ -73,6 +75,7 @@ inline void register_matrix(neomcp::Server& server) {
     conformance::register_changes(server);
 
     server.tool<AddArgs>("add", "Add two integers", [](const AddArgs& args) { return Sum{args.a + args.b}; });
+    sampling_tool_loop::register_tool(server);
 
     // Reports once that it waits, then waits on a timer that the server cancels when the client cancels the call.
     server.tool<WaitArgs>("wait", "Wait for a time, or until the call is cancelled",

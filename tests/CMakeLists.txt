@@ -229,6 +229,13 @@ target_link_libraries(neomcp_server_declared_test PRIVATE neomcp::server GTest::
 neomcp_configure_target(neomcp_server_declared_test)
 gtest_discover_tests(neomcp_server_declared_test DISCOVERY_TIMEOUT 120)
 
+# Sampling with tools on the wire: the two rounds of a tool under both ways a server asks, and the revisions and
+# clients that are not asked.
+add_executable(neomcp_server_sampling_tools_test server_sampling_tools_test.cpp)
+target_link_libraries(neomcp_server_sampling_tools_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_server_sampling_tools_test)
+gtest_discover_tests(neomcp_server_sampling_tools_test DISCOVERY_TIMEOUT 120)
+
 # The task store: records of long-running requests, their bounds, and the races a store settles.
 add_executable(neomcp_task_store_test task_store_test.cpp)
 target_link_libraries(neomcp_task_store_test PRIVATE neomcp::server GTest::gtest_main Threads::Threads)

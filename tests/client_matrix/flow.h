@@ -2,11 +2,12 @@
 // library's own servers, and the Python SDK's servers of tests/interop/python_server.py, which serve the same names):
 // the kind of server and the revision that contact found, lists, a plain and a typed tool call, resources and a
 // resource template, a prompt, completion, ping, progress, the server's requests for input (a form, the client's
-// model, its roots), cancellation, a change of the tools, and close.
+// model, the model in two rounds with a tool to use, its roots), cancellation, a change of the tools, and close.
 //
 // What a step expects comes from the governing revision's profile: a typed call where tool results carry structured
 // content (else the typed call must fail at once, and an untyped one carries the result as text), completion and ping
-// where the revision defines them, each kind of input request where the revision lets a server ask it.
+// where the revision defines them, each kind of input request where the revision lets a server ask it, and sampling
+// with a tool where the revision's sampling carries tool uses and results.
 #pragma once
 
 #include <string>

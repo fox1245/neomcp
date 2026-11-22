@@ -14,6 +14,7 @@
 #include <utility>
 #include <variant>
 
+#include "../support/sampling_tool_loop.h"
 #include "registrations.h"
 
 namespace client_matrix {
@@ -57,6 +58,16 @@ bool client_requests(const Profile& profile, std::string_view method) {
     return request != nullptr && request->from_client;
 }
 
+// Whether the revision's sampling carries tool uses and tool results: its union of sampling blocks lists both types.
+bool samples_with_tools(const Profile& profile) {
+    const neomcp::profile::Union* blocks = profile.union_type("SamplingMessageContentBlock");
+    if (blocks == nullptr) return false;
+    for (const char* type : {"ToolUseContent", "ToolResultContent"}) {
+        if (profile.type(type) == nullptr || !contains(blocks->alternatives, type)) return false;
+    }
+    return true;
+}
+
 // Whether the revision's tool results carry structured content.
 bool structured_results(const Profile& profile) {
     const neomcp::profile::Type* type = profile.type("CallToolResult");
@@ -91,6 +102,8 @@ void check_lists(neomcp::Client& client, const Expected& expected) {
     }
     EXPECT_FALSE(contains(tool_names, "test_hidden_tool"));
     if (expected.paged) {
+        // The library's own servers also serve the tool that samples with tools.
+        EXPECT_TRUE(contains(tool_names, sampling_tool_loop::tool_name));
         EXPECT_EQ(tools->page_cache.size(), tools->items.size());
         const auto first = client.list_tools();
         ASSERT_TRUE(first) << first.error().message;
@@ -212,6 +225,18 @@ void check_input(neomcp::Client& client, const Profile& governing) {
         EXPECT_FALSE(sampled->is_error) << text_of(*sampled);
         EXPECT_EQ(text_of(*sampled), "LLM response: " + std::string(model_answer));
     }
+    if (can_ask(governing, "sampling/createMessage") && samples_with_tools(governing)) {
+        SCOPED_TRACE("sampling with tools");
+        // Served by the library's own servers (check_lists); another server may not have it.
+        const auto tools = client.list_all_tools();
+        ASSERT_TRUE(tools) << tools.error().message;
+        if (contains(names_of(tools->items), sampling_tool_loop::tool_name)) {
+            const auto looped = client.call_tool(std::string(sampling_tool_loop::tool_name));
+            ASSERT_TRUE(looped) << looped.error().message;
+            EXPECT_FALSE(looped->is_error) << text_of(*looped);
+            EXPECT_EQ(text_of(*looped), sampling_tool_loop::expected);
+        }
+    }
     if (can_ask(governing, "elicitation/create")) {
         SCOPED_TRACE("elicitation");
         json arguments = json::object();
@@ -284,6 +309,13 @@ void check_change(neomcp::Client& client) {
     EXPECT_TRUE(subscription->close());
 }
 
+// The sampling handler's declaration that it takes requests with tools.
+neomcp::SamplingSupport with_tools() {
+    neomcp::SamplingSupport support;
+    support.tools = true;
+    return support;
+}
+
 }  // namespace
 
 neomcp::ClientOptions client_options(const std::vector<std::string>& revisions) {
@@ -297,14 +329,10 @@ neomcp::ClientOptions client_options(const std::vector<std::string>& revisions) 
         content["email"] = std::string(user_email);
         return neomcp::ElicitationAnswer{neomcp::ElicitationAction::accept, std::move(content)};
     });
-    options.handlers.sampling([](const neomcp::SamplingRequest&) {
-        neomcp::SamplingAnswer answer;
-        neomcp::TextContent said;
-        said.text = std::string(model_answer);
-        answer.content.push_back(std::move(said));
-        answer.model = "client-matrix";
-        return answer;
-    });
+    // The model answers a plain request with model_answer, and plays its part in the rounds with a tool.
+    options.handlers.sampling(
+        [](const neomcp::SamplingRequest& request) { return sampling_tool_loop::model(request, model_answer); },
+        with_tools());
     options.handlers.roots([] {
         neomcp::RootsAnswer answer;
         answer.roots.push_back(neomcp::Root{std::string(root_uri), std::string("root"), std::nullopt});
