@@ -5,15 +5,16 @@
 // (a lambda whose parameters are written out). Its parameters say what it takes and its return type says whether
 // it is a coroutine:
 //
-//   registered with           plain function               coroutine
-//   tool<Args>(...)           R(const Args&)               asio::awaitable<R>(Args)
-//                             R(const Args&, Context&)     asio::awaitable<R>(Args, Context&)
-//   tool(name, desc, ...)     R()                          asio::awaitable<R>()
-//                             R(Context&)                  asio::awaitable<R>(Context&)
-//   tool(ToolDefinition, ...) ToolResult(const json&, Context&)   asio::awaitable<ToolResult>(json, Context&)
+//   registered with           plain function                      coroutine
+//   tool<Args>(...)           R(const Args&)                      asio::awaitable<R>(Args)
+//                             R(const Args&, Context&)            asio::awaitable<R>(Args, Context&)
+//   tool(name, desc, ...)     R()                                 asio::awaitable<R>()
+//                             R(Context&)                         asio::awaitable<R>(Context&)
+//   tool(ToolDefinition, ...) ToolResult(const json&)             asio::awaitable<ToolResult>(json)
+//                             ToolResult(const json&, Context&)   asio::awaitable<ToolResult>(json, Context&)
 //
-// The arguments may be taken as `const Args&` or as `Args` in either kind. Anything else fails to compile with a
-// static_assert that says what is expected.
+// The arguments may be taken as `const Args&` or as `Args` in either kind (for a ToolDefinition, Args is neomcp::json:
+// `const json&` or `json`). Anything else fails to compile with a static_assert that says what is expected.
 //
 // A handler that may ask its client for input returns std::variant<R, neomcp::InputRequired> (or InputRequired
 // alone), where R is one of the results below; a ToolDefinition handler then returns

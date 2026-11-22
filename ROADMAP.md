@@ -149,8 +149,6 @@ Linux, shared libraries; versioned releases from 0.1.0.
   values of the primitive schema types (`type_values`), which that check could use. Accepted content is still
   validated against the schema.
 - Change notifications: many distinct updated URIs in a burst can delay a list change.
-- The table of handler forms at the top of `include/neomcp/server/handler.h` omits a `ToolDefinition` handler
-  without `Context&`.
 - The HTTP listener holds one worker thread per request in progress and per open stream. The bounds limit how long
   one connection holds a worker, not how many connections arrive; a listener that reads requests without holding a
   worker would remove that limit.

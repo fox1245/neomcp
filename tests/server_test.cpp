@@ -462,6 +462,18 @@ TEST(Forms, EveryHandlerFormIsCalled) {
     server.tool(word, [](json arguments, neomcp::Context&) -> asio::awaitable<neomcp::ToolResult> {
         co_return text_result(arguments.at("word").get<std::string>() + " co");
     });
+    word.name = "untyped_plain";
+    server.tool(word, [](const json& arguments) {
+        return text_result(arguments.at("word").get<std::string>() + " plain");
+    });
+    word.name = "untyped_plain_by_value";
+    server.tool(word, [](json arguments) {
+        return text_result(arguments.at("word").get<std::string>() + " value");
+    });
+    word.name = "untyped_coroutine_plain";
+    server.tool(word, [](json arguments) -> asio::awaitable<neomcp::ToolResult> {
+        co_return text_result(arguments.at("word").get<std::string>() + " co plain");
+    });
     server.tool<AddArgs>("pointer", "", &st::add_numbers);
     server.tool<AddArgs>("function", "", st::add_numbers);
     server.tool<AddArgs>("object", "", st::Multiplier{10});
@@ -488,6 +500,9 @@ TEST(Forms, EveryHandlerFormIsCalled) {
         {"none_coroutine_context", json::object(), "2026-07-28"},
         {"untyped", words, "hi"},
         {"untyped_coroutine", words, "hi co"},
+        {"untyped_plain", words, "hi plain"},
+        {"untyped_plain_by_value", words, "hi value"},
+        {"untyped_coroutine_plain", words, "hi co plain"},
         {"pointer", typed, "5"},
         {"function", typed, "5"},
         {"object", typed, "50"},
