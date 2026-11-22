@@ -249,6 +249,65 @@ TEST(ClientDriver, ARoundThatAsksStartsTheBackoffAgain) {
     EXPECT_EQ(timers->started_for<neomcp::StateRetryDelay>().size(), 2u);
 }
 
+TEST(ClientDriver, TheDelaysOfAStateOnlyRetryAreUsedAtTheirBoundAndRefusedOneMillisecondPastIt) {
+    using ms = std::chrono::milliseconds;
+    constexpr ms limit = neomcp::ClientDefaults::state_retry_delay_limit;
+    {
+        SCOPED_TRACE("at the bound");
+        std::atomic<int> calls{0};
+        auto peer = std::make_shared<ScriptedPeer>([&](ScriptedPeer& side, const Seen& request) {
+            if (answer_opening(side, request, per_request_revision)) return;
+            if (request.method() == "tools/call") side.answer(request, ++calls <= 3 ? state_only() : completed());
+        });
+        auto timers = std::make_shared<ManualTimers>();
+        auto options = only({per_request_revision});
+        options.timers = timers;
+        options.state_retry_first_delay = limit;
+        options.state_retry_max_delay = limit;
+        neomcp::Client client = open_with(std::move(options), peer);
+        std::optional<neomcp::Result<json>> result;
+        std::thread caller([&] { result.emplace(client.request("tools/call", tool_params())); });
+        const OnExit join_caller([&] { join(caller); });
+        const OnExit close_first([&] { static_cast<void>(client.close()); });
+        std::vector<ms> delays;
+        for (int i = 0; i < 2; ++i) {
+            const auto timer = timers->live([](const ManualTimers::Started& one) {
+                return std::holds_alternative<neomcp::StateRetryDelay>(one.purpose);
+            });
+            ASSERT_TRUE(timer);
+            delays.push_back(timer->after);
+            EXPECT_TRUE(timers->fire(timer->id));
+        }
+        caller.join();
+        ASSERT_TRUE(result);
+        ASSERT_TRUE(*result) << result->error().message;
+        EXPECT_EQ(delays, (std::vector<ms>{limit, limit}));
+    }
+    const auto refused_with = [](ms first, ms longest) {
+        auto options = only({per_request_revision});
+        options.state_retry_first_delay = first;
+        options.state_retry_max_delay = longest;
+        auto peer = std::make_shared<ScriptedPeer>(nullptr);
+        return neomcp::Client::open(std::move(options), neomcp::make_memory_transport(Transport::stdio, peer));
+    };
+    const std::vector<std::pair<ms, ms>> past{
+        {ms{50}, limit + ms{1}},
+        {limit, limit + ms{1}},
+        {limit + ms{1}, limit + ms{1}},
+        {ms{50}, (std::chrono::milliseconds::max)()},
+        {(std::chrono::milliseconds::max)(), (std::chrono::milliseconds::max)()},
+    };
+    for (const auto& [first, longest] : past) {
+        SCOPED_TRACE(std::to_string(first.count()) + " " + std::to_string(longest.count()));
+        const auto opened = refused_with(first, longest);
+        ASSERT_FALSE(opened);
+        EXPECT_EQ(opened.error().kind, ClientErrorKind::invalid_options);
+        EXPECT_NE(opened.error().message.find("state_retry_max_delay"), std::string::npos) << opened.error().message;
+        EXPECT_NE(opened.error().message.find(std::to_string(limit.count())), std::string::npos)
+            << opened.error().message;
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Threads
 

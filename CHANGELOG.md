@@ -27,6 +27,8 @@ interface, and a new patch number does not.
   their types, as it compared member names before. A property whose `type` is none of the values, or whose members
   are those of one shape and whose `type` is another's, is outside the form and is refused like any other property
   that does not fit.
+- `ClientOptions::state_retry_first_delay` and `state_retry_max_delay` may not exceed
+  `ClientDefaults::state_retry_delay_limit` (1 hour); `Client::open` fails with `invalid_options` for more.
 
 ## 0.2.0
 

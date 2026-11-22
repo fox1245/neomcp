@@ -140,8 +140,8 @@ struct ClientOptions {
     std::size_t max_concurrent_input_handlers = ClientDefaults::max_concurrent_input_handlers;
     // A call whose result asks for nothing but its state is sent again at once; when it asks so again, after
     // state_retry_first_delay, doubled at each further retry up to state_retry_max_delay. A result that asks for input
-    // starts the count again. Zero is an error for either, and the first must not exceed the second. Defaults 50 ms,
-    // 250 ms.
+    // starts the count again. Zero is an error for either, and the first must not exceed the second, which must not
+    // exceed ClientDefaults::state_retry_delay_limit (1 hour). Defaults 50 ms, 250 ms.
     std::chrono::milliseconds state_retry_first_delay = ClientDefaults::state_retry_first_delay;
     std::chrono::milliseconds state_retry_max_delay = ClientDefaults::state_retry_max_delay;
 

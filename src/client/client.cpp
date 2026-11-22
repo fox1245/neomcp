@@ -372,6 +372,9 @@ public:
             problems += "the delays between retries of a call that asks for its state alone must be positive\n";
         } else if (options.state_retry_first_delay > options.state_retry_max_delay) {
             problems += "state_retry_first_delay must not exceed state_retry_max_delay\n";
+        } else if (options.state_retry_max_delay > ClientDefaults::state_retry_delay_limit) {
+            problems += "state_retry_max_delay must not exceed " +
+                        std::to_string(ClientDefaults::state_retry_delay_limit.count()) + " ms\n";
         }
         if (options.max_subscriptions == 0) problems += "max_subscriptions must be positive\n";
         if (options.subscription_reopen_first_delay.count() <= 0 || options.subscription_reopen_max_delay.count() <= 0) {

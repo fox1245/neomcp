@@ -617,6 +617,8 @@ struct ClientDefaults {
     static constexpr std::size_t max_concurrent_input_handlers = 4;
     static constexpr std::chrono::milliseconds state_retry_first_delay{50};
     static constexpr std::chrono::milliseconds state_retry_max_delay{250};
+    // The longest either of those delays may be set to; Client::open refuses more.
+    static constexpr std::chrono::milliseconds state_retry_delay_limit{3'600'000};
     static constexpr std::size_t max_list_pages = 64;
     static constexpr std::size_t max_list_items = 10'000;
     // Change feeds (neomcp/client/subscription.h): subscriptions open at once, as many as a server's session keeps
