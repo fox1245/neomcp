@@ -10,6 +10,7 @@ add_executable(neomcp_client_core_test
     engine_pair_test.cpp
     engine_pending_test.cpp
     engine_test.cpp
+    form_type_test.cpp
     header_value_test.cpp
     support.cpp
     input_inverse_test.cpp

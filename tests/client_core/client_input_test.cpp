@@ -832,8 +832,7 @@ bool refused(const neomcp::ClientInputMechanism& half, const json& schema, const
 }
 
 TEST(ClientInputForm, TheCheckFollowsTheRevisionsPrimitiveSchemaDefinitions) {
-    // 2025-06-18 gives a string no default; 2025-11-25 does. (A string with a default and nothing else would fit the
-    // members of a boolean of 2025-06-18: the check compares member names only.)
+    // 2025-06-18 gives a string no default; 2025-11-25 does.
     const char* with_default = R"({"type":"object","properties":{"n":{"type":"string","minLength":1,"default":"x"}}})";
     for (const auto revision : {std::string_view("2025-06-18"), handshake_revision}) {
         SCOPED_TRACE(std::string(revision));

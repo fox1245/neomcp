@@ -287,10 +287,11 @@ public:
 
     // What keeps the requested schema of a form from the restricted form the profile defines; empty when it fits.
     // Each property must hold the required members of one alternative of the profile's union of primitive schema
-    // definitions and no member that alternative lacks; the schema itself may hold only the members the half names
-    // for the root of a form (its type, its properties, which of them are required, and the dialect). The profile's
-    // tables name members, not their values, so the value of a property's `type` is not compared with the
-    // alternative's; the engine compiles the schema as well before a handler sees the form. The description never
+    // definitions and no member that alternative lacks, and its `type` must be one of the values that alternative
+    // lists for it (Type::type_values; an alternative that lists none leaves the `type` to its members); the schema
+    // itself may hold only the members the half names for the root of a form (its type, its properties, which of
+    // them are required, and the dialect). The profile's tables do not hold the values of the other members, so those
+    // are not compared; the engine compiles the schema as well before a handler sees the form. The description never
     // repeats a text the server sent (a property is named by its position).
     virtual std::optional<std::string> form_problem(const json& requested_schema,
                                                     const profile::Profile& profile) const = 0;

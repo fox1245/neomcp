@@ -522,19 +522,46 @@ void union_members(const profile::Profile& profile, std::string_view name, std::
     }
 }
 
-// Whether a property schema has every member the type requires and no member the type lacks.
-bool fits(const json::object_t& property, const profile::Type& type) {
+// How many objects deep a property is checked against the tables: a choice of several holds one object, and the tables
+// have no object inside it.
+constexpr int property_depth = 4;
+
+// Whether a property schema has every member the type requires and no member the type lacks; where the type lists the
+// values of its `type` member (Type::type_values), a `type` that is one of them; and, for each member the type
+// describes as an object of a type of the profile (Type::property_types, as the items of a choice of several), an
+// object that fits that type in the same way. `depth` bounds the descent.
+bool fits(const json::object_t& property, const profile::Type& type, const profile::Profile& profile, int depth) {
     for (const auto& [keyword, unused] : property) {
         static_cast<void>(unused);
         if (!type.has_property(keyword)) return false;
     }
-    return std::all_of(type.required.begin(), type.required.end(),
-                       [&](const std::string& name) { return property.find(name) != property.end(); });
+    if (!std::all_of(type.required.begin(), type.required.end(),
+                     [&](const std::string& name) { return property.find(name) != property.end(); })) {
+        return false;
+    }
+    if (!type.type_values.empty()) {
+        const auto declared = property.find(std::string(form_type_member));
+        if (declared != property.end()) {
+            const auto* value = declared->second.get_ptr<const std::string*>();
+            if (value == nullptr || !type.has_type_value(*value)) return false;
+        }
+    }
+    for (const profile::PropertyType& described : type.property_types) {
+        const auto member = property.find(described.property);
+        if (member == property.end()) continue;
+        const profile::Type* nested = profile.property_type(type, described.property);
+        if (nested == nullptr) continue;
+        const auto* object = member->second.get_ptr<const json::object_t*>();
+        if (object == nullptr || depth <= 0 || !fits(*object, *nested, profile, depth - 1)) return false;
+    }
+    return true;
 }
 
-// The tables name the members of each primitive schema definition but not the values of their members, so this check
-// compares member names only: a property whose `type` names something other than its alternative's passes here
-// (the engine compiles the schema too, and the accepted content is validated against it).
+// The tables name the members of each primitive schema definition, the values of its `type` member and the members of
+// the objects it holds (the items of a choice of several), but not the values of the other members: a property fits an
+// alternative when its members are the alternative's, it has the ones the alternative requires, its `type` is one the
+// alternative lists, and the objects it holds fit their types the same way. The other values are not compared here (the
+// engine compiles the schema too, and the accepted content is validated against it).
 std::optional<std::string> restricted_form_problem(const json& schema, const profile::Profile& profile) {
     constexpr int union_depth = 8;
     const auto* root = schema.get_ptr<const json::object_t*>();
@@ -555,7 +582,9 @@ std::optional<std::string> restricted_form_problem(const json& schema, const pro
         const auto* fields = property.get_ptr<const json::object_t*>();
         const bool fitting =
             fields != nullptr && std::any_of(alternatives.begin(), alternatives.end(),
-                                             [&](const profile::Type* alternative) { return fits(*fields, *alternative); });
+                                             [&](const profile::Type* alternative) {
+                                                 return fits(*fields, *alternative, profile, property_depth);
+                                             });
         if (!fitting) {
             return "property " + std::to_string(position + 1) +
                    " of the requested schema fits none of the revision's primitive schema definitions";

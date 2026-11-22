@@ -20,6 +20,14 @@ interface, and a new patch number does not.
   it carries: the header does not route it to a session (a live one included), and its answer carries none. A GET or
   DELETE of that revision is answered 405. The revisions that keep sessions still route by the header.
 
+### Client
+
+- The check of the restricted form of an elicitation compares each property's `type` with the values its revision's
+  profile lists for the shape (`type_values`), and the objects a property holds (the items of a choice of several) with
+  their types, as it compared member names before. A property whose `type` is none of the values, or whose members
+  are those of one shape and whose `type` is another's, is outside the form and is refused like any other property
+  that does not fit.
+
 ## 0.2.0
 
 The interface changed in places (see "Changed"); a project built against 0.1 is rebuilt against 0.2.

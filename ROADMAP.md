@@ -145,9 +145,6 @@ Linux, shared libraries; versioned releases from 0.1.0.
 - Sampling messages of 2025-11-25 and 2026-07-28 may hold tool use and tool result blocks (`ToolUseContent`,
   `ToolResultContent`); the content model has no such blocks, so a server cannot write them and the reader of a
   sampling request refuses a request that holds them.
-- The client checks the restricted form of an elicitation by member names only; the profiles now carry the `type`
-  values of the primitive schema types (`type_values`), which that check could use. Accepted content is still
-  validated against the schema.
 - Change notifications: many distinct updated URIs in a burst can delay a list change.
 - The HTTP listener holds one worker thread per request in progress and per open stream. The bounds limit how long
   one connection holds a worker, not how many connections arrive; a listener that reads requests without holding a
