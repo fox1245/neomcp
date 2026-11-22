@@ -143,7 +143,8 @@ Linux, shared libraries; versioned releases from 0.1.0.
 
 ## Open items in what exists
 
-- Change notifications: many distinct updated URIs in a burst can delay a list change.
+- Change notifications over HTTP: an event stream whose buffer is full (`max_stream_buffer_bytes`) drops any
+  notification that does not fit, a list change included; the server and the sessions no longer do.
 - The HTTP listener holds one worker thread per request in progress and per open stream. The bounds limit how long
   one connection holds a worker, not how many connections arrive; a listener that reads requests without holding a
   worker would remove that limit.

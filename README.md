@@ -216,6 +216,25 @@ is answered with an internal error and the handler's message and data are droppe
 `ServerOptions::max_message_bytes`. The message and the data reach the client as they are; keep out of them whatever the
 client may not see.
 
+## Telling clients of changes
+
+Switching a tool, prompt, resource or template on or off, and `server.notify_resource_updated(uri)`, tell each client
+the way its revision defines: notifications of its session after `resources/subscribe` (2024-11-05 to 2025-11-25), or
+the subscriptions it opens with `subscriptions/listen` (2026-07-28). A notification says that something changed since
+the client last looked, so one that waits to be told stands for every later change of the same list, or of the same
+resource: a burst of changes to one list or one resource reaches the client as one notification. A list change is
+told before the resource updates that wait with it, never before an answer the server already gave, and neither the
+server nor a session drops it.
+
+The server's feed keeps one pending update per resource reported and drops none. What reaches a client is bounded by
+its session's output queue (`ServerOptions::max_queued_notifications`, default 1024): while the client reads more
+slowly than the server reports, an update of yet another resource beyond that bound is dropped for that client. The
+client is not told that an update was dropped: none of the revisions has a notification that says to read everything
+again. A client that must not miss one reads the resources it watches again when it has reason to; a server that
+reports updates of many resources at once can raise the bound. Over HTTP an event stream also holds at most
+`endpoint.max_stream_buffer_bytes` (1 MiB) for a slow reader, and a notification that does not fit, a list change
+included, is dropped.
+
 ## Serving over HTTP
 
 The same server speaks Streamable HTTP with `neomcp::run_http` from `<neomcp/http_server.h>` (target

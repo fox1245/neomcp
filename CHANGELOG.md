@@ -7,6 +7,14 @@ interface, and a new patch number does not.
 
 ### Server
 
+- Change notifications after a burst of changes, on every revision: a list change (of tools, prompts or resources)
+  is never dropped for a full output queue, and is written before the resource updates waiting with it, never before
+  an answer or an earlier list change, nor before its subscription's acknowledgement. A change waiting to be written,
+  in the server's feed or in a session's queue, stands for every later change of the same list or of the same
+  resource on the same session or subscription, so a burst of changes to one of them is told once. The server's
+  feed keeps one pending update per resource and drops none; updates of distinct resources are still dropped beyond
+  a session's `max_queued_notifications`, for that session. An update that waits for a later one of the same resource
+  is written with what reading the resource needs under the current watch.
 - Authorization: a resource subscription of a session (2025-03-26 to 2025-11-25) lasts while the session's requests
   may read the resource. A later request of the session, a POST or the GET that opens its stream, whose token (of the
   same principal) lacks a scope reading a subscribed resource needs ends that subscription before the request is
