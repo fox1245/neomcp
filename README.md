@@ -85,9 +85,10 @@ What exists now:
 - Long-running tool calls as tasks: a tool declares that it may run as a task (`ToolHandle::task_support`), the
   server keeps tasks in a store the application chooses (`ServerOptions::tasks`, with `neomcp::make_memory_task_store`
   or its own `neomcp::TaskStore`), and serves them under 2026-07-28 (the extension `io.modelcontextprotocol/tasks`)
-  and 2025-11-25 (tasks in the core protocol). The client takes tasks under 2026-07-28 when its options say so
-  (`ClientOptions::tasks`): `call_tool` follows the task to its end, and `start_tool` hands over a
-  `neomcp::TaskHandle` to wait for or cancel. The server is run in CI against the official conformance suite's
+  and 2025-11-25 (tasks in the core protocol). The client takes tasks under both 2026-07-28 and 2025-11-25 (listing
+  tools when needed to read `execution.taskSupport` and requesting a task per call for `optional` or `required` tools)
+  when its options say so (`ClientOptions::tasks`): `call_tool` follows the task to its end, and `start_tool` hands
+  over a `neomcp::TaskHandle` to wait for or cancel. The server is run in CI against the official conformance suite's
   `tasks-*` scenarios.
 
 [ROADMAP.md](ROADMAP.md) lists the work that is in progress and the work that has not been started.
@@ -231,9 +232,10 @@ its session's output queue (`ServerOptions::max_queued_notifications`, default 1
 slowly than the server reports, an update of yet another resource beyond that bound is dropped for that client. The
 client is not told that an update was dropped: none of the revisions has a notification that says to read everything
 again. A client that must not miss one reads the resources it watches again when it has reason to; a server that
-reports updates of many resources at once can raise the bound. Over HTTP an event stream also holds at most
-`endpoint.max_stream_buffer_bytes` (1 MiB) for a slow reader, and a notification that does not fit, a list change
-included, is dropped.
+reports updates of many resources at once can raise the bound. Over HTTP an event stream holds at most
+`endpoint.max_stream_buffer_bytes` (1 MiB) for ordinary messages of a slow reader: an update that does not fit is
+dropped as in a session's queue, while pending list changes are preserved and coalesced per kind in order (closing
+the stream only if a single list change cannot fit within the buffer bound on its own).
 
 ## Serving over HTTP
 

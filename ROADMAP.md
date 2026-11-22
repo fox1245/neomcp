@@ -134,19 +134,19 @@ Linux, shared libraries; versioned releases from 0.1.0.
   conformance suite's `tasks-*` scenarios pass.
 - **The client half of 2026-07-28**: opted into by the application; `call_tool` follows a task, `start_tool` hands it
   over, `Client::task` takes one up.
+- **The client half of 2025-11-25**: opted into via `ClientOptions::tasks.accept`, checks `Tool.execution.taskSupport`
+  and server `tasks.requests.tools.call`, augments `optional`/`required` calls with `params.task`, polls with
+  `tasks/get`, fetches results and `input_required` rounds via `tasks/result`, and cancels with `tasks/cancel`.
 
 ## Not started
 
 - **A listener that reads requests without holding a worker** (see "Open items"); planned when a user needs more
   connections than workers.
-- **Tasks of 2025-11-25 on the client** (the core protocol's tasks of that revision; the server serves them).
 - **Notifications of task status through `subscriptions/listen`** under 2026-07-28 (optional in the extension); the
   conformance suite's scenario for them is skipped.
 
 ## Open items in what exists
 
-- Change notifications over HTTP: an event stream whose buffer is full (`max_stream_buffer_bytes`) drops any
-  notification that does not fit, a list change included; the server and the sessions no longer do.
 - The HTTP listener holds one worker thread per request in progress and per open stream. The bounds limit how long
   one connection holds a worker, not how many connections arrive; a listener that reads requests without holding a
   worker would remove that limit.

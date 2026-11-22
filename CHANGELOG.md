@@ -3,6 +3,24 @@
 Versions follow the rule of the package configuration: before 1.0, a release with a new minor number may change the
 interface, and a new patch number does not.
 
+## Unreleased
+
+### Server
+
+- HTTP event-stream buffering (`http::BodyStream`, bounded by `max_stream_buffer_bytes`): pending list-change
+  notifications (`tools`, `prompts`, `resources`) are no longer dropped when the stream buffer is full. They are
+  coalesced per kind in FIFO order, block later ordinary appends from overtaking them, and close the stream fail-closed
+  if a single uncoalesced list change exceeds `max_buffered_bytes`.
+
+### Client
+
+- Tasks of revision 2025-11-25 (`augmented_request`): parses and serializes `Tool.execution.taskSupport` (`forbidden`,
+  `optional`, `required`) on `ToolDefinition`, gates on server `capabilities.tasks` and `requests.tools.call`, lists
+  tools once when needed to check `taskSupport`, requests tasks per call for `optional` and `required` tools via
+  `params.task`, polls with `tasks/get`, fetches terminal or interactive `input_required` streams via `tasks/result`,
+  rejects unexpected task replies on unaugmented calls, preserves progress callbacks across task steps, and maps
+  `tasks/cancel` `-32602` to `server_error` while keeping `tasks/get` `-32602` as `task_lost`.
+
 ## 0.3.0
 
 The interface changed in places (see "Changed"); a project built against 0.2 is rebuilt against 0.3.
