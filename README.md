@@ -422,6 +422,14 @@ revision it speaks, and the same code serves both. A handler that needs more con
 itself and is entered again with the answers, as `neomcp/server.h` describes. [examples/elicitation.cpp](examples/elicitation.cpp)
 is a complete program with the client's side, the handler that answers the form.
 
+Where the revision's sampling has tools (2025-11-25 and 2026-07-28), a `neomcp::SamplingRequest` may offer the
+client's model tools (`tools`, `tool_choice`). The model may then answer with `neomcp::ToolUseContent` blocks; the
+server runs those tools and asks again with the history and a `neomcp::ToolResultContent` for each tool use, by its
+id. A question function of `neomcp::sample` that takes the earlier answer writes that second round. Such a request
+is sent only to a client that declared `sampling.tools` (on the client, `handlers.sampling(handler, support)` with
+`support.tools` set), and the rules the pages give these messages are checked before anything is sent. Under a
+revision without tools in sampling, the call fails at once and nothing is sent.
+
 ## A client that signs in
 
 An HTTP server may refuse a client until it holds an OAuth token. `neomcp::OAuthAuthorizer` obtains one when the

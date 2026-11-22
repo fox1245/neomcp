@@ -17,7 +17,8 @@ Last updated: 2026-11-22.
 - **Streamable HTTP server**, both eras on one endpoint: sessions, the connection stream, event streams, host and
   origin checks, mirrored parameter headers, bounds on request bodies, sessions and watched resources.
 - **Asking the client for input**: declared inputs (`neomcp::elicit`, `neomcp::sample`, `neomcp::roots`) and the
-  low-level form (`neomcp::InputRequired`), carried in the way each revision defines.
+  low-level form (`neomcp::InputRequired`), carried in the way each revision defines; sampling with tools (tool uses
+  and tool results) where the revision has it.
 - **Change notifications**, in the way each revision defines.
 - **Patterns in schemas** are matched in time proportional to the string (RE2 behind a translation from the dialect
   of JSON Schema); CI compares the translation with V8 on generated patterns.
@@ -142,9 +143,6 @@ Linux, shared libraries; versioned releases from 0.1.0.
 
 ## Open items in what exists
 
-- Sampling messages of 2025-11-25 and 2026-07-28 may hold tool use and tool result blocks (`ToolUseContent`,
-  `ToolResultContent`); the content model has no such blocks, so a server cannot write them and the reader of a
-  sampling request refuses a request that holds them.
 - Change notifications: many distinct updated URIs in a burst can delay a list change.
 - The HTTP listener holds one worker thread per request in progress and per open stream. The bounds limit how long
   one connection holds a worker, not how many connections arrive; a listener that reads requests without holding a

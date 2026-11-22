@@ -105,8 +105,10 @@ private:
     std::optional<std::string> key_;
 };
 
-// What a sampling handler can do besides answering: declare that it takes requests with tools, and requests that ask
-// to include context from servers. A request that needs what is not declared is refused without reaching the handler.
+// What a sampling handler can do besides answering: declare that it takes requests with tools (tools offered, or
+// messages that hold tool uses and tool results, which the handler then answers, typically with tool uses), and
+// requests that ask to include context from servers. A request that needs what is not declared is refused without
+// reaching the handler.
 struct SamplingSupport {
     bool tools = false;
     bool context = false;

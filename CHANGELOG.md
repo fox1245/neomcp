@@ -32,6 +32,31 @@ interface, and a new patch number does not.
 - Older transport of events over HTTP: an endpoint event longer than `max_message_bytes` ends the connection with
   that reason (it was reported as a first event of another type).
 
+### Sampling with tools
+
+- Sampling messages and results carry tool uses and tool results (`neomcp::ToolUseContent`,
+  `neomcp::ToolResultContent`) under the revisions whose sampling defines them (2025-11-25 and 2026-07-28): a server
+  offers tools, reads the model's tool uses, and asks again with the history and a result for each; a client's
+  sampling handler receives them typed and answers with tool uses. The members written and read come from the
+  revision's types.
+- The rules the pages give a conversation with tools are checked on both sides: a message that holds tool results is
+  the user's and holds nothing else, and the tool uses of a message of the assistant are answered, by id, by the
+  message that follows it. A server does not send a request that breaks them, and a client refuses one.
+- A request whose messages hold tool uses or results is a request with tools: it is asked only of a client that
+  declared `sampling.tools`, and never under a revision whose sampling has no tools; the call then fails at once and
+  nothing is sent.
+
+### Changed
+
+- `neomcp::SamplingMessage::content` is a list of `neomcp::SamplingContent` (text, image, audio, tool use, tool
+  result) instead of `neomcp::ContentBlock`. Text, image and audio blocks convert as before.
+- `neomcp::SamplingAnswer::content` is a list of `neomcp::SamplingContent` read for the call's revision instead of
+  the JSON the client sent; a handler that set it to a JSON block adds a `neomcp::TextContent` instead. One block is
+  written as itself and several as an array, which only a revision that allows one takes (an array is also read only
+  there). Named stop reasons are in `neomcp::stop_reasons`.
+- A sampling block of a kind the revision does not define (audio under 2024-11-05) makes the request fail instead of
+  being written as a text block.
+
 ## 0.2.0
 
 The interface changed in places (see "Changed"); a project built against 0.1 is rebuilt against 0.2.
