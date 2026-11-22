@@ -7,6 +7,7 @@ add_executable(neomcp_client_test
     feed_test.cpp
     sampling_tools_test.cpp
     schema_bounds_test.cpp
+    tasks_2025_test.cpp
     tasks_server_test.cpp
     tasks_test.cpp
     typed_test.cpp)

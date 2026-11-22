@@ -24,12 +24,7 @@
 
 namespace neomcp {
 
-// Whether a tool may run as a task. Only a tool that declares it ever does; the default is forbidden.
-enum class TaskSupport {
-    forbidden,  // never a task
-    optional,   // a task when the requester takes one, an ordinary call otherwise
-    required    // only as a task
-};
+// TaskSupport is declared in neomcp/model.h (which this header includes).
 
 // How a task is started: what the requester asked for, and how the revision it is served under writes the task's
 // record.

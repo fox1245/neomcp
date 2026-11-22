@@ -411,7 +411,8 @@ bool same(const ToolAnnotations& a, const ToolAnnotations& b) {
 bool same(const ToolDefinition& a, const ToolDefinition& b) {
     return same(a.name, b.name) && same(a.title, b.title) && same(a.description, b.description) &&
            same(a.input_schema, b.input_schema) && same(a.output_schema, b.output_schema) &&
-           same(a.annotations, b.annotations) && same(a.icons, b.icons) && same(a.meta, b.meta);
+           same(a.annotations, b.annotations) && same(a.task_support, b.task_support) && same(a.icons, b.icons) &&
+           same(a.meta, b.meta);
 }
 
 bool same(const ContentAnnotations& a, const ContentAnnotations& b) {

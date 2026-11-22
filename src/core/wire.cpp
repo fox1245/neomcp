@@ -204,6 +204,18 @@ json to_wire(const ToolDefinition& tool, const profile::Profile& profile) {
     at(object, wire::input_schema_member) = tool.input_schema;
     put(object, wire::output_schema_member, tool.output_schema);
     if (tool.annotations) at(object, wire::annotations_member) = to_wire(*tool.annotations, profile);
+    if (tool.task_support) {
+        std::string_view value;
+        switch (*tool.task_support) {
+            case TaskSupport::forbidden: value = wire::forbidden_support; break;
+            case TaskSupport::optional: value = wire::optional_support; break;
+            case TaskSupport::required: value = wire::required_support; break;
+        }
+        json execution = json::object();
+        at(execution, wire::task_support_member) = value;
+        keep_members(execution, wire::tool_execution_type, profile);
+        at(object, wire::execution_member) = std::move(execution);
+    }
     if (!tool.icons.empty()) at(object, wire::icons_member) = icons(tool.icons, profile);
     put(object, wire::meta_member, tool.meta);
     keep_members(object, wire::tool_type, profile);

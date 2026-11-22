@@ -555,6 +555,26 @@ bool read_tool(Reader& reader, const json& wire, const Step* at, ToolDefinition&
         if (!read_tool_annotations(reader, *annotations, &step, read)) return false;
         out.annotations = std::move(read);
     }
+    const json* execution = nullptr;
+    if (!fields.find(names::execution_member, false, execution)) return false;
+    if (execution != nullptr) {
+        const Step step = member_step(at, names::execution_member);
+        Fields exec_fields(reader, *execution, &step, names::tool_execution_type);
+        if (!exec_fields.valid()) return false;
+        std::optional<std::string> support;
+        if (!exec_fields.optional_text(names::task_support_member, support)) return false;
+        if (support) {
+            if (*support == names::forbidden_support) {
+                out.task_support = TaskSupport::forbidden;
+            } else if (*support == names::optional_support) {
+                out.task_support = TaskSupport::optional;
+            } else if (*support == names::required_support) {
+                out.task_support = TaskSupport::required;
+            } else {
+                return exec_fields.fail_member(names::task_support_member, "must be forbidden, optional or required");
+            }
+        }
+    }
     return read_icons(reader, fields, out.icons) && fields.meta(out.meta);
 }
 

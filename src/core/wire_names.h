@@ -14,6 +14,7 @@ namespace neomcp::detail::wire {
 // ---- Types of the profiles' wire tables
 inline constexpr std::string_view tool_type = "Tool";
 inline constexpr std::string_view tool_annotations_type = "ToolAnnotations";
+inline constexpr std::string_view tool_execution_type = "ToolExecution";
 inline constexpr std::string_view implementation_type = "Implementation";
 inline constexpr std::string_view icon_type = "Icon";
 inline constexpr std::string_view resource_type = "Resource";
@@ -47,6 +48,11 @@ inline constexpr std::string_view theme_member = "theme";
 inline constexpr std::string_view input_schema_member = "inputSchema";
 inline constexpr std::string_view output_schema_member = "outputSchema";
 inline constexpr std::string_view annotations_member = "annotations";
+inline constexpr std::string_view execution_member = "execution";
+inline constexpr std::string_view task_support_member = "taskSupport";
+inline constexpr std::string_view forbidden_support = "forbidden";
+inline constexpr std::string_view optional_support = "optional";
+inline constexpr std::string_view required_support = "required";
 inline constexpr std::string_view meta_member = "_meta";
 inline constexpr std::string_view read_only_hint_member = "readOnlyHint";
 inline constexpr std::string_view destructive_hint_member = "destructiveHint";

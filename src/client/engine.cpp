@@ -180,11 +180,14 @@ enum class TaskMode {
 
 // Where a call about a task stands.
 enum class TaskStep {
-    waiting,    // its poll clock runs; nothing of it is on the wire
-    reading,    // a read of the task is on the wire
-    updating,   // answers to the task's requests are on the wire
-    cancelling  // the cancellation is on the wire
+    waiting,          // its poll clock runs; nothing of it is on the wire
+    reading,          // a read of the task is on the wire
+    fetching_result,  // a tasks/result request is on the wire
+    updating,         // answers to the task's requests are on the wire
+    cancelling        // the cancellation is on the wire
 };
+
+enum class FetchFor { none, completed, failed, input_required };
 
 struct TaskWork {
     std::string id;
@@ -194,6 +197,9 @@ struct TaskWork {
     bool owned = false;
     // The task ended, or the server knows no such task: there is nothing to cancel.
     bool settled = false;
+    FetchFor fetch_for = FetchFor::none;
+    // Whether the originating call asked for progress notifications (preserved across task reads/fetches).
+    bool accepts_progress = false;
     std::size_t polls = 0;  // reads sent so far
     // The wait between reads the server suggested last.
     std::optional<std::chrono::milliseconds> suggested;
@@ -333,8 +339,19 @@ public:
     // ---- tasks
 
     bool takes_tasks() const {
-        return !closed_ && contact_.phase == ContactPhase::open && governing_ != nullptr &&
-               tasks_of(*governing_) != nullptr;
+        if (closed_ || contact_.phase != ContactPhase::open || governing_ == nullptr) return false;
+        const ClientTaskMechanism* half = tasks_of(*governing_);
+        return half != nullptr && half->server_supports_tasks(contact_.server.capabilities);
+    }
+
+    bool augments_tool_tasks() const {
+        if (!takes_tasks()) return false;
+        const ClientTaskMechanism* half = tasks_of(*governing_);
+        return half->augments_tool_call() && half->server_takes_tool_tasks(contact_.server.capabilities);
+    }
+
+    void augment_tool_call(json& params) const {
+        if (augments_tool_tasks()) tasks_of(*governing_)->augment_tool_call(params);
     }
 
     // A call about the task `id` under the governing profile.
@@ -346,7 +363,7 @@ public:
         }
         if (governing_ == nullptr) return CallFailure{CallFailureKind::contact_failed, "contact with the server is not open"};
         const ClientTaskMechanism* half = tasks_of(*governing_);
-        if (half == nullptr) {
+        if (half == nullptr || !half->server_supports_tasks(contact_.server.capabilities)) {
             return CallFailure{CallFailureKind::unsupported_method,
                                "the governing revision has no tasks the client takes"};
         }
@@ -964,6 +981,7 @@ private:
         TaskWork work;
         work.id = std::move(state.id);
         work.owned = true;
+        work.accepts_progress = call.progress;
         work.suggested = state.poll_interval;
         call.task = std::move(work);
         clock_start(ref, DeadlineKind::task, call.task_clock, options_.tasks.max_wait);
@@ -999,8 +1017,9 @@ private:
     }
 
     // Sends a request about the call's task, under the profile the call went out under, or keeps it until contact is
-    // open again. Its wait clock runs from now. Ends the call when the request cannot be written.
-    void send_about_task(Call& call, ClientMessage message, TaskStep step) {
+    // open again. When `use_wait_clock` is true, its short request wait clock runs from now; for a blocking
+    // `tasks/result` on `input_required`, the overall task clock and input handler clock govern instead.
+    void send_about_task(Call& call, ClientMessage message, TaskStep step, bool use_wait_clock = true) {
         const RequestRef ref = call.ref;
         call.message = std::move(message);
         call.round_params.reset();
@@ -1020,7 +1039,9 @@ private:
             if (contact_.phase == ContactPhase::lost) request_restart();
         }
         const auto found = calls_.find(ref);
-        if (found != calls_.end()) clock_start(ref, DeadlineKind::wait, found->second.wait, found->second.timeout);
+        if (use_wait_clock && found != calls_.end()) {
+            clock_start(ref, DeadlineKind::wait, found->second.wait, found->second.timeout);
+        }
     }
 
     // The answer to a request about a task.
@@ -1035,12 +1056,19 @@ private:
             return;
         }
         if (message.failed) {
+            if ((task.step == TaskStep::fetching_result && task.fetch_for != FetchFor::input_required) ||
+                task.step == TaskStep::cancelling) {
+                task.settled = true;
+            }
             auto error = read_error(message.outcome);
             if (!error) {
                 end_call(ref, CallFailure{CallFailureKind::malformed_answer, "the error answer cannot be read"});
                 return;
             }
-            if (half->says_unknown(*error)) {
+            const bool check_unknown =
+                (task.step != TaskStep::cancelling || half->cancel_error_means_unknown()) &&
+                !(task.step == TaskStep::fetching_result && task.fetch_for == FetchFor::failed);
+            if (check_unknown && half->says_unknown(*error)) {
                 task.settled = true;
                 end_call(ref, CallFailure{CallFailureKind::task_lost, "the server does not know the task"});
                 return;
@@ -1051,8 +1079,13 @@ private:
         }
         switch (task.step) {
             case TaskStep::reading: break;
+            case TaskStep::fetching_result:
+                task.settled = true;
+                end_call(ref, Answered{message.outcome});
+                return;
             case TaskStep::updating:
             case TaskStep::cancelling:
+                if (task.step == TaskStep::cancelling) task.settled = true;
                 if (auto problem = half->read_acknowledgement(message.outcome, profile)) {
                     end_call(ref, CallFailure{CallFailureKind::malformed_answer,
                                               "the acknowledgement cannot be read: " + *problem});
@@ -1085,10 +1118,20 @@ private:
         }
         switch (state.status) {
             case TaskStatus::completed:
+                if (half->result_is_separate()) {
+                    task.fetch_for = FetchFor::completed;
+                    send_about_task(call, half->result(task.id), TaskStep::fetching_result, true);
+                    return;
+                }
                 task.settled = true;
                 end_call(ref, Answered{std::move(*state.result)});
                 return;
             case TaskStatus::failed:
+                if (half->result_is_separate()) {
+                    task.fetch_for = FetchFor::failed;
+                    send_about_task(call, half->result(task.id), TaskStep::fetching_result, true);
+                    return;
+                }
                 task.settled = true;
                 end_call(ref, ErrorAnswered{std::move(*state.error)});
                 return;
@@ -1097,7 +1140,13 @@ private:
                 end_call(ref, CallFailure{CallFailureKind::task_cancelled, "the task was cancelled"});
                 return;
             case TaskStatus::working: schedule_read(call); return;
-            case TaskStatus::input_required: break;
+            case TaskStatus::input_required:
+                if (half->result_is_separate()) {
+                    task.fetch_for = FetchFor::input_required;
+                    send_about_task(call, half->result(task.id), TaskStep::fetching_result, false);
+                    return;
+                }
+                break;
         }
         // The requests the call has not answered yet make a round; with none, the reads go on.
         InputAsking asking;
@@ -1975,7 +2024,9 @@ private:
     // up is read for a task to cancel. As many are kept as calls may be pending.
     void remember_abandoned(const Call& call) {
         if (!call.wire || call.task || call.subscription || call.speaker == nullptr) return;
-        if (tasks_of(*call.speaker) == nullptr) return;
+        const ClientTaskMechanism* tasks = tasks_of(*call.speaker);
+        if (tasks == nullptr) return;
+        if (tasks->augments_tool_call() && !tasks->is_augmented(call.message)) return;
         abandoned_.push_back(*call.wire);
         abandoned_map_[*call.wire] = Abandoned{call.speaker, call.message.method};
         while (abandoned_.size() > options_.max_pending_requests) {
@@ -2057,6 +2108,11 @@ private:
         }
         if (const ClientTaskMechanism* tasks = tasks_of(speaker)) {
             if (auto created = tasks->read_created(message.outcome, call.message.method, profile)) {
+                if (tasks->augments_tool_call() && !tasks->is_augmented(call.message)) {
+                    end_call(ref, CallFailure{CallFailureKind::malformed_answer,
+                                              "the server answered an unaugmented call with a task"});
+                    return;
+                }
                 if (auto* problem = std::get_if<std::string>(&*created)) {
                     end_call(ref, CallFailure{CallFailureKind::malformed_answer,
                                               "the result that creates a task cannot be read: " + *problem});
@@ -2305,7 +2361,9 @@ private:
         }
         const auto number = wire_number(RequestId::from_json(*token));
         const auto found = number ? calls_.find(RequestRef{*number}) : calls_.end();
-        if (found == calls_.end() || found->second.purpose != Purpose::call || !found->second.progress) {
+        const bool accepts_progress =
+            found != calls_.end() && (found->second.progress || (found->second.task && found->second.task->accepts_progress));
+        if (found == calls_.end() || found->second.purpose != Purpose::call || !accepts_progress) {
             diagnose(DiagnosticKind::unknown_id, "a progress notification names no call that asked for progress", unit);
             return;
         }
@@ -2731,6 +2789,8 @@ std::variant<RequestRef, CallFailure> ClientEngine::send(OutgoingCall call) {
     return core_->send(std::move(call));
 }
 bool ClientEngine::takes_tasks() const { return core_->takes_tasks(); }
+bool ClientEngine::augments_tool_tasks() const { return core_->augments_tool_tasks(); }
+void ClientEngine::augment_tool_call(json& params) const { core_->augment_tool_call(params); }
 std::variant<RequestRef, CallFailure> ClientEngine::follow_task(std::string id,
                                                                 std::optional<std::chrono::milliseconds> timeout) {
     core_->guard();

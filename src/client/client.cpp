@@ -877,6 +877,14 @@ public:
         return found == tools_.end() ? json(nullptr) : found->second.definition.input_schema;
     }
 
+    bool augments_tool_tasks() const { return engine_->augments_tool_tasks(); }
+    void augment_tool_call(json& params) const { engine_->augment_tool_call(params); }
+
+    std::optional<TaskSupport> tool_task_support(const std::string& name) const {
+        const auto found = tools_.find(name);
+        return found == tools_.end() ? std::nullopt : found->second.definition.task_support;
+    }
+
     // The tools of a page the client keeps: on a transport that mirrors marked arguments, a tool whose marks break a
     // rule is left out and reported; every other one becomes the definition of its name.
     std::vector<ToolDefinition> admit_tools(std::vector<ToolDefinition> listed, const profile::Profile& profile) {
@@ -2128,7 +2136,7 @@ asio::awaitable<CallOutcome> send_tool_call(std::shared_ptr<ClientCore> core, st
                                  "the governing revision's tool results carry no structured content");
         co_return outcome;
     }
-    if (!core->tool_known(name) && (typed || core->mirrors_arguments())) {
+    if (!core->tool_known(name) && (typed || core->mirrors_arguments() || core->augments_tool_tasks())) {
         RequestOptions listing;
         listing.timeout = options.timeout;
         listing.stop = options.stop;
@@ -2142,6 +2150,10 @@ asio::awaitable<CallOutcome> send_tool_call(std::shared_ptr<ClientCore> core, st
     json params = json::object();
     params[std::string(name_member)] = name;
     params[std::string(arguments_member)] = std::move(arguments);
+    if (core->augments_tool_tasks()) {
+        const std::optional<TaskSupport> support = core->tool_task_support(name);
+        if (support == TaskSupport::optional || support == TaskSupport::required) core->augment_tool_call(params);
+    }
     ClientMessage message{std::string(client_method::tools_call), std::move(params)};
     outcome = co_await perform_call(core, std::move(message), std::move(options), std::move(input_schema),
                                     hand_over_task);

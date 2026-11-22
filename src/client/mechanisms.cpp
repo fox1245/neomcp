@@ -1093,11 +1093,201 @@ public:
     bool says_unknown(const RequestError&) const override { return false; }
 };
 
-// `augmented_request`: the requester asks for a task in the request. The client never asks, so under it the client
-// takes no tasks either.
-class AugmentedRequestTasks final : public NoTasks {
+// Shared helpers for task halves (`augmented_request` and `server_directed`).
+namespace task_wire {
+
+constexpr std::string_view task_id_member = "taskId";
+constexpr std::string_view status_member = "status";
+constexpr std::string_view message_member = "statusMessage";
+constexpr std::string_view created_member = "createdAt";
+constexpr std::string_view updated_member = "lastUpdatedAt";
+
+ClientMessage about(std::string_view method, std::string_view id) {
+    json params = json::object();
+    params[std::string(task_id_member)] = std::string(id);
+    return ClientMessage{std::string(method), std::move(params)};
+}
+
+// A non-negative integer number of milliseconds; a value beyond what the duration holds is held as its largest.
+std::optional<std::chrono::milliseconds> milliseconds_of(const json& value) {
+    if (!value.is_number_integer()) return std::nullopt;
+    using Count = std::chrono::milliseconds::rep;
+    if (value.is_number_unsigned()) {
+        const auto count = value.get<std::uint64_t>();
+        if (count > static_cast<std::uint64_t>((std::numeric_limits<Count>::max)())) {
+            return std::chrono::milliseconds((std::numeric_limits<Count>::max)());
+        }
+        return std::chrono::milliseconds(static_cast<Count>(count));
+    }
+    const auto count = value.get<std::int64_t>();
+    if (count < 0) return std::nullopt;
+    return std::chrono::milliseconds(static_cast<Count>(count));
+}
+
+std::optional<TaskStatus> status_of(std::string_view text) {
+    for (const TaskStatus status : {TaskStatus::working, TaskStatus::input_required, TaskStatus::completed,
+                                    TaskStatus::failed, TaskStatus::cancelled}) {
+        if (to_string(status) == text) return status;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> read_fields(const json& result, TaskState& state, std::string_view ttl_key,
+                                       std::string_view poll_key, std::string_view prefix = "$.") {
+    const json* id = member(result, task_id_member);
+    const auto* id_text = id == nullptr ? nullptr : id->get_ptr<const std::string*>();
+    if (id_text == nullptr) {
+        return std::string(prefix) + std::string(task_id_member) + ": is required and must be a string";
+    }
+    state.id = *id_text;
+    const json* status = member(result, status_member);
+    const auto* status_text = status == nullptr ? nullptr : status->get_ptr<const std::string*>();
+    const auto read_status = status_text == nullptr ? std::nullopt : status_of(*status_text);
+    if (!read_status) {
+        return std::string(prefix) + std::string(status_member) + ": is required and must be a status of a task";
+    }
+    state.status = *read_status;
+    for (const auto& [field, out] : {std::pair<std::string_view, std::string*>{created_member, &state.created_at},
+                                     std::pair<std::string_view, std::string*>{updated_member, &state.updated_at}}) {
+        if (const json* value = member(result, field)) {
+            const auto* text = value->get_ptr<const std::string*>();
+            if (text == nullptr) return std::string(prefix) + std::string(field) + ": is not a string";
+            *out = *text;
+        }
+    }
+    if (const json* message = member(result, message_member)) {
+        const auto* text = message->get_ptr<const std::string*>();
+        if (text == nullptr) return std::string(prefix) + std::string(message_member) + ": is not a string";
+        state.message = *text;
+    }
+    if (const json* ttl = member(result, ttl_key); ttl != nullptr && !ttl->is_null()) {
+        state.ttl = milliseconds_of(*ttl);
+        if (!state.ttl) return std::string(prefix) + std::string(ttl_key) + ": is not a number of milliseconds";
+    }
+    if (const json* poll = member(result, poll_key)) {
+        state.poll_interval = milliseconds_of(*poll);
+        if (!state.poll_interval) {
+            return std::string(prefix) + std::string(poll_key) + ": is not a number of milliseconds";
+        }
+    }
+    return std::nullopt;
+}
+
+}  // namespace task_wire
+
+// `augmented_request` (2025-11-25 core tasks): the requester asks for a task per call by adding `params.task`, polls
+// with `tasks/get`, fetches the final result (or exchanges input requests on `input_required`) with `tasks/result`, and
+// cancels with `tasks/cancel`.
+class AugmentedRequestTasks final : public ClientTaskMechanism {
 public:
     static constexpr std::string_view name = "augmented_request";
+    static constexpr std::string_view task_member = "task";
+    static constexpr std::string_view get_method = "tasks/get";
+    static constexpr std::string_view result_method = "tasks/result";
+    static constexpr std::string_view cancel_method = "tasks/cancel";
+    static constexpr std::string_view ttl_member = "ttl";
+    static constexpr std::string_view poll_member = "pollInterval";
+    static constexpr std::string_view created_type = "CreateTaskResult";
+    static constexpr std::string_view get_type = "GetTaskResult";
+    static constexpr std::string_view cancel_type = "CancelTaskResult";
+    static constexpr std::string_view task_type = "Task";
+    static constexpr std::string_view tasks_member = "tasks";
+    static constexpr std::string_view requests_member = "requests";
+    static constexpr std::string_view tools_member = "tools";
+    static constexpr std::string_view call_member = "call";
+
+    AugmentedRequestTasks() : server_(server_tasks(name)) {}
+
+    std::optional<std::string> check(const profile::Profile& profile) const override {
+        return server_->check(profile);
+    }
+    bool takes_tasks() const override { return true; }
+    bool augments_tool_call() const override { return true; }
+
+    bool server_supports_tasks(const json& capabilities) const override {
+        const json* tasks = member(capabilities, tasks_member);
+        return tasks != nullptr && tasks->is_object();
+    }
+
+    bool server_takes_tool_tasks(const json& capabilities) const override {
+        const json* tasks = member(capabilities, tasks_member);
+        if (tasks == nullptr || !tasks->is_object()) return false;
+        const json* requests = member(*tasks, requests_member);
+        if (requests == nullptr || !requests->is_object()) return false;
+        const json* tools = member(*requests, tools_member);
+        if (tools == nullptr || !tools->is_object()) return false;
+        const json* call = member(*tools, call_member);
+        return call != nullptr && call->is_object();
+    }
+
+    void augment_tool_call(json& params) const override {
+        if (params.is_null()) params = json::object();
+        if (!params.is_object()) return;
+        params[std::string(task_member)] = json::object();
+    }
+
+    bool is_augmented(const ClientMessage& message) const override {
+        const json* task = message.params.is_object() ? member(message.params, task_member) : nullptr;
+        return message.method == client_method::tools_call && task != nullptr && task->is_object();
+    }
+
+    void declare(json&) const override {}
+
+    std::optional<WireRead<TaskState>> read_created(const json& result, std::string_view method,
+                                                    const profile::Profile& profile) const override {
+        const json* wrapped = member(result, task_member);
+        if (wrapped == nullptr) return std::nullopt;
+        if (method != client_method::tools_call) {
+            return WireRead<TaskState>(std::string("$: creates a task for a request that a task cannot answer"));
+        }
+        if (!has_required(result, profile.type(created_type))) {
+            return WireRead<TaskState>("$: lacks a member the revision's " + std::string(created_type) + " requires");
+        }
+        if (!wrapped->is_object()) {
+            return WireRead<TaskState>(std::string("$.task: must be an object"));
+        }
+        if (!has_required(*wrapped, profile.type(task_type))) {
+            return WireRead<TaskState>("$.task: lacks a member the revision's " + std::string(task_type) + " requires");
+        }
+        TaskState state;
+        if (auto problem = task_wire::read_fields(*wrapped, state, ttl_member, poll_member, "$.task.")) {
+            return WireRead<TaskState>(std::move(*problem));
+        }
+        return WireRead<TaskState>(std::move(state));
+    }
+
+    ClientMessage read(std::string_view id) const override { return task_wire::about(get_method, id); }
+    bool result_is_separate() const override { return true; }
+    ClientMessage result(std::string_view id) const override { return task_wire::about(result_method, id); }
+    WireRead<ClientMessage> update(std::string_view, const InputResponses&, const profile::Profile&) const override {
+        return std::string("this revision receives task input over tasks/result rather than tasks/update");
+    }
+    ClientMessage cancel(std::string_view id) const override { return task_wire::about(cancel_method, id); }
+
+    WireRead<TaskState> read_state(const json& result, const profile::Profile& profile) const override {
+        if (!result.is_object()) return std::string("$: is not an object");
+        if (!has_required(result, profile.type(get_type))) {
+            return "$: lacks a member the revision's " + std::string(get_type) + " requires";
+        }
+        TaskState state;
+        if (auto problem = task_wire::read_fields(result, state, ttl_member, poll_member)) return std::move(*problem);
+        return state;
+    }
+
+    std::optional<std::string> read_acknowledgement(const json& result, const profile::Profile& profile) const override {
+        if (!result.is_object()) return std::string("$: is not an object");
+        if (!has_required(result, profile.type(cancel_type))) {
+            return "$: lacks a member the revision's " + std::string(cancel_type) + " requires";
+        }
+        TaskState state;
+        return task_wire::read_fields(result, state, ttl_member, poll_member);
+    }
+
+    bool says_unknown(const RequestError& error) const override { return error.code == error_code::invalid_params; }
+    bool cancel_error_means_unknown() const override { return false; }
+
+private:
+    std::unique_ptr<TaskMechanism> server_;
 };
 
 // `server_directed`: the extension io.modelcontextprotocol/tasks. The client declares, in the capabilities of every
@@ -1111,15 +1301,10 @@ public:
     static constexpr std::string_view read_method = "tasks/get";
     static constexpr std::string_view update_method = "tasks/update";
     static constexpr std::string_view cancel_method = "tasks/cancel";
-    static constexpr std::string_view task_id_member = "taskId";
     static constexpr std::string_view responses_member = "inputResponses";
     static constexpr std::string_view result_type_member = "resultType";
     static constexpr std::string_view task_kind = "task";
     static constexpr std::string_view complete_kind = "complete";
-    static constexpr std::string_view status_member = "status";
-    static constexpr std::string_view message_member = "statusMessage";
-    static constexpr std::string_view created_member = "createdAt";
-    static constexpr std::string_view updated_member = "lastUpdatedAt";
     static constexpr std::string_view ttl_member = "ttlMs";
     static constexpr std::string_view poll_member = "pollIntervalMs";
     static constexpr std::string_view result_member = "result";
@@ -1143,6 +1328,7 @@ public:
         return std::nullopt;
     }
     bool takes_tasks() const override { return true; }
+    bool server_supports_tasks(const json&) const override { return true; }
     void declare(json& capabilities) const override { merge_members(capabilities, server_->required_capabilities()); }
 
     std::optional<WireRead<TaskState>> read_created(const json& result, std::string_view method,
@@ -1157,11 +1343,11 @@ public:
             return WireRead<TaskState>("$: lacks a member the revision's " + std::string(created_type) + " requires");
         }
         TaskState state;
-        if (auto problem = read_task(result, state)) return WireRead<TaskState>(std::move(*problem));
+        if (auto problem = task_wire::read_fields(result, state, ttl_member, poll_member)) return std::move(*problem);
         return WireRead<TaskState>(std::move(state));
     }
 
-    ClientMessage read(std::string_view id) const override { return about(read_method, id); }
+    ClientMessage read(std::string_view id) const override { return task_wire::about(read_method, id); }
 
     WireRead<ClientMessage> update(std::string_view id, const InputResponses& answers,
                                    const profile::Profile& profile) const override {
@@ -1172,12 +1358,12 @@ public:
             if (auto* problem = std::get_if<std::string>(&one)) return std::move(*problem);
             written[key] = std::move(std::get<json>(one));
         }
-        ClientMessage message = about(update_method, id);
+        ClientMessage message = task_wire::about(update_method, id);
         message.params[std::string(responses_member)] = std::move(written);
         return message;
     }
 
-    ClientMessage cancel(std::string_view id) const override { return about(cancel_method, id); }
+    ClientMessage cancel(std::string_view id) const override { return task_wire::about(cancel_method, id); }
 
     WireRead<TaskState> read_state(const json& result, const profile::Profile& profile) const override {
         if (!result.is_object()) return std::string("$: is not an object");
@@ -1186,7 +1372,7 @@ public:
             return "$: lacks a member the revision's " + std::string(task_type) + " requires";
         }
         TaskState state;
-        if (auto problem = read_task(result, state)) return std::move(*problem);
+        if (auto problem = task_wire::read_fields(result, state, ttl_member, poll_member)) return std::move(*problem);
         switch (state.status) {
             case TaskStatus::completed: {
                 const json* inlined = member(result, result_member);
@@ -1249,12 +1435,6 @@ public:
     bool says_unknown(const RequestError& error) const override { return error.code == error_code::invalid_params; }
 
 private:
-    static ClientMessage about(std::string_view method, std::string_view id) {
-        json params = json::object();
-        params[std::string(task_id_member)] = std::string(id);
-        return ClientMessage{std::string(method), std::move(params)};
-    }
-
     // A result whose kind, when it names one, is the complete kind.
     static std::optional<std::string> complete_or_absent(const json& result) {
         const json* kind = member(result, result_type_member);
@@ -1262,65 +1442,6 @@ private:
         const auto* text = kind->get_ptr<const std::string*>();
         if (text == nullptr || *text != complete_kind) {
             return "$." + std::string(result_type_member) + ": is not " + std::string(complete_kind);
-        }
-        return std::nullopt;
-    }
-
-    // A non-negative integer number of milliseconds; a value beyond what the duration holds is held as its largest.
-    static std::optional<std::chrono::milliseconds> milliseconds_of(const json& value) {
-        if (!value.is_number_integer()) return std::nullopt;
-        using Count = std::chrono::milliseconds::rep;
-        if (value.is_number_unsigned()) {
-            const auto count = value.get<std::uint64_t>();
-            if (count > static_cast<std::uint64_t>((std::numeric_limits<Count>::max)())) {
-                return std::chrono::milliseconds((std::numeric_limits<Count>::max)());
-            }
-            return std::chrono::milliseconds(static_cast<Count>(count));
-        }
-        const auto count = value.get<std::int64_t>();
-        if (count < 0) return std::nullopt;
-        return std::chrono::milliseconds(static_cast<Count>(count));
-    }
-
-    static std::optional<TaskStatus> status_of(std::string_view text) {
-        for (const TaskStatus status : {TaskStatus::working, TaskStatus::input_required, TaskStatus::completed,
-                                        TaskStatus::failed, TaskStatus::cancelled}) {
-            if (to_string(status) == text) return status;
-        }
-        return std::nullopt;
-    }
-
-    // The members every state of a task has: its id, its status and the optional ones beside them.
-    static std::optional<std::string> read_task(const json& result, TaskState& state) {
-        const json* id = member(result, task_id_member);
-        const auto* id_text = id == nullptr ? nullptr : id->get_ptr<const std::string*>();
-        if (id_text == nullptr) return "$." + std::string(task_id_member) + ": is required and must be a string";
-        state.id = *id_text;
-        const json* status = member(result, status_member);
-        const auto* status_text = status == nullptr ? nullptr : status->get_ptr<const std::string*>();
-        const auto read_status = status_text == nullptr ? std::nullopt : status_of(*status_text);
-        if (!read_status) return "$." + std::string(status_member) + ": is required and must be a status of a task";
-        state.status = *read_status;
-        for (const auto& [field, out] : {std::pair<std::string_view, std::string*>{created_member, &state.created_at},
-                                         std::pair<std::string_view, std::string*>{updated_member, &state.updated_at}}) {
-            if (const json* value = member(result, field)) {
-                const auto* text = value->get_ptr<const std::string*>();
-                if (text == nullptr) return "$." + std::string(field) + ": is not a string";
-                *out = *text;
-            }
-        }
-        if (const json* message = member(result, message_member)) {
-            const auto* text = message->get_ptr<const std::string*>();
-            if (text == nullptr) return "$." + std::string(message_member) + ": is not a string";
-            state.message = *text;
-        }
-        if (const json* ttl = member(result, ttl_member); ttl != nullptr && !ttl->is_null()) {
-            state.ttl = milliseconds_of(*ttl);
-            if (!state.ttl) return "$." + std::string(ttl_member) + ": is not a number of milliseconds";
-        }
-        if (const json* poll = member(result, poll_member)) {
-            state.poll_interval = milliseconds_of(*poll);
-            if (!state.poll_interval) return "$." + std::string(poll_member) + ": is not a number of milliseconds";
         }
         return std::nullopt;
     }

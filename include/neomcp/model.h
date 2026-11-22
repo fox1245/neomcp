@@ -43,6 +43,13 @@ struct ToolAnnotations {
     std::optional<bool> open_world_hint;
 };
 
+// Whether a tool may run as a task. Only a tool that declares it ever does; the default is forbidden.
+enum class TaskSupport {
+    forbidden,  // never a task
+    optional,   // a task when the requester takes one, an ordinary call otherwise
+    required    // only as a task
+};
+
 struct ToolDefinition {
     std::string name;
     std::optional<std::string> title;
@@ -50,6 +57,7 @@ struct ToolDefinition {
     json input_schema = json{{"type", "object"}};
     std::optional<json> output_schema;
     std::optional<ToolAnnotations> annotations;
+    std::optional<TaskSupport> task_support;
     std::vector<Icon> icons;
     std::optional<json> meta;  // an object, written as `_meta`
 };

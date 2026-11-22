@@ -45,20 +45,21 @@ struct Held {
     std::atomic<bool> stopped{false};
 };
 
-neomcp::ServerOptions task_server_options() {
+neomcp::ServerOptions task_server_options(std::string_view rev = revision) {
     neomcp::ServerOptions options = conformance::task_options();
     neomcp::MemoryTaskStoreOptions store;
     store.poll_interval = ms(10);
     options.tasks.store = neomcp::make_memory_task_store(store);
     options.tasks.min_poll_interval = ms(1);
-    options.profiles.push_back(neomcp::profile::builtin(revision));
+    options.profiles.push_back(neomcp::profile::builtin(rev));
     return options;
 }
 
 class TaskPair {
 public:
-    TaskPair(Transport transport, bool accept, std::shared_ptr<neomcp::TimerService> timers = nullptr)
-        : held(std::make_shared<Held>()), server_(task_server_options()) {
+    TaskPair(Transport transport, bool accept, std::shared_ptr<neomcp::TimerService> timers = nullptr,
+             std::string_view rev = revision)
+        : held(std::make_shared<Held>()), server_(task_server_options(rev)) {
         conformance::register_task_tools(server_);
         server_
             .tool("held", "Run until stopped",
@@ -70,7 +71,7 @@ public:
                   })
             .task_support(neomcp::TaskSupport::optional);
         peer = neomcp::InProcessServer::create(server_, transport);
-        neomcp::ClientOptions options = only({revision});
+        neomcp::ClientOptions options = only({rev});
         options.tasks.accept = accept;
         options.timers = std::move(timers);
         options.tasks.min_poll_interval = ms(5);
@@ -278,6 +279,68 @@ TEST_P(ClientTasksServer, AnAwaitedTaskHoldsNoThread) {
     ASSERT_TRUE(awaited);
     ASSERT_FALSE(*awaited);
     EXPECT_EQ(awaited->error().kind, ClientErrorKind::cancelled);
+    EXPECT_TRUE(pair.client->close());
+}
+
+TEST_P(ClientTasksServer, Follows2025TasksAndHandlesInputErrorAndDoubleCancel) {
+    TaskPair pair(GetParam(), true, nullptr, "2025-11-25");
+    const auto missing = pair.client->task("no-such-task");
+    ASSERT_FALSE(missing);
+    EXPECT_EQ(missing.error().kind, ClientErrorKind::task_lost);
+
+    // Forbidden tool runs synchronously without task augmentation.
+    const auto greeted = pair.client->call_tool("greet", json{{"name", "ada"}});
+    ASSERT_TRUE(greeted) << greeted.error().message;
+    EXPECT_EQ(text_of(*greeted), "Hello, ada!");
+
+    // Optional slow tool executes as a task and completes through tasks/result.
+    const auto computed = pair.client->call_tool("slow_compute", json{{"seconds", 0.05}});
+    ASSERT_TRUE(computed) << computed.error().message;
+    EXPECT_EQ(text_of(*computed), "Computed after 50 ms");
+
+    // Optional tool asking for inputs delivers requests over tasks/result.
+    const auto both = pair.client->call_tool("multi_input");
+    ASSERT_TRUE(both) << both.error().message;
+    EXPECT_EQ(text_of(*both), R"(first={"value":"ada"}, second={"value":"ada"})");
+    EXPECT_FALSE(pair.asked().empty());
+
+    // Required tool failing with ToolError completes with TaskResult{is_error=true}.
+    const auto failed = pair.client->call_tool("failing_job");
+    ASSERT_TRUE(failed) << failed.error().message;
+    EXPECT_TRUE(failed->is_error);
+
+    // start_tool + cancel; cancelling again after already terminal yields server_error (-32602), not task_lost.
+    auto started = pair.client->start_tool("held");
+    ASSERT_TRUE(started) << started.error().message;
+    auto* handle = std::get_if<neomcp::TaskHandle>(&*started);
+    ASSERT_NE(handle, nullptr);
+    ASSERT_TRUE(eventually([&] { return pair.held->entered.load(); }));
+    ASSERT_TRUE(handle->cancel());
+    EXPECT_TRUE(eventually([&] { return pair.held->stopped.load(); }));
+    const auto again = handle->cancel();
+    ASSERT_FALSE(again);
+    EXPECT_EQ(again.error().kind, ClientErrorKind::server_error);
+    EXPECT_EQ(again.error().code, -32602);
+
+    const auto waited = handle->wait();
+    ASSERT_FALSE(waited);
+    EXPECT_EQ(waited.error().kind, ClientErrorKind::task_cancelled);
+    EXPECT_TRUE(pair.client->close());
+}
+
+TEST_P(ClientTasksServer, Refuses2025RequiredToolWithoutTaskOptIn) {
+    TaskPair pair(GetParam(), false, nullptr, "2025-11-25");
+    const auto disabled = pair.client->task("no-such-task");
+    ASSERT_FALSE(disabled);
+    EXPECT_EQ(disabled.error().kind, ClientErrorKind::unsupported_method);
+    const auto greeted = pair.client->call_tool("greet", json{{"name", "ada"}});
+    ASSERT_TRUE(greeted) << greeted.error().message;
+    EXPECT_EQ(text_of(*greeted), "Hello, ada!");
+
+    const auto refused = pair.client->call_tool("failing_job");
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().kind, ClientErrorKind::server_error);
+    EXPECT_EQ(refused.error().code, -32601);
     EXPECT_TRUE(pair.client->close());
 }
 

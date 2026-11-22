@@ -872,6 +872,10 @@ public:
 
     // Whether the governing revision lets a server answer with a task the client takes; false before contact opened.
     bool takes_tasks() const;
+    // Whether the governing revision asks for a task in `tools/call` (`params.task`) and its server accepts tool tasks.
+    bool augments_tool_tasks() const;
+    // Adds the governing mechanism's task request to `params` when `augments_tool_tasks()` holds.
+    void augment_tool_call(json& params) const;
     // Calls about the task `id` under the governing profile, counted as calls of the application: one that follows the
     // task until it ends, as a call whose result created it does (but never cancels it); one that reads it once and
     // ends with Answered::task; one that cancels it and ends with Answered once the server acknowledged. Each ends

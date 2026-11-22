@@ -1,10 +1,13 @@
 // Tasks, as a client sees them: a tool call that the server answers at once with a task, runs on after that request,
 // and tells about when the client asks.
 //
-// A client takes tasks only when the application says so (ClientOptions::tasks.accept): then every request declares
-// that the client takes them, under each revision that has tasks of this kind (2026-07-28 served with the extension
-// io.modelcontextprotocol/tasks), and the server decides, per tool call, whether to answer with a task. Without it no
-// server may answer with one, and a result that says it did is malformed_answer.
+// A client takes tasks only when the application says so (ClientOptions::tasks.accept). Under 2026-07-28 (with the
+// extension io.modelcontextprotocol/tasks), every request declares that the client takes them and the server decides per
+// tool call whether to answer with a task. Under 2025-11-25, when the server advertises task support for `tools/call`,
+// the client asks for a task (`params.task`) for tools whose `execution.taskSupport` is `optional` or `required`
+// (fetching the tool listing first when needed), polls with `tasks/get`, and fetches results or exchanges input
+// requests on `tasks/result`. Without `tasks.accept` the client never takes or asks for a task, and an unexpected
+// task result is `malformed_answer`.
 //
 // Client::call_tool and the typed calls keep their contract: when the server answers with a task, they follow it
 // (reading it after each wait the server suggests, answering what it asks through the client's input handlers) and

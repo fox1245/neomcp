@@ -858,4 +858,59 @@ TEST(WireReadSweep, ToolResult) {
     sweep_everywhere<ToolResult>("CallToolResult", [](Generator& g) { return g.tool_result(); });
 }
 
+TEST(WireRead, ToolExecutionTaskSupportIsReadAndWritten) {
+    const profile::ProfilePtr tasks_2025 = profile::builtin("2025-11-25");
+    ASSERT_NE(tasks_2025, nullptr);
+
+    for (const auto& [text, expected] : {std::pair<const char*, TaskSupport>{"forbidden", TaskSupport::forbidden},
+                                         std::pair<const char*, TaskSupport>{"optional", TaskSupport::optional},
+                                         std::pair<const char*, TaskSupport>{"required", TaskSupport::required}}) {
+        const json wire = json{{"name", "work"},
+                               {"inputSchema", {{"type", "object"}}},
+                               {"execution", {{"taskSupport", text}}}};
+        const auto read = from_wire<ToolDefinition>(wire, *tasks_2025);
+        ASSERT_TRUE(std::holds_alternative<ToolDefinition>(read)) << std::get<std::string>(read);
+        const ToolDefinition& tool = std::get<ToolDefinition>(read);
+        EXPECT_EQ(tool.task_support, std::optional<TaskSupport>(expected));
+
+        const json rewritten = to_wire(tool, *tasks_2025);
+        EXPECT_EQ(rewritten.at("execution").at("taskSupport"), text);
+        // Revisions without `Tool.execution` ignore it on read and drop it on write.
+        EXPECT_FALSE(to_wire(tool, newest()).contains("execution"));
+        const auto older_read = from_wire<ToolDefinition>(wire, newest());
+        ASSERT_TRUE(std::holds_alternative<ToolDefinition>(older_read)) << std::get<std::string>(older_read);
+        EXPECT_EQ(std::get<ToolDefinition>(older_read).task_support, std::nullopt);
+    }
+
+    const json absent = json{{"name", "plain"}, {"inputSchema", {{"type", "object"}}}};
+    const auto read_absent = from_wire<ToolDefinition>(absent, *tasks_2025);
+    ASSERT_TRUE(std::holds_alternative<ToolDefinition>(read_absent));
+    EXPECT_FALSE(std::get<ToolDefinition>(read_absent).task_support.has_value());
+
+    const json empty_exec = json{{"name", "plain"}, {"inputSchema", {{"type", "object"}}}, {"execution", json::object()}};
+    const auto read_empty = from_wire<ToolDefinition>(empty_exec, *tasks_2025);
+    ASSERT_TRUE(std::holds_alternative<ToolDefinition>(read_empty));
+    EXPECT_FALSE(std::get<ToolDefinition>(read_empty).task_support.has_value());
+
+    const json bad_value =
+        json{{"name", "bad"}, {"inputSchema", {{"type", "object"}}}, {"execution", {{"taskSupport", "always"}}}};
+    const auto failed_value = from_wire<ToolDefinition>(bad_value, *tasks_2025, "tool");
+    ASSERT_TRUE(std::holds_alternative<std::string>(failed_value));
+    EXPECT_NE(std::get<std::string>(failed_value).find("tool.execution.taskSupport"), std::string::npos);
+
+    const json bad_object = json{{"name", "bad"}, {"inputSchema", {{"type", "object"}}}, {"execution", 5}};
+    const auto failed_object = from_wire<ToolDefinition>(bad_object, *tasks_2025, "tool");
+    ASSERT_TRUE(std::holds_alternative<std::string>(failed_object));
+    EXPECT_NE(std::get<std::string>(failed_object).find("tool.execution"), std::string::npos);
+
+    for (const json& bad_kind : {json(nullptr), json(1), json(true), json(""), json("Optional")}) {
+        const json invalid_kind = json{{"name", "bad"},
+                                       {"inputSchema", {{"type", "object"}}},
+                                       {"execution", {{"taskSupport", bad_kind}}}};
+        const auto rejected = from_wire<ToolDefinition>(invalid_kind, *tasks_2025, "tool");
+        ASSERT_TRUE(std::holds_alternative<std::string>(rejected)) << bad_kind.dump();
+        EXPECT_NE(std::get<std::string>(rejected).find("tool.execution.taskSupport"), std::string::npos);
+    }
+}
+
 }  // namespace

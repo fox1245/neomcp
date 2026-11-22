@@ -90,4 +90,47 @@ TEST(ClientTasksHttp, FollowsTasksOfTheLibrarysServer) {
     EXPECT_TRUE(client->close());
 }
 
+TEST(ClientTasksHttp, Follows2025AugmentedRequestTasksOverHttp) {
+    TaskHttpServer own;
+    neomcp::ClientOptions options = client_test::only({"2025-11-25"});
+    options.tasks.accept = true;
+    options.tasks.min_poll_interval = ms(5);
+    options.tasks.max_poll_interval = ms(20);
+    options.handlers.form([](const neomcp::ElicitationForm&) {
+        return neomcp::ElicitationAnswer{neomcp::ElicitationAction::accept, json{{"value", "ada"}}};
+    });
+    auto client = neomcp::Client::open(std::move(options), http_rig::endpoint(own.url()));
+    ASSERT_TRUE(client) << client.error().message;
+    const auto missing = client->task("no-such-task");
+    ASSERT_FALSE(missing);
+    EXPECT_EQ(missing.error().kind, ClientErrorKind::task_lost);
+
+    const auto greeted = client->call_tool("greet", json{{"name", "ada"}});
+    ASSERT_TRUE(greeted) << greeted.error().message;
+    EXPECT_EQ(text_of(*greeted), "Hello, ada!");
+
+    const auto computed = client->call_tool("slow_compute", json{{"seconds", 0.05}});
+    ASSERT_TRUE(computed) << computed.error().message;
+    EXPECT_EQ(text_of(*computed), "Computed after 50 ms");
+
+    const auto both = client->call_tool("multi_input");
+    ASSERT_TRUE(both) << both.error().message;
+    EXPECT_EQ(text_of(*both), R"(first={"value":"ada"}, second={"value":"ada"})");
+
+    auto started = client->start_tool("slow_compute", json{{"seconds", 30}});
+    ASSERT_TRUE(started) << started.error().message;
+    ASSERT_TRUE(std::holds_alternative<neomcp::TaskHandle>(*started));
+    const auto again = client->task(std::get<neomcp::TaskHandle>(*started).id());
+    ASSERT_TRUE(again) << again.error().message;
+    ASSERT_TRUE(again->cancel());
+    const auto double_cancel = again->cancel();
+    ASSERT_FALSE(double_cancel);
+    EXPECT_EQ(double_cancel.error().kind, ClientErrorKind::server_error);
+    EXPECT_EQ(double_cancel.error().code, -32602);
+    const auto waited = again->wait();
+    ASSERT_FALSE(waited);
+    EXPECT_EQ(waited.error().kind, ClientErrorKind::task_cancelled);
+    EXPECT_TRUE(client->close());
+}
+
 }  // namespace

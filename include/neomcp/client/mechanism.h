@@ -381,6 +381,25 @@ public:
     virtual std::optional<std::string> check(const profile::Profile& profile) const = 0;
     // Whether a server may answer a request with a task under the mechanism.
     virtual bool takes_tasks() const = 0;
+    // Whether the requester asks for a task by augmenting a call's params rather than the server deciding alone.
+    virtual bool augments_tool_call() const { return false; }
+    // Whether the server's capabilities say it supports tasks under this mechanism.
+    virtual bool server_supports_tasks(const json& capabilities) const {
+        static_cast<void>(capabilities);
+        return false;
+    }
+    // Whether the server's capabilities say `tools/call` may be augmented as a task.
+    virtual bool server_takes_tool_tasks(const json& capabilities) const {
+        static_cast<void>(capabilities);
+        return false;
+    }
+    // Adds the mechanism's ask for a task to a `tools/call` params object.
+    virtual void augment_tool_call(json& params) const { static_cast<void>(params); }
+    // Whether an outgoing call already asks for a task.
+    virtual bool is_augmented(const ClientMessage& message) const {
+        static_cast<void>(message);
+        return false;
+    }
     // Adds to a ClientCapabilities object, written for the profile, that the client takes tasks.
     virtual void declare(json& capabilities) const = 0;
 
@@ -389,9 +408,15 @@ public:
     virtual std::optional<WireRead<TaskState>> read_created(const json& result, std::string_view method,
                                                             const profile::Profile& profile) const = 0;
 
-    // The requests about the task `id`: a read of its state, the answers to the requests it waits on, its
-    // cancellation. An error when an answer cannot be written for the revision.
+    // The requests about the task `id`: a read of its state, a blocking fetch of its final outcome when separate, the
+    // answers to the requests it waits on, its cancellation. An error when an answer cannot be written for the
+    // revision.
     virtual ClientMessage read(std::string_view id) const = 0;
+    virtual bool result_is_separate() const { return false; }
+    virtual ClientMessage result(std::string_view id) const {
+        static_cast<void>(id);
+        return ClientMessage{};
+    }
     virtual WireRead<ClientMessage> update(std::string_view id, const InputResponses& answers,
                                            const profile::Profile& profile) const = 0;
     virtual ClientMessage cancel(std::string_view id) const = 0;
@@ -404,6 +429,9 @@ public:
     // Whether an error answer to a request about a task says that the server knows no such task (it never had it,
     // or no longer has it).
     virtual bool says_unknown(const RequestError& error) const = 0;
+    // Whether `says_unknown()` also applies to `cancel()` errors (false when cancelling an ended task returns invalid
+    // params instead).
+    virtual bool cancel_error_means_unknown() const { return true; }
 };
 
 class ClientMechanismRegistry {
@@ -452,8 +480,7 @@ private:
 
 // The client halves of the library: every name profile::declared_mechanisms declares for open, state, server_input,
 // change_feed, batch and tasks, and every name profile::declared_cancel declares for a transport. Of the tasks halves
-// only `server_directed` takes tasks; `none` and `augmented_request` (where the requester would ask for a task in the
-// request) take none, so a client never asks for a task under a revision that has tasks only that way.
+// `server_directed` and `augmented_request` take tasks when allowed by options; `none` takes none.
 const ClientMechanismRegistry& builtin_client_mechanisms();
 
 // The client halves one profile selects for one transport, each never null.

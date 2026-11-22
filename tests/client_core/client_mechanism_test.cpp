@@ -1104,6 +1104,93 @@ TEST(ClientMechanismFeed, AConnectionsNotificationsAreRecognised) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// tasks (2025-11-25 augmented_request)
+
+TEST(ClientMechanismTasks, AugmentedRequestReadsCapabilitiesParamsAndWireShapes) {
+    const profile::ProfilePtr p = profile::builtin("2025-11-25");
+    ASSERT_NE(p, nullptr);
+    const auto tasks = client_registry().make_tasks(p->mechanism(profile::Slot::tasks));
+    ASSERT_NE(tasks, nullptr);
+    EXPECT_FALSE(tasks->check(*p).has_value()) << *tasks->check(*p);
+    EXPECT_TRUE(tasks->takes_tasks());
+    EXPECT_TRUE(tasks->augments_tool_call());
+    EXPECT_TRUE(tasks->result_is_separate());
+    EXPECT_FALSE(tasks->cancel_error_means_unknown());
+    EXPECT_TRUE(tasks->says_unknown(neomcp::RequestError{neomcp::error_code::invalid_params, "unknown"}));
+    EXPECT_FALSE(tasks->says_unknown(neomcp::RequestError{neomcp::error_code::internal_error, "err"}));
+
+    json client_caps = json::object();
+    tasks->declare(client_caps);
+    EXPECT_TRUE(client_caps.empty());
+
+    EXPECT_FALSE(tasks->server_supports_tasks(J("{}")));
+    EXPECT_FALSE(tasks->server_supports_tasks(J(R"({"tasks":true})")));
+    EXPECT_TRUE(tasks->server_supports_tasks(J(R"({"tasks":{}})")));
+    EXPECT_FALSE(tasks->server_takes_tool_tasks(J(R"({"tasks":{}})")));
+    EXPECT_FALSE(tasks->server_takes_tool_tasks(J(R"({"tasks":{"requests":{"tools":{}}}})")));
+    EXPECT_FALSE(tasks->server_takes_tool_tasks(J(R"({"tasks":{"requests":{"tools":{"call":true}}}})")));
+    EXPECT_FALSE(tasks->server_takes_tool_tasks(J(R"({"tasks":{"requests":{"tools":{"call":null}}}})")));
+    EXPECT_FALSE(tasks->server_takes_tool_tasks(J(R"({"tasks":{"requests":{"tools":{"call":[]}}}})")));
+    EXPECT_TRUE(tasks->server_takes_tool_tasks(J(R"({"tasks":{"requests":{"tools":{"call":{}}}}})")));
+
+    json params = J(R"({"name":"work","arguments":{}})");
+    EXPECT_FALSE(tasks->is_augmented(neomcp::ClientMessage{"tools/call", params}));
+    EXPECT_FALSE(tasks->is_augmented(neomcp::ClientMessage{"tools/call", J(R"({"name":"work","task":null})")}));
+    tasks->augment_tool_call(params);
+    EXPECT_EQ(params.at("task"), json::object());
+    EXPECT_TRUE(tasks->is_augmented(neomcp::ClientMessage{"tools/call", params}));
+    EXPECT_FALSE(tasks->is_augmented(neomcp::ClientMessage{"prompts/get", params}));
+
+    // Normal tool results do not create a task.
+    EXPECT_FALSE(tasks->read_created(J(R"({"content":[]})"), "tools/call", *p).has_value());
+
+    const json task_obj = J(R"({
+        "taskId": "t-1",
+        "status": "working",
+        "statusMessage": "running",
+        "createdAt": "2026-11-22T00:00:00Z",
+        "lastUpdatedAt": "2026-11-22T00:00:01Z",
+        "ttl": null,
+        "pollInterval": 250
+    })");
+    auto created = tasks->read_created(json{{"task", task_obj}}, "tools/call", *p);
+    ASSERT_TRUE(created.has_value());
+    ASSERT_TRUE(std::holds_alternative<neomcp::TaskState>(*created)) << std::get<std::string>(*created);
+    const auto& cstate = std::get<neomcp::TaskState>(*created);
+    EXPECT_EQ(cstate.id, "t-1");
+    EXPECT_EQ(cstate.status, neomcp::TaskStatus::working);
+    EXPECT_EQ(cstate.message, std::optional<std::string>("running"));
+    EXPECT_FALSE(cstate.ttl.has_value());
+    EXPECT_EQ(cstate.poll_interval, std::optional<std::chrono::milliseconds>(250ms));
+
+    auto wrong_method = tasks->read_created(json{{"task", task_obj}}, "prompts/get", *p);
+    ASSERT_TRUE(wrong_method.has_value());
+    EXPECT_TRUE(std::holds_alternative<std::string>(*wrong_method));
+
+    auto bad_task = tasks->read_created(J(R"({"task":{"taskId":"t-1","status":"working"}})"), "tools/call", *p);
+    ASSERT_TRUE(bad_task.has_value());
+    EXPECT_TRUE(std::holds_alternative<std::string>(*bad_task));
+
+    EXPECT_EQ(tasks->read("t-1").method, "tasks/get");
+    EXPECT_EQ(tasks->read("t-1").params, J(R"({"taskId":"t-1"})"));
+    EXPECT_EQ(tasks->result("t-1").method, "tasks/result");
+    EXPECT_EQ(tasks->result("t-1").params, J(R"({"taskId":"t-1"})"));
+    EXPECT_EQ(tasks->cancel("t-1").method, "tasks/cancel");
+    EXPECT_EQ(tasks->cancel("t-1").params, J(R"({"taskId":"t-1"})"));
+    EXPECT_TRUE(std::holds_alternative<std::string>(tasks->update("t-1", {}, *p)));
+
+    auto state = tasks->read_state(task_obj, *p);
+    ASSERT_TRUE(std::holds_alternative<neomcp::TaskState>(state)) << std::get<std::string>(state);
+    EXPECT_EQ(std::get<neomcp::TaskState>(state).id, "t-1");
+    EXPECT_TRUE(std::holds_alternative<std::string>(tasks->read_state(J(R"({"taskId":"t-1"})"), *p)));
+    EXPECT_TRUE(std::holds_alternative<std::string>(
+        tasks->read_state(J(R"({"taskId":"t-1","status":"working","createdAt":"2026-11-22T00:00:00Z","lastUpdatedAt":"2026-11-22T00:00:01Z","ttl":null,"pollInterval":null})"), *p)));
+
+    EXPECT_FALSE(tasks->read_acknowledgement(task_obj, *p).has_value());
+    EXPECT_TRUE(tasks->read_acknowledgement(J(R"({"taskId":"t-1"})"), *p).has_value());
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // batch
 
 TEST(ClientMechanismBatch, ArraysAreSplitOnlyWhereTheRevisionHasThem) {
@@ -1159,6 +1246,7 @@ TEST(ClientMechanismMalformed, NoReaderThrowsForWhatAServerSends) {
         const auto feed = client_feed(*p);
         const auto cancel = client_registry().make_cancel(p->stdio()->cancel);
         const auto batch = client_registry().make_batch(p->mechanism(profile::Slot::batch));
+        const auto tasks = client_registry().make_tasks(p->mechanism(profile::Slot::tasks));
         for (const json& value : values) {
             SCOPED_TRACE(value.dump());
             EXPECT_NO_THROW(static_cast<void>(open->read_handshake(value, candidates)));
@@ -1169,6 +1257,11 @@ TEST(ClientMechanismMalformed, NoReaderThrowsForWhatAServerSends) {
             EXPECT_NO_THROW(static_cast<void>(feed->read_end(value, neomcp::RequestId(1), *p)));
             EXPECT_NO_THROW(static_cast<void>(feed->offered(neomcp::ChangeFilter{}, value)));
             EXPECT_NO_THROW(static_cast<void>(batch->split(value)));
+            EXPECT_NO_THROW(static_cast<void>(tasks->read_created(value, "tools/call", *p)));
+            EXPECT_NO_THROW(static_cast<void>(tasks->read_state(value, *p)));
+            EXPECT_NO_THROW(static_cast<void>(tasks->read_acknowledgement(value, *p)));
+            EXPECT_NO_THROW(static_cast<void>(tasks->server_supports_tasks(value)));
+            EXPECT_NO_THROW(static_cast<void>(tasks->server_takes_tool_tasks(value)));
             for (const char* method : server_methods) {
                 json message = J(R"({"jsonrpc":"2.0","id":3})");
                 message["method"] = method;
