@@ -4,6 +4,7 @@
 // build takes to fail.
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <future>
 #include <memory>
 #include <string>
@@ -447,6 +448,66 @@ TEST(HttpBodyStream, ManyProducersAndOneConsumerLoseNothing) {
     for (auto& t : threads) t.join();
     consumer.join();
     EXPECT_EQ(total, static_cast<std::size_t>(producers) * per_producer);
+}
+
+TEST(HttpBodyStream, CoalescesRepeatedKeysPreservesOrderAndPreventsOrdinaryOvertaking) {
+    BodyStream stream(16);
+    EXPECT_EQ(stream.append("1234567890"), BodyStream::Append::accepted);
+    EXPECT_EQ(stream.append_coalesced(1, "tools-a"), BodyStream::Append::accepted);
+    EXPECT_EQ(stream.append_coalesced(1, "tools-b"), BodyStream::Append::accepted);
+    EXPECT_EQ(stream.append_coalesced(2, "prompts"), BodyStream::Append::accepted);
+    EXPECT_EQ(stream.append("xx"), BodyStream::Append::full);
+
+    std::string out;
+    ASSERT_EQ(stream.read(out, patience), BodyStream::Read::data);
+    EXPECT_EQ(out, "1234567890");
+    ASSERT_EQ(stream.read(out, patience), BodyStream::Read::data);
+    EXPECT_EQ(out, "tools-bprompts");
+    EXPECT_EQ(stream.append("after"), BodyStream::Append::accepted);
+    stream.end();
+    ASSERT_EQ(stream.read(out, patience), BodyStream::Read::data);
+    EXPECT_EQ(out, "after");
+    EXPECT_EQ(stream.read(out, patience), BodyStream::Read::end);
+    EXPECT_TRUE(stream.wait_finished(std::chrono::steady_clock::now() + patience));
+}
+
+TEST(HttpBodyStream, OversizedCoalescedChunkIsRefusedWithoutModifyingState) {
+    BodyStream stream(8);
+    EXPECT_EQ(stream.append("hi"), BodyStream::Append::accepted);
+    EXPECT_EQ(stream.append_coalesced(1, "123456789"), BodyStream::Append::full);
+    stream.end();
+    std::string out;
+    ASSERT_EQ(stream.read(out, patience), BodyStream::Read::data);
+    EXPECT_EQ(out, "hi");
+    EXPECT_EQ(stream.read(out, patience), BodyStream::Read::end);
+}
+
+TEST(HttpBodyStream, EndWaitsUntilCoalescedChunksAreDrainedAndCloseDiscardsThem) {
+    BodyStream drained(10);
+    ASSERT_EQ(drained.append("123456"), BodyStream::Append::accepted);
+    ASSERT_EQ(drained.append_coalesced(1, "tools"), BodyStream::Append::accepted);
+    ASSERT_EQ(drained.append_coalesced(2, "prompts"), BodyStream::Append::accepted);
+    drained.end();
+    EXPECT_FALSE(drained.wait_finished(std::chrono::steady_clock::now()));
+
+    std::string out;
+    ASSERT_EQ(drained.read(out, patience), BodyStream::Read::data);
+    EXPECT_EQ(out, "123456");
+    EXPECT_FALSE(drained.wait_finished(std::chrono::steady_clock::now()));
+    ASSERT_EQ(drained.read(out, patience), BodyStream::Read::data);
+    EXPECT_EQ(out, "tools");
+    EXPECT_FALSE(drained.wait_finished(std::chrono::steady_clock::now()));
+    ASSERT_EQ(drained.read(out, patience), BodyStream::Read::data);
+    EXPECT_EQ(out, "prompts");
+    EXPECT_EQ(drained.read(out, patience), BodyStream::Read::end);
+    EXPECT_TRUE(drained.wait_finished(std::chrono::steady_clock::now() + patience));
+
+    BodyStream discarded(10);
+    ASSERT_EQ(discarded.append("123456"), BodyStream::Append::accepted);
+    ASSERT_EQ(discarded.append_coalesced(1, "tools"), BodyStream::Append::accepted);
+    discarded.close();
+    EXPECT_EQ(discarded.append_coalesced(1, "x"), BodyStream::Append::closed);
+    EXPECT_EQ(discarded.read(out, 0ms), BodyStream::Read::closed);
 }
 
 // ---- Server-sent events framing --------------------------------------------------------------------------------------

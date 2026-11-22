@@ -2984,6 +2984,8 @@ void SessionCore::on_change(const Change& change) {
             if (updated) {
                 notice.output.read_scopes.assign(needed.begin(), needed.end());
                 notice.watched = change.uri;
+            } else {
+                notice.output.list_change = change.kind;
             }
             notice.change = std::move(key);
             queued = enqueue_change(std::move(notice));
@@ -3002,6 +3004,7 @@ void SessionCore::on_change(const Change& change) {
             Output output =
                 make_output(std::move(*line), OutputKind::notification, false, RefusalReason::none, call->profile);
             output.long_lived = true;
+            if (!updated) output.list_change = change.kind;
             Queued notice{std::move(output), call, call->unit};
             notice.change = std::move(key);
             queued = enqueue_change(std::move(notice)) || queued;

@@ -25,11 +25,47 @@ BodyStream::Append BodyStream::append(std::string_view chunk) {
         if (closed_) return Append::closed;
         if (ended_) return Append::ended;
         if (chunk.empty()) return Append::accepted;
+        flush_coalesced();
+        if (!coalesced_.empty()) return Append::full;
         if (chunk.size() > max_buffered_bytes_ - buffer_.size()) return Append::full;
         buffer_.append(chunk);
     }
     activity_.notify_all();
     return Append::accepted;
+}
+
+BodyStream::Append BodyStream::append_coalesced(std::uint8_t key, std::string_view chunk) {
+    {
+        std::lock_guard lock(mutex_);
+        if (closed_) return Append::closed;
+        if (ended_) return Append::ended;
+        if (chunk.empty()) return Append::accepted;
+        if (chunk.size() > max_buffered_bytes_) return Append::full;
+        flush_coalesced();
+        for (CoalescedChunk& entry : coalesced_) {
+            if (entry.key == key) {
+                entry.data.assign(chunk);
+                return Append::accepted;
+            }
+        }
+        if (coalesced_.empty() && chunk.size() <= max_buffered_bytes_ - buffer_.size()) {
+            buffer_.append(chunk);
+        } else {
+            if (coalesced_.size() >= max_coalesced_keys) return Append::full;
+            coalesced_.push_back(CoalescedChunk{key, std::string(chunk)});
+        }
+    }
+    activity_.notify_all();
+    return Append::accepted;
+}
+
+void BodyStream::flush_coalesced() {
+    while (!coalesced_.empty()) {
+        const std::string& chunk = coalesced_.front().data;
+        if (chunk.size() > max_buffered_bytes_ - buffer_.size()) break;
+        buffer_.append(chunk);
+        coalesced_.erase(coalesced_.begin());
+    }
 }
 
 void BodyStream::end() {
@@ -59,13 +95,16 @@ bool BodyStream::closed() const {
 
 BodyStream::Read BodyStream::read(std::string& out, std::chrono::milliseconds timeout) {
     std::unique_lock lock(mutex_);
-    if (!activity_.wait_for(lock, timeout, [this] { return closed_ || !buffer_.empty() || ended_; })) {
+    if (!activity_.wait_for(lock, timeout,
+                           [this] { return closed_ || !buffer_.empty() || !coalesced_.empty() || ended_; })) {
         return Read::timeout;
     }
     if (closed_) return Read::closed;
+    flush_coalesced();
     if (!buffer_.empty()) {
         out = std::move(buffer_);
         buffer_.clear();
+        flush_coalesced();
         return Read::data;
     }
     finished_ = true;  // ended and drained
@@ -87,6 +126,7 @@ void BodyStream::close() noexcept {
         if (closed_ || finished_) return;
         closed_ = true;
         buffer_.clear();
+        coalesced_.clear();
         callback = std::move(on_close_);
         on_close_ = nullptr;
     }

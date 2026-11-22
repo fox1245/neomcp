@@ -1594,4 +1594,320 @@ TEST(HttpEndpointFeed, WithoutAConnectionStreamTheChangesOfALegacySessionAreDrop
         << "the change before the stream opened was dropped, not kept for it";
 }
 
+namespace {
+
+// Holds two Endpoint instances on one Server: the tested bounded endpoint and an unbounded barrier endpoint so the
+// test can wait deterministically for Server::run_feed() to flush each batch before reading the paused stream.
+struct PausedEndpointRig {
+    explicit PausedEndpointRig(std::size_t bound_bytes)
+        : server(neomcp::ServerOptions{.name = "paused-feed-test",
+                                       .version = "0.0.1",
+                                       .on_change_watchers = [this] { watchers_changed(); }}) {
+        hidden_tool = std::make_unique<neomcp::ToolHandle>(
+            server.tool("hidden_tool", "Toggled", [] { return std::string("t"); }).enable(false));
+        hidden_prompt = std::make_unique<neomcp::PromptHandle>(
+            server.prompt("hidden_prompt", "Toggled", [] { return std::string("p"); }).enable(false));
+        server.resource("t://a", "Filler resource", [] { return std::string("a"); });
+        server.resource("t://b", "Dropped resource", [] { return std::string("b"); });
+        server.resource("t://barrier", "Barrier resource", [] { return std::string("ok"); });
+
+        auto tested_policy = neomcp::http::HostPolicy::create({});
+        auto barrier_policy = neomcp::http::HostPolicy::create({});
+        if (!tested_policy || !barrier_policy) throw std::runtime_error("policy failed");
+        neomcp::http::EndpointOptions tested_options;
+        tested_options.max_stream_buffer_bytes = bound_bytes;
+        auto made_tested = neomcp::http::Endpoint::create(server, std::move(*tested_policy.value), tested_options);
+        auto made_barrier = neomcp::http::Endpoint::create(server, std::move(*barrier_policy.value));
+        if (!made_tested || !made_barrier) throw std::runtime_error("endpoint create failed");
+        tested = std::move(*made_tested.value);
+        barrier = std::move(*made_barrier.value);
+    }
+
+    ~PausedEndpointRig() {
+        if (barrier) barrier->stop();
+        if (tested) tested->stop();
+    }
+
+    void watchers_changed() {
+        { std::lock_guard lock(mutex); }
+        changed.notify_all();
+    }
+
+    bool wait_for_watchers(std::size_t count) {
+        std::unique_lock lock(mutex);
+        return changed.wait_for(lock, patience, [&] { return server.change_watchers() == count; });
+    }
+
+    static neomcp::http::Response dispatch(neomcp::http::Endpoint& endpoint, neomcp::http::Request request) {
+        std::promise<neomcp::http::Response> promise;
+        auto future = promise.get_future();
+        endpoint.handle(std::move(request), neomcp::http::Responder([&](neomcp::http::Response&& response) {
+                            promise.set_value(std::move(response));
+                            return true;
+                        }));
+        if (future.wait_for(patience) != std::future_status::ready) throw std::runtime_error("endpoint handle timed out");
+        return future.get();
+    }
+
+    static std::pair<std::string, std::shared_ptr<neomcp::http::BodyStream>> open_legacy_get(
+        neomcp::http::Endpoint& endpoint) {
+        neomcp::http::Request init;
+        init.method = "POST";
+        init.path = path;
+        init.headers = {{"Host", "localhost"}, {"Content-Type", json_type}, {"Accept", both_types}};
+        init.body = rpc(1, "initialize", initialize_params());
+        const neomcp::http::Response init_reply = dispatch(endpoint, std::move(init));
+        if (init_reply.status != 200) throw std::runtime_error("init failed");
+        const auto session_opt = init_reply.headers.get("Mcp-Session-Id");
+        if (!session_opt) throw std::runtime_error("missing session header");
+        std::string session(*session_opt);
+
+        neomcp::http::Request ready;
+        ready.method = "POST";
+        ready.path = path;
+        ready.headers = {{"Host", "localhost"},
+                         {"Content-Type", json_type},
+                         {"Accept", both_types},
+                         {"MCP-Protocol-Version", legacy},
+                         {"Mcp-Session-Id", session}};
+        ready.body = notification("notifications/initialized");
+        if (dispatch(endpoint, std::move(ready)).status != 202) throw std::runtime_error("initialized failed");
+
+        neomcp::http::Request get;
+        get.method = "GET";
+        get.path = path;
+        get.headers = {{"Host", "localhost"},
+                       {"Accept", "text/event-stream"},
+                       {"MCP-Protocol-Version", legacy},
+                       {"Mcp-Session-Id", session}};
+        neomcp::http::Response stream_reply = dispatch(endpoint, std::move(get));
+        if (stream_reply.status != 200 || !stream_reply.stream) throw std::runtime_error("GET failed");
+        return {std::move(session), std::move(stream_reply.stream)};
+    }
+
+    static std::shared_ptr<neomcp::http::BodyStream> open_modern_listen(neomcp::http::Endpoint& endpoint,
+                                                                        const json& id, json filter) {
+        neomcp::http::Request listen;
+        listen.method = "POST";
+        listen.path = path;
+        listen.headers = {{"Host", "localhost"},
+                          {"Content-Type", json_type},
+                          {"Accept", both_types},
+                          {"MCP-Protocol-Version", modern},
+                          {"Mcp-Method", "subscriptions/listen"}};
+        listen.body = rpc(id, "subscriptions/listen", with_meta(json{{"notifications", std::move(filter)}}));
+        neomcp::http::Response reply = dispatch(endpoint, std::move(listen));
+        if (reply.status != 200 || !reply.stream) throw std::runtime_error("listen failed");
+        return std::move(reply.stream);
+    }
+
+    static void subscribe_legacy(neomcp::http::Endpoint& endpoint, const std::string& session, int id,
+                                 const std::string& uri) {
+        neomcp::http::Request req;
+        req.method = "POST";
+        req.path = path;
+        req.headers = {{"Host", "localhost"},
+                       {"Content-Type", json_type},
+                       {"Accept", both_types},
+                       {"MCP-Protocol-Version", legacy},
+                       {"Mcp-Session-Id", session}};
+        req.body = rpc(id, "resources/subscribe", json{{"uri", uri}});
+        if (dispatch(endpoint, std::move(req)).status != 200) throw std::runtime_error("subscribe failed");
+    }
+
+    static void read_until_barrier(neomcp::http::BodyStream& stream, const std::string& uri, std::string& buffer,
+                                     std::size_t expected_count) {
+        while (true) {
+            std::string piece;
+            if (stream.read(piece, patience) != neomcp::http::BodyStream::Read::data) {
+                throw std::runtime_error("barrier stream closed early");
+            }
+            buffer += piece;
+            const std::vector<json> frames = events(buffer);
+            std::size_t seen = 0;
+            for (const json& frame : frames) {
+                if (method_of(frame) == "notifications/resources/updated" &&
+                    frame.value("params", json::object()).value("uri", std::string()) == uri) {
+                    ++seen;
+                }
+            }
+            if (seen >= expected_count) return;
+        }
+    }
+
+    std::mutex mutex;
+    std::condition_variable changed;
+    neomcp::Server server;
+    std::unique_ptr<neomcp::ToolHandle> hidden_tool;
+    std::unique_ptr<neomcp::PromptHandle> hidden_prompt;
+    std::unique_ptr<neomcp::http::Endpoint> tested;
+    std::unique_ptr<neomcp::http::Endpoint> barrier;
+};
+
+}  // namespace
+
+TEST(HttpEndpointFeed, LegacyConnectionStreamPreservesAndCoalescesListChangesWhenBufferIsFull) {
+    // Two `t://a` events (~96 bytes each) leave <69 bytes free in a 220-byte buffer so later list changes coalesce
+    // behind them while excess resource updates drop without overtaking.
+    PausedEndpointRig rig(220);
+    auto [tested_session, tested_stream] = PausedEndpointRig::open_legacy_get(*rig.tested);
+    auto [barrier_session, barrier_stream] = PausedEndpointRig::open_legacy_get(*rig.barrier);
+    ASSERT_TRUE(rig.wait_for_watchers(2));
+
+    PausedEndpointRig::subscribe_legacy(*rig.tested, tested_session, 2, "t://a");
+    PausedEndpointRig::subscribe_legacy(*rig.tested, tested_session, 3, "t://b");
+    PausedEndpointRig::subscribe_legacy(*rig.barrier, barrier_session, 2, "t://barrier");
+
+    // Step 1: fill the tested buffer with two `t://a` updates.
+    std::string barrier_buf;
+    std::size_t barrier_count = 0;
+    const auto sync_barrier = [&] {
+        rig.server.notify_resource_updated("t://barrier");
+        PausedEndpointRig::read_until_barrier(*barrier_stream, "t://barrier", barrier_buf, ++barrier_count);
+    };
+    rig.server.notify_resource_updated("t://a");
+    sync_barrier();
+    rig.server.notify_resource_updated("t://a");
+    sync_barrier();
+
+    // Step 2: burst list changes (separated by barriers so BodyStream::append_coalesced sees repeated keys) and `t://b`
+    // updates while `tested_stream` stays unread.
+    rig.hidden_tool->enable(true);
+    sync_barrier();
+    rig.hidden_tool->enable(false);
+    sync_barrier();
+    rig.hidden_tool->enable(true);
+    sync_barrier();
+    rig.hidden_prompt->enable(true);
+    sync_barrier();
+    rig.hidden_prompt->enable(false);
+    sync_barrier();
+    for (int i = 0; i < 4; ++i) {
+        rig.server.notify_resource_updated("t://b");
+        sync_barrier();
+    }
+
+    // Step 3: drain `tested_stream` and close cleanly with DELETE.
+    neomcp::http::Request close_req;
+    close_req.method = "DELETE";
+    close_req.path = path;
+    close_req.headers = {{"Host", "localhost"},
+                         {"MCP-Protocol-Version", legacy},
+                         {"Mcp-Session-Id", tested_session}};
+    EXPECT_EQ(PausedEndpointRig::dispatch(*rig.tested, std::move(close_req)).status, 204);
+
+    std::string body;
+    std::string chunk;
+    while (tested_stream->read(chunk, patience) == neomcp::http::BodyStream::Read::data) body += chunk;
+
+    const std::vector<json> frames = events(body);
+    std::vector<std::string> summary;
+    for (const json& frame : frames) {
+        const std::string method = method_of(frame);
+        if (method == "notifications/resources/updated") {
+            summary.push_back(frame.at("params").at("uri").get<std::string>());
+        } else {
+            summary.push_back(method);
+        }
+    }
+    EXPECT_EQ(summary, (std::vector<std::string>{"t://a", "t://a", "notifications/tools/list_changed",
+                                                 "notifications/prompts/list_changed"}));
+    barrier_stream->close();
+}
+
+TEST(HttpEndpointFeed, SubscriptionStreamPreservesAndCoalescesListChangesWhenBufferIsFull) {
+    // 400 bytes holds the initial acknowledged event (drained first), then two `t://a` events (~147 bytes each = 294B),
+    // leaving 106 bytes free so ~128-byte list-change frames coalesce behind them, and also holds both stop frames.
+    PausedEndpointRig rig(400);
+    auto tested_stream = PausedEndpointRig::open_modern_listen(
+        *rig.tested, 1,
+        {{"toolsListChanged", true}, {"promptsListChanged", true}, {"resourceSubscriptions", json::array({"t://a", "t://b"})}});
+    auto barrier_stream =
+        PausedEndpointRig::open_modern_listen(*rig.barrier, 2, {{"resourceSubscriptions", json::array({"t://barrier"})}});
+    ASSERT_TRUE(rig.wait_for_watchers(2));
+
+    // Drain initial acknowledgements on both streams so `tested_stream`'s buffer starts empty.
+    std::string tested_ack;
+    ASSERT_EQ(tested_stream->read(tested_ack, patience), neomcp::http::BodyStream::Read::data);
+    ASSERT_EQ(method_of(events(tested_ack).at(0)), "notifications/subscriptions/acknowledged");
+    std::string barrier_buf;
+    ASSERT_EQ(barrier_stream->read(barrier_buf, patience), neomcp::http::BodyStream::Read::data);
+
+    // Step 1: fill `tested_stream` to 294/300 bytes with two `t://a` updates.
+    std::size_t barrier_count = 0;
+    const auto sync_barrier = [&] {
+        rig.server.notify_resource_updated("t://barrier");
+        PausedEndpointRig::read_until_barrier(*barrier_stream, "t://barrier", barrier_buf, ++barrier_count);
+    };
+    rig.server.notify_resource_updated("t://a");
+    sync_barrier();
+    rig.server.notify_resource_updated("t://a");
+    sync_barrier();
+
+    // Step 2: burst repeated list changes (separated by barriers so BodyStream::append_coalesced sees repeated keys) and
+    // `t://b` updates while `tested_stream` stays unread.
+    rig.hidden_tool->enable(true);
+    sync_barrier();
+    rig.hidden_tool->enable(false);
+    sync_barrier();
+    rig.hidden_tool->enable(true);
+    sync_barrier();
+    rig.hidden_prompt->enable(true);
+    sync_barrier();
+    rig.hidden_prompt->enable(false);
+    sync_barrier();
+    for (int i = 0; i < 4; ++i) {
+        rig.server.notify_resource_updated("t://b");
+        sync_barrier();
+    }
+
+    // Step 3: drain `tested_stream` until both list changes have arrived, then stop gracefully and check the ending.
+    std::string body;
+    std::string chunk;
+    const auto has_prompts_changed = [](const std::string& sse_body) {
+        for (const json& frame : events(sse_body)) {
+            if (method_of(frame) == "notifications/prompts/list_changed") return true;
+        }
+        return false;
+    };
+    while (!has_prompts_changed(body)) {
+        ASSERT_EQ(tested_stream->read(chunk, patience), neomcp::http::BodyStream::Read::data);
+        body += chunk;
+    }
+
+    const std::vector<json> frames = events(body);
+    std::vector<std::string> summary;
+    for (const json& frame : frames) {
+        const std::string method = method_of(frame);
+        if (method == "notifications/resources/updated") {
+            summary.push_back(frame.at("params").at("uri").get<std::string>());
+        } else {
+            summary.push_back(method);
+        }
+    }
+    EXPECT_EQ(summary, (std::vector<std::string>{"t://a", "t://a", "notifications/tools/list_changed",
+                                                 "notifications/prompts/list_changed"}));
+
+    rig.tested->stop();
+    std::string tail;
+    while (tested_stream->read(chunk, patience) == neomcp::http::BodyStream::Read::data) tail += chunk;
+    const std::vector<json> tail_frames = events(tail);
+    ASSERT_GE(tail_frames.size(), 2U) << tail;
+    EXPECT_EQ(method_of(tail_frames[0]), "notifications/cancelled");
+    EXPECT_EQ(tail_frames[1].at("result").at("resultType"), "complete");
+    barrier_stream->close();
+}
+
+TEST(HttpEndpointFeed, ListChangeExceedingStreamBufferBoundClosesStreamInsteadOfDropping) {
+    // 16 bytes is smaller than a single `notifications/tools/list_changed` SSE frame: the endpoint closes the stream.
+    PausedEndpointRig rig(16);
+    auto [session, tested_stream] = PausedEndpointRig::open_legacy_get(*rig.tested);
+    static_cast<void>(session);
+    ASSERT_TRUE(rig.wait_for_watchers(1));
+
+    rig.hidden_tool->enable(true);
+    std::string chunk;
+    EXPECT_EQ(tested_stream->read(chunk, patience), neomcp::http::BodyStream::Read::closed);
+}
+
 }  // namespace

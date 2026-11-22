@@ -267,6 +267,22 @@ Acceptance acceptance(const Headers& headers) {
             accepts(*ranges, event_stream_type, event_stream_subtype)};
 }
 
+std::optional<std::uint8_t> coalesce_key_of(const Output& output) {
+    if (!output.list_change) return std::nullopt;
+    return static_cast<std::uint8_t>(*output.list_change);
+}
+
+bool is_droppable_append(const Output& output) {
+    return output.kind == OutputKind::notification && !output.list_change;
+}
+
+void append_to_stream(BodyStream& stream, std::string_view bytes, std::optional<std::uint8_t> coalesce_key,
+                      bool droppable) {
+    const BodyStream::Append appended =
+        coalesce_key ? stream.append_coalesced(*coalesce_key, bytes) : stream.append(bytes);
+    if (appended == BodyStream::Append::full && !droppable) stream.close();
+}
+
 }  // namespace
 
 struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
@@ -324,11 +340,21 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
 
     struct Step {
         enum class Kind { complete, append, end_stream, abandon_unit, release };
+        Step() = default;
+        Step(Kind kind_in, Response response_in, std::shared_ptr<BodyStream> stream_in, std::string bytes_in,
+             bool droppable_in, std::optional<std::uint8_t> coalesce_key_in = std::nullopt)
+            : kind(kind_in),
+              response(std::move(response_in)),
+              stream(std::move(stream_in)),
+              bytes(std::move(bytes_in)),
+              droppable(droppable_in),
+              coalesce_key(coalesce_key_in) {}
         Kind kind = Kind::release;
         Response response;                   // complete
         std::shared_ptr<BodyStream> stream;  // complete (when the response is a stream), append, end_stream
         std::string bytes;                   // append
         bool droppable = false;              // append: dropped when the stream is full, instead of ending it
+        std::optional<std::uint8_t> coalesce_key;  // append: coalesced list-change key when set
     };
 
     struct Exchange : std::enable_shared_from_this<Exchange> {
@@ -1240,10 +1266,8 @@ void Endpoint::Impl::to_connection(const std::shared_ptr<Entry>& entry, const Ou
         !missing_scopes(opener->scopes, output.read_scopes, implications).empty()) {
         return;
     }
-    if (stream->append(sse_event(output.line)) == BodyStream::Append::full &&
-        output.kind != OutputKind::notification) {
-        stream->close();  // a request to the client is not dropped silently: the client sees the stream end
-    }
+    // requests and list changes are not dropped silently: the client sees the stream end when full
+    append_to_stream(*stream, sse_event(output.line), coalesce_key_of(output), is_droppable_append(output));
 }
 
 void Endpoint::Impl::fed(const std::shared_ptr<Exchange>& exchange, bool awaits, std::optional<Headers::Field> announce,
@@ -1386,7 +1410,7 @@ void Endpoint::Impl::decide(Exchange& exchange, Output output) {
     // Streaming.
     if (output.kind != OutputKind::end) {
         exchange.steps.push_back(Step{Step::Kind::append, {}, exchange.stream, sse_event(output.line),
-                                      output.kind == OutputKind::notification});
+                                      is_droppable_append(output), coalesce_key_of(output)});
     }
     if (output.last) {
         exchange.phase = Phase::done;
@@ -1440,9 +1464,9 @@ void Endpoint::Impl::execute(const std::shared_ptr<Exchange>& exchange, Step& st
             return;
         }
         case Step::Kind::append:
-            // An answer is never dropped and never waits for a slow reader: the stream ends and the request is
-            // abandoned instead. A notification that does not fit is dropped.
-            if (step.stream->append(step.bytes) == BodyStream::Append::full && !step.droppable) step.stream->close();
+            // An answer or list change is never dropped and never waits for a slow reader: the stream ends and any
+            // exchange request is abandoned instead. Other notifications that do not fit are dropped.
+            append_to_stream(*step.stream, step.bytes, step.coalesce_key, step.droppable);
             return;
         case Step::Kind::end_stream: step.stream->end(); return;
         case Step::Kind::abandon_unit: {

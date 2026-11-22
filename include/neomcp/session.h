@@ -73,6 +73,7 @@
 #include <vector>
 
 #include "neomcp/authorization.h"
+#include "neomcp/change.h"
 #include "neomcp/json.h"
 #include "neomcp/mechanism.h"
 #include "neomcp/model.h"
@@ -156,6 +157,9 @@ struct Output {
     // needs (ResourceHost::read_scopes). A transport that writes it on a stream a request of its own opened with an
     // authorization (an HTTP GET) writes it only when that authorization holds them. Empty otherwise.
     std::vector<std::string> read_scopes;
+    // On a list-change notification (`OutputKind::notification` for tools, prompts or resources lists): which list
+    // changed, so transports can preserve and coalesce pending list changes instead of dropping them under backpressure.
+    std::optional<ChangeKind> list_change;
 };
 
 // Receives each output, with the same guarantees as a Sink: one thread at a time, never re-entrantly, never under a

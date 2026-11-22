@@ -100,8 +100,10 @@ struct EndpointOptions {
     // so that keep-alive comments can flow while it runs. Positive. Default 5 seconds.
     std::chrono::milliseconds stream_after{5000};
 
-    // The bytes an event stream holds for a reader that is slower than the server (see BodyStream). A notification
-    // that does not fit is dropped; an answer that does not fit ends the stream and abandons the request. At least 1.
+    // The bytes an event stream holds for a reader that is slower than the server (see BodyStream). Resource-update
+    // notifications that do not fit are dropped; list-change notifications (tools, prompts, resources) are kept and
+    // coalesced per list unless a single event itself exceeds this bound (which closes the stream), and an answer
+    // that does not fit ends the stream and abandons the request. At least 1.
     std::size_t max_stream_buffer_bytes = BodyStream::default_max_buffered_bytes;
 
     // When set, the endpoint is an OAuth protected resource (see neomcp/http/resource_server.h). Empty: no request
