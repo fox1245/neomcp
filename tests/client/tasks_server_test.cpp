@@ -5,6 +5,7 @@
 // register_task_tools), and one tool of the test's own that runs until it is stopped.
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -148,7 +149,10 @@ TEST_P(ClientTasksServer, WhatTheTaskWaitsOnReachesTheHandlersOnce) {
     const auto both = pair.client->call_tool("multi_input");
     ASSERT_TRUE(both) << both.error().message;
     EXPECT_EQ(text_of(*both), R"(first={"value":"ada"}, second={"value":"ada"})");
-    EXPECT_EQ(pair.asked(), (std::vector<std::string>{"What is the first value?", "What is the second value?"}));
+    // The two requests of one round reach the handlers once each; the handlers' pool may take them in either order.
+    std::vector<std::string> asked = pair.asked();
+    std::sort(asked.begin(), asked.end());
+    EXPECT_EQ(asked, (std::vector<std::string>{"What is the first value?", "What is the second value?"}));
     const auto confirmed = pair.client->call_tool("confirm_delete", json{{"filename", "a.txt"}});
     ASSERT_TRUE(confirmed) << confirmed.error().message;
     EXPECT_EQ(text_of(*confirmed), "Deleted (action=accept)");
