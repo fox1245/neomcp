@@ -137,7 +137,6 @@ Linux, shared libraries; versioned releases from 0.1.0.
 
 ## Not started
 
-- **Release 0.3.0**: the changes under "Unreleased" in CHANGELOG.md (interface change: `SamplingAnswer::content`).
 - **A listener that reads requests without holding a worker** (see "Open items"); planned when a user needs more
   connections than workers.
 - **Tasks of 2025-11-25 on the client** (the core protocol's tasks of that revision; the server serves them).
