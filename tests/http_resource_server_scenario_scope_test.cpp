@@ -458,7 +458,12 @@ TEST(ResourceServerScenarioScope, ASubscriptionIsOnlyToldOfTheResourcesItsAuthor
     const auto list_changed = [](const std::string& body) {
         return has_method(body, "notifications/tools/list_changed");
     };
-    ASSERT_TRUE(names_open->wait_until(list_changed));
+    const auto open_updated = [](const std::string& body) {
+        const auto uris = updated_resources(body);
+        return std::find(uris.begin(), uris.end(), "test://open") != uris.end();
+    };
+    ASSERT_TRUE(names_open->wait_until(
+        [&](const std::string& body) { return list_changed(body) && open_updated(body); }));
     ASSERT_TRUE(names_none->wait_until(list_changed));
     ASSERT_TRUE(names_both->wait_until([](const std::string& body) { return updated_resources(body).size() >= 2; }));
 
