@@ -11,6 +11,9 @@
 // - The mutex is never held across a call into the host (tools(), call(), the argument check) or across
 //   std::stop_source::request_stop(), whose stop callbacks run inline and may complete the call.
 // - Progress and log lines are dropped while the queue holds max_queued_notifications lines; responses never are.
+//   So are resource updates; a list change never is. A change notification in the queue stands for every later change
+//   of the same list or resource on the same connection or subscription until the drainer takes it, so the queue
+//   holds at most one list change per kind and per connection or subscription beyond the bound.
 // - A queued output of a call names the call, and the drainer skips it when the call was cancelled meanwhile: after
 //   a cancellation is received nothing more is written for that request, even what was queued before it.
 // - An input unit is open from the moment receive() takes it until the drainer pops its last output (its answer or
@@ -37,7 +40,9 @@
 //   never nest. A change is queued under mutex_ like any output. A subscription is a call in flight that becomes
 //   visible to changes in the same hold of mutex_ that queues its acknowledgement, so nothing precedes that; it ends
 //   through the paths of a call (cancellation, abandon(), close()) or when the host ends its feed, and the last two end
-//   it with outputs of its own, which a full queue never drops and close() keeps.
+//   it with outputs of its own, which a full queue never drops and close() keeps. A list change is put in the queue
+//   before the resource updates and the other notifications at its back that it may pass, never before a response,
+//   a request, a unit's last output, an earlier list change or its subscription's acknowledgement.
 // - A sink that throws closes the session. The exception goes only to the thread that reads: out of receive() when
 //   that thread was writing, also when it wrote through a Completion or CallControl a tool used inline during
 //   receive() (the exception is held and rethrown after the tool's frames are left). A tool's own thread that was
@@ -53,6 +58,7 @@
 #include <exception>
 #include <functional>
 #include <initializer_list>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -503,6 +509,20 @@ public:
     std::span<const profile::ProfilePtr> profiles() const noexcept { return profiles_; }
 
 private:
+    // What a change notification tells, and to whom: a list of one kind, or the content of one resource, for the
+    // connection or for one subscription.
+    struct ChangeKey {
+        const CallState* subscription = nullptr;  // the subscription it is written on; null: the connection
+        ChangeKind kind = ChangeKind::tools_list;
+        std::string uri;  // ChangeKind::resource_updated: the resource; empty otherwise
+
+        friend bool operator<(const ChangeKey& a, const ChangeKey& b) {
+            if (a.subscription != b.subscription) return std::less<const CallState*>()(a.subscription, b.subscription);
+            if (a.kind != b.kind) return a.kind < b.kind;
+            return a.uri < b.uri;
+        }
+    };
+
     struct Queued {
         Output output;                     // its unit number is filled in from `unit` when it is queued
         std::shared_ptr<CallState> owner;  // the call the output belongs to; null for others
@@ -512,6 +532,8 @@ private:
         // A notification of the connection that this resource was updated: written only while the connection still
         // watches it.
         std::optional<std::string> watched{};
+        // A change notification: what it tells (see pending_changes_). Empty for every other output.
+        std::optional<ChangeKey> change{};
     };
 
     struct Connection {
@@ -695,8 +717,24 @@ private:
     void emit_batch(const Batch& batch, Writer writer);
 
     // ---- output
+    // Whether an output may be queued: the session is open and its unit not finished. Fills in the output's unit
+    // number and marks the unit finished when the output is its last. With mutex_ held.
+    bool admit(Queued& queued);
     // Puts an output in the queue unless the session closed or its unit finished; with mutex_ held.
     bool enqueue(Queued queued);
+    // Whether a change is to be queued for `key`: no notification of the same key waits to be written, and an update
+    // finds the queue below max_queued_notifications (a list change is queued whatever the queue holds). With mutex_
+    // held.
+    bool takes_change(const ChangeKey& key) const;
+    // Queues a change notification (Queued::change set) as enqueue() does: an update at the back, a list change before
+    // the queued outputs at the back of the queue that it may pass (see may_pass()). With mutex_ held.
+    bool enqueue_change(Queued queued);
+    // Whether a list change for `subscription` (null: the connection) may be written before `earlier`, an output
+    // queued before it: a resource update, or a notification that tells nothing of a list and is not of the same
+    // subscription. Never a response, a request, a unit's last output or another list change.
+    static bool may_pass(const Queued& earlier, const CallState* subscription);
+    // Empties the queue, and with it what is pending of the change notifications; with mutex_ held.
+    void clear_queue(std::deque<Queued> kept = {});
     // Queues an output and drains; when it is dropped, tells the idle callback what a drain would have told it.
     void push(std::unique_lock<std::mutex>& lock, Queued queued, Writer writer);
     void emit(Queued queued, Writer writer);
@@ -738,6 +776,9 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable written_;
     std::deque<Queued> queue_;
+    // The change notifications in queue_, one per key: a change whose key is here adds nothing. A key leaves when the
+    // drainer takes its notification from the queue (before writing it) or the queue is emptied.
+    std::set<ChangeKey> pending_changes_;
     bool draining_ = false;
     std::thread::id drainer_;
     bool closed_ = false;
@@ -2913,9 +2954,14 @@ void SessionCore::on_change(const Change& change) {
     std::unique_lock<std::mutex> lock(mutex_);
     if (closed_ || watch_ != Watch::registered) return;
     bool queued = false;
-    // The connection, once its client is ready; an update only when the connection watches the resource. Like a
-    // progress notification, a change notification is dropped while the queue is full.
+    // A notification tells the client that something changed since it last looked. One that waits to be written says
+    // so for every later change of the same list, or of the same resource, on the same connection or subscription:
+    // such a change adds nothing. An update is dropped, as a progress notification is, while the queue is full; a list
+    // change never is (there is at most one per kind and per connection or subscription), and it is written before the
+    // updates queued at the back of the queue (see enqueue_change()).
     const bool updated = change.kind == ChangeKind::resource_updated;
+    const std::string uri = updated ? change.uri : std::string();
+    // The connection, once its client is ready; an update only when the connection watches the resource.
     bool wanted = false;
     std::span<const std::string> needed;  // an update's: what reading the resource needs
     if (connection_ && connection_->ready && connection_->served->feed->delivery() == FeedDelivery::connection) {
@@ -2926,9 +2972,12 @@ void SessionCore::on_change(const Change& change) {
             needed = found->second;
         }
     }
-    if (wanted && queue_.size() < options_.max_queued_notifications) {
+    if (wanted) {
+        ChangeKey key{nullptr, change.kind, uri};
         const Served& served = *connection_->served;
-        if (auto line = feed_line(served, served.feed->notification(change))) {
+        std::optional<std::string> line;
+        if (takes_change(key)) line = feed_line(served, served.feed->notification(change));
+        if (line) {
             Queued notice{make_output(std::move(*line), OutputKind::notification, false, RefusalReason::none,
                                       served.profile),
                           nullptr, nullptr};
@@ -2936,14 +2985,16 @@ void SessionCore::on_change(const Change& change) {
                 notice.output.read_scopes.assign(needed.begin(), needed.end());
                 notice.watched = change.uri;
             }
-            queued = enqueue(std::move(notice));
+            notice.change = std::move(key);
+            queued = enqueue_change(std::move(notice));
         }
     }
     // Every open subscription that asked for it, tagged with its id.
     for (const auto& entry : in_flight_) {
         const std::shared_ptr<CallState>& call = entry.second;
         if (call->kind != CallKind::subscription || !call->active || !call->filter.wants(change)) continue;
-        if (queue_.size() >= options_.max_queued_notifications) break;
+        ChangeKey key{call.get(), change.kind, uri};
+        if (!takes_change(key)) continue;
         const Served& served = *call->served;
         FeedMessage message = served.feed->notification(change);
         served.feed->tag(message.params, call->id);
@@ -2951,7 +3002,9 @@ void SessionCore::on_change(const Change& change) {
             Output output =
                 make_output(std::move(*line), OutputKind::notification, false, RefusalReason::none, call->profile);
             output.long_lived = true;
-            queued = enqueue(Queued{std::move(output), call, call->unit}) || queued;
+            Queued notice{std::move(output), call, call->unit};
+            notice.change = std::move(key);
+            queued = enqueue_change(std::move(notice)) || queued;
         }
     }
     if (queued) drain(lock, Writer::host);
@@ -3759,7 +3812,7 @@ void SessionCore::log(const std::shared_ptr<CallState>& call, LogLevel level, js
 // ---------------------------------------------------------------------------------------------------------------
 // Output
 
-bool SessionCore::enqueue(Queued queued) {
+bool SessionCore::admit(Queued& queued) {
     if (closed_ || broken_) return false;  // a sink that threw is not called again, not even before close() ran
     if (queued.unit) {
         UnitState& unit = *queued.unit;
@@ -3767,8 +3820,48 @@ bool SessionCore::enqueue(Queued queued) {
         queued.output.unit = unit.id;
         if (queued.output.last) unit.finished = true;
     }
+    return true;
+}
+
+bool SessionCore::enqueue(Queued queued) {
+    if (!admit(queued)) return false;
     queue_.push_back(std::move(queued));
     return true;
+}
+
+bool SessionCore::takes_change(const ChangeKey& key) const {
+    if (pending_changes_.find(key) != pending_changes_.end()) return false;
+    return key.kind != ChangeKind::resource_updated || queue_.size() < options_.max_queued_notifications;
+}
+
+bool SessionCore::may_pass(const Queued& earlier, const CallState* subscription) {
+    if (earlier.output.kind != OutputKind::notification || earlier.output.last) return false;
+    if (earlier.change) return earlier.change->kind == ChangeKind::resource_updated;
+    return subscription == nullptr || earlier.owner.get() != subscription;
+}
+
+bool SessionCore::enqueue_change(Queued queued) {
+    if (!admit(queued)) return false;
+    ChangeKey key = *queued.change;
+    // A list change says that the list changed since the client last read it, which holds as much before the updates
+    // queued earlier as after them: it is not held behind them. It stays behind every response (one may carry the
+    // list as it was), behind the list changes queued earlier (they keep their order) and behind its subscription's
+    // acknowledgement.
+    auto at = queue_.end();
+    if (key.kind != ChangeKind::resource_updated) {
+        while (at != queue_.begin() && may_pass(*std::prev(at), key.subscription)) --at;
+    }
+    queue_.insert(at, std::move(queued));
+    pending_changes_.insert(std::move(key));
+    return true;
+}
+
+void SessionCore::clear_queue(std::deque<Queued> kept) {
+    queue_ = std::move(kept);
+    pending_changes_.clear();
+    for (const Queued& queued : queue_) {
+        if (queued.change) pending_changes_.insert(*queued.change);
+    }
 }
 
 void SessionCore::push(std::unique_lock<std::mutex>& lock, Queued queued, Writer writer) {
@@ -3844,6 +3937,8 @@ void SessionCore::drain(std::unique_lock<std::mutex>& lock, Writer writer) {
     while (!queue_.empty()) {
         Queued queued = std::move(queue_.front());
         queue_.pop_front();
+        // From here a change of the same key is one this notification may not tell of: it is queued anew.
+        if (queued.change) pending_changes_.erase(*queued.change);
         if (queued.unit && queued.output.last) {
             // The unit ends here: from now on close() leaves it alone and its number may be used again.
             const auto open = units_.find(queued.unit->id);
@@ -3852,10 +3947,13 @@ void SessionCore::drain(std::unique_lock<std::mutex>& lock, Writer writer) {
         if (queued.owner && queued.owner->cancelled) continue;
         if (queued.unit && queued.unit->abandoned) continue;
         // An update of a resource the connection stopped watching after it was queued (unsubscribed, or ended by a
-        // later authorization) is not written.
-        if (queued.watched &&
-            (!connection_ || connection_->watched.find(*queued.watched) == connection_->watched.end())) {
-            continue;
+        // later authorization) is not written. One that is written carries what reading the resource needs as the
+        // watch says now: the update may stand for later ones of the same resource, under a watch made since.
+        if (queued.watched) {
+            if (!connection_) continue;
+            const auto found = connection_->watched.find(*queued.watched);
+            if (found == connection_->watched.end()) continue;
+            queued.output.read_scopes.assign(found->second.begin(), found->second.end());
         }
         writing_ = queued.unit.get();
         lock.unlock();
@@ -3875,7 +3973,7 @@ void SessionCore::drain(std::unique_lock<std::mutex>& lock, Writer writer) {
     if (failure) {
         // A sink that throws cannot carry the connection any further: it is not called again.
         broken_ = true;
-        queue_.clear();
+        clear_queue();
         lock.unlock();
         close();
         lock.lock();
@@ -3986,7 +4084,7 @@ void SessionCore::close() {
                 if (queued.essential) kept.push_back(std::move(queued));
             }
         }
-        queue_ = std::move(kept);
+        clear_queue(std::move(kept));
         // The session tears down its subscriptions: each ends gracefully.
         std::vector<Queued> ending;
         for (auto& entry : in_flight_) {

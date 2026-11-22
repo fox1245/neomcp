@@ -51,8 +51,13 @@
 //   is abandoned, and when the session closes or the host stops reporting: then the session ends it gracefully, with
 //   a notifications/cancelled that names the listen request and then the listen request's result, the unit's last
 //   output.
-// A change notification is dropped, as a progress notification is, while the output queue is full. Open subscriptions
-// do not keep the session from being idle.
+// A notification tells the client that something changed since it last looked, so one that waits in the output queue
+// stands for every later change of the same list, or of the same resource, on the same connection or subscription:
+// such a change adds nothing. A resource update is dropped, as a progress notification is, while the output queue is
+// full; a list change never is, and it is written before the resource updates (and other notifications) queued before
+// it at the back of the queue, never before a response, an earlier list change or its subscription's acknowledgement.
+// A client whose updates were dropped is not told so: none of the revisions has a notification that says to read
+// everything again. Open subscriptions do not keep the session from being idle.
 #pragma once
 
 #include <chrono>
@@ -258,9 +263,10 @@ struct SessionOptions {
     std::size_t max_message_bytes = SessionDefaults::max_message_bytes;
     // A line whose arrays and objects nest deeper is answered with Invalid Request and not parsed. Default 128.
     std::size_t max_nesting_depth = SessionDefaults::max_nesting_depth;
-    // When this many lines already wait to be written, a new progress or log notification is dropped (responses
-    // and errors never are), so that a tool reporting faster than the client reads cannot grow the queue without
-    // limit. Zero is an error. Default 1024.
+    // When this many lines already wait to be written, a new progress, log or resource update notification is
+    // dropped (responses and errors never are), so that a tool or host reporting faster than the client reads cannot
+    // grow the queue without limit. A list change is never dropped: the queue holds at most one per kind and per
+    // connection or subscription beyond the bound (see Change notifications above). Zero is an error. Default 1024.
     std::size_t max_queued_notifications = SessionDefaults::max_queued_notifications;
 
     // The bytes of what a handshake says about the client, which the connection keeps for its whole life: its

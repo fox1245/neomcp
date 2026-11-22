@@ -5,6 +5,7 @@
 // reports changes on the thread a test chooses.
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -119,6 +120,7 @@ public:
         if (output.kind == neomcp::OutputKind::end) return;  // the end of a unit has no line
         std::unique_lock lock(mutex_);
         const bool hold = holding_ && is_update_of(output.line, open_resource);
+        scopes_.push_back(std::move(output.read_scopes));
         lines_.push_back(std::move(output.line));
         changed_.notify_all();
         if (!hold) return;
@@ -162,6 +164,16 @@ public:
         return count;
     }
 
+    // What each written update of `uri` said reading the resource needs (Output::read_scopes).
+    std::vector<std::vector<std::string>> scopes_of(const std::string& uri) {
+        std::lock_guard lock(mutex_);
+        std::vector<std::vector<std::string>> out;
+        for (std::size_t i = 0; i < lines_.size(); ++i) {
+            if (is_update_of(lines_[i], uri)) out.push_back(scopes_[i]);
+        }
+        return out;
+    }
+
 private:
     static bool is_update_of(const std::string& line, const std::string& uri) {
         if (line.empty()) return false;
@@ -172,6 +184,7 @@ private:
     std::mutex mutex_;
     std::condition_variable changed_;
     std::vector<std::string> lines_;
+    std::vector<std::vector<std::string>> scopes_;  // each line's Output::read_scopes
     bool holding_ = false;
     bool held_ = false;
 };
@@ -269,6 +282,51 @@ TEST(SessionSubscription, AnUpdateQueuedBeforeTheWatchEndedIsNotWrittenAfter) {
     ASSERT_TRUE(rig.written.wait_answer(20));
     EXPECT_EQ(rig.written.updates_of(open_resource), 1);
     EXPECT_EQ(rig.written.updates_of(secret), 0) << "the update queued for the ended watch is not written";
+}
+
+// An update reported again while one of the same resource waits to be written adds nothing: the one that waits stands
+// for it, and is not written once a unit ended the watch.
+TEST(SessionSubscription, AnUpdateRepeatedBeforeTheWatchEndedIsNotWrittenAfter) {
+    Rig rig;
+    rig.written.hold_next_open_update();
+    std::thread writer([&rig] { rig.host.report(open_resource); });
+    struct Join {
+        std::thread& thread;
+        Written& written;
+        ~Join() {
+            written.release();
+            if (thread.joinable()) thread.join();
+        }
+    } const join{writer, rig.written};
+    ASSERT_TRUE(rig.written.wait_held());
+    for (int round = 0; round < 3; ++round) rig.host.report(secret);
+    rig.send(Peer::make_request(*rig.profile, neomcp::RequestId(20), "ping"), rig.narrow);
+    rig.written.release();
+    ASSERT_TRUE(rig.written.wait_answer(20));
+    EXPECT_EQ(rig.written.updates_of(secret), 0) << "the update that stands for the others is not written either";
+}
+
+// The update that stands for later ones is written once, with what reading the resource needs, for the transport to
+// check against the stream it writes on.
+TEST(SessionSubscription, AnUpdateThatStandsForLaterOnesCarriesWhatReadingTheResourceNeeds) {
+    Rig rig;
+    rig.written.hold_next_open_update();
+    std::thread writer([&rig] { rig.host.report(open_resource); });
+    struct Join {
+        std::thread& thread;
+        Written& written;
+        ~Join() {
+            written.release();
+            if (thread.joinable()) thread.join();
+        }
+    } const join{writer, rig.written};
+    ASSERT_TRUE(rig.written.wait_held());
+    for (int round = 0; round < 3; ++round) rig.host.report(secret);
+    rig.written.release();
+    rig.ping(rig.broad, 21);
+    const auto scopes = rig.written.scopes_of(secret);
+    ASSERT_EQ(scopes.size(), 1u);
+    EXPECT_EQ(scopes.front(), (std::vector<std::string>{"secret:read"}));
 }
 
 }  // namespace

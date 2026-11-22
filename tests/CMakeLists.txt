@@ -173,8 +173,9 @@ target_include_directories(neomcp_input_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR
 neomcp_configure_target(neomcp_input_test)
 gtest_discover_tests(neomcp_input_test DISCOVERY_TIMEOUT 120)
 
-# The change feed in the session engine, under both mechanisms.
-add_executable(neomcp_feed_test feed_test.cpp)
+# The change feed in the session engine, under both mechanisms, and a burst of changes behind a held writer on every
+# built-in revision.
+add_executable(neomcp_feed_test feed_test.cpp feed_burst_test.cpp)
 target_link_libraries(neomcp_feed_test PRIVATE neomcp::core GTest::gtest_main Threads::Threads)
 neomcp_configure_target(neomcp_feed_test)
 gtest_discover_tests(neomcp_feed_test DISCOVERY_TIMEOUT 120)
