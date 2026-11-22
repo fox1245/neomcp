@@ -3,6 +3,14 @@
 Versions follow the rule of the package configuration: before 1.0, a release with a new minor number may change the
 interface, and a new patch number does not.
 
+## Unreleased
+
+### Server
+
+- A request whose version header names 2026-07-28, which has no sessions, is served on its own whatever session header
+  it carries: the header does not route it to a session (a live one included), and its answer carries none. A GET or
+  DELETE of that revision is answered 405. The revisions that keep sessions still route by the header.
+
 ## 0.2.0
 
 The interface changed in places (see "Changed"); a project built against 0.1 is rebuilt against 0.2.

@@ -506,8 +506,12 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
     Response ended_response(const profile::Profile* rules) const;  // the session ended, or the endpoint stops
     static const profile::Profile* governing(const Exchange& exchange, const Output* output);
     bool version_header_ok(const Headers& headers) const;
+    // The profile the request's version header names: one field, naming a revision served here; null otherwise.
+    const profile::Profile* named_profile(const Headers& headers) const;
 
-    // The session id a request names: how many fields name one, and the value of the last.
+    // The session id a request names: how many fields name one, and the value of the last. A request whose version
+    // header names a revision whose transport has no session header names none, whatever fields it carries: that
+    // revision has no sessions, and its requests are served each on its own.
     struct SessionClaim {
         std::size_t count = 0;
         std::string_view id;
@@ -656,8 +660,28 @@ bool Endpoint::Impl::version_header_ok(const Headers& headers) const {
                        [&](const profile::ProfilePtr& profile) { return profile->revision() == value; });
 }
 
+const profile::Profile* Endpoint::Impl::named_profile(const Headers& headers) const {
+    const profile::Profile* named = nullptr;
+    std::size_t count = 0;
+    for (const std::string& name : version_headers) {
+        for (const std::string_view field : headers.get_all(name)) {
+            ++count;
+            const std::string_view value = trim(field);
+            named = nullptr;
+            for (const profile::ProfilePtr& profile : profiles) {
+                if (profile->revision() == value) named = profile.get();
+            }
+        }
+    }
+    return count == 1 ? named : nullptr;
+}
+
 Endpoint::Impl::SessionClaim Endpoint::Impl::session_claim(const Headers& headers) const {
     SessionClaim claim;
+    if (const profile::Profile* named = named_profile(headers);
+        named != nullptr && !named->streamable_http()->session_header) {
+        return claim;
+    }
     for (const std::string& name : session_headers) {
         for (const std::string_view field : headers.get_all(name)) {
             ++claim.count;

@@ -14,7 +14,9 @@
 //      415), an Accept header that admits application/json or text/event-stream when it has one (406 otherwise), and
 //      a body within the server's max_message_bytes (413).
 //   4. A POST that names a session (by the session header of any enabled revision) is fed to that session; a session
-//      id that names no live session is answered 404. A POST without one gets a fresh session of its own. When its
+//      id that names no live session is answered 404. A request whose version header names a revision whose transport
+//      has no session header names no session, whatever fields it carries (that revision has no sessions; its GET and
+//      DELETE are answered 405). A POST without one gets a fresh session of its own. When its
 //      input opens a connection under a revision that has a session header, the session is kept under a new id: 32
 //      random bytes from the operating system, in hexadecimal, sent in that header with the answer. Otherwise the
 //      session ends with the request.

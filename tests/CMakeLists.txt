@@ -446,6 +446,14 @@ target_link_libraries(neomcp_http_unused_session_test PRIVATE neomcp::http neomc
 neomcp_configure_target(neomcp_http_unused_session_test)
 gtest_discover_tests(neomcp_http_unused_session_test DISCOVERY_TIMEOUT 120)
 
+# The session header on a request of the revision without sessions, and on the revisions that keep them.
+add_executable(neomcp_http_session_header_era_test http_session_header_era_test.cpp)
+target_link_libraries(neomcp_http_session_header_era_test
+    PRIVATE neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)
+target_include_directories(neomcp_http_session_header_era_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+neomcp_configure_target(neomcp_http_session_header_era_test)
+gtest_discover_tests(neomcp_http_session_header_era_test DISCOVERY_TIMEOUT 120)
+
 # The bytes a legacy session keeps for the resources its client watches.
 add_executable(neomcp_http_watch_bytes_test http_watch_bytes_test.cpp)
 target_link_libraries(neomcp_http_watch_bytes_test PRIVATE neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)
