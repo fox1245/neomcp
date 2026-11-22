@@ -267,8 +267,14 @@ TEST_P(ServerEndToEnd, SignsInAtTheNewAuthorizationServerAfterTheServerChangedIt
     EXPECT_EQ(grants_of(world.second, "authorization_code"), 1u);
     ASSERT_EQ(world.second.access_tokens().size(), 1u);
     const std::string new_token = world.second.access_tokens().front();
-    EXPECT_EQ(authorized(world).back().authorization, "Bearer " + new_token);
-    EXPECT_EQ(authorized(world).back().status, 200);
+    // The call went out with the new token and was answered. (A notification the client sends after a new handshake
+    // may reach the server after it, so the call is found by its method, not by its place in the log.)
+    const std::vector<Seen> with_tokens = authorized(world);
+    const auto call = std::find_if(with_tokens.rbegin(), with_tokens.rend(),
+                                   [](const Seen& one) { return one.rpc_method == "tools/call"; });
+    ASSERT_NE(call, with_tokens.rend());
+    EXPECT_EQ(call->authorization, "Bearer " + new_token);
+    EXPECT_EQ(call->status, 200);
     EXPECT_EQ(world.person.prompts().size(), 2u);
     // Where the revision keeps sessions (the client made a handshake), the session belongs to the principal of the token
     // that opened it: the new token is another principal, so the server answers the old session 404 and the client
