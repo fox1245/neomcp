@@ -29,6 +29,8 @@ interface, and a new patch number does not.
   that does not fit.
 - `ClientOptions::state_retry_first_delay` and `state_retry_max_delay` may not exceed
   `ClientDefaults::state_retry_delay_limit` (1 hour); `Client::open` fails with `invalid_options` for more.
+- Older transport of events over HTTP: an endpoint event longer than `max_message_bytes` ends the connection with
+  that reason (it was reported as a first event of another type).
 
 ## 0.2.0
 

@@ -341,6 +341,12 @@ private:
 
     // The first event of the stream: the endpoint event, or the end of the connection being made.
     void first_event(const TransferEvent& event) {
+        if (event.data.size() > max_message_bytes_) {
+            // The transfer thread stopped the stream there, and posted what it had read as an event without a type.
+            loop_->remove(stream_unit_);
+            connection_failed(Failure{std::nullopt, "an event of the stream exceeds max_message_bytes"});
+            return;
+        }
         if (event.type != names_.endpoint) {
             loop_->remove(stream_unit_);
             connection_failed(Failure{std::nullopt, "the event stream's first event is not the endpoint event"});

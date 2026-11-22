@@ -154,6 +154,4 @@ Linux, shared libraries; versioned releases from 0.1.0.
 - Measurements not yet taken: the cost of creating a session per request under 2026-07-28, and of computing the
   mirrored parameter headers per call.
 - Windows: the tests that drive raw sockets are skipped.
-- Client: the bounds of the HTTP+SSE transport (its endpoint event's time, its stream's size, idle and connect
-  bounds) are not yet tested at their edges.
 - Client: a client fixture of the conformance suite over stdio (the suite's client scenarios run over HTTP).
