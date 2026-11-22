@@ -3,7 +3,9 @@
 Versions follow the rule of the package configuration: before 1.0, a release with a new minor number may change the
 interface, and a new patch number does not.
 
-## Unreleased
+## 0.4.0
+
+Additive changes on the server and client; code built against 0.3 builds cleanly against 0.4.
 
 ### Server
 
