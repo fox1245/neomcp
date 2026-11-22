@@ -7,6 +7,15 @@ interface, and a new patch number does not.
 
 ### Server
 
+- Authorization: a resource subscription of a session (2025-03-26 to 2025-11-25) lasts while the session's requests
+  may read the resource. A later request of the session, a POST or the GET that opens its stream, whose token (of the
+  same principal) lacks a scope reading a subscribed resource needs ends that subscription before the request is
+  served, and an update of it not yet written is dropped; the client subscribes again with a token that holds the
+  scopes. The stream of a session carries only the updates its own token may read. With fixed tokens, the stream a
+  replacement ended and the client opens again counts as such a request.
+- `Session::present` takes the authorization of a request that belongs to the connection but brings the session no
+  input (the GET that opens a session's stream), with the same effect on subscriptions as a unit that comes with it;
+  `Output::read_scopes` names, on an update notification of the connection, the scopes reading the resource needs.
 - A request whose version header names 2026-07-28, which has no sessions, is served on its own whatever session header
   it carries: the header does not route it to a session (a live one included), and its answer carries none. A GET or
   DELETE of that revision is answered 405. The revisions that keep sessions still route by the header.

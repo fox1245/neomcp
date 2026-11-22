@@ -55,7 +55,9 @@
 #include <initializer_list>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <stop_token>
 #include <thread>
@@ -475,6 +477,7 @@ public:
     bool receive(std::optional<UnitId> unit, std::string_view input, std::span<const HeaderField> headers,
                  std::shared_ptr<const Authorization> authorization);
     void abandon(UnitId unit);
+    void present(std::shared_ptr<const Authorization> authorization);
     void close();
     bool idle() const;
     profile::ProfilePtr connection_profile() const;
@@ -506,6 +509,9 @@ private:
         Unit unit;                         // the unit it belongs to; null when it belongs to the connection
         // An acknowledgement or a graceful end of a subscription: never dropped for a full queue, and kept by close().
         bool essential = false;
+        // A notification of the connection that this resource was updated: written only while the connection still
+        // watches it.
+        std::optional<std::string> watched{};
     };
 
     struct Connection {
@@ -513,10 +519,11 @@ private:
         std::shared_ptr<const ClientIdentity> client = no_client();  // never null; bounded by max_client_info_bytes
         LogLevel log_level = LogLevel::info;
         // Under a change feed that delivers to the connection: whether the client said it is ready, and the
-        // resources whose updates it watches.
+        // resources whose updates it watches, each with the scopes reading it needs (ResourceHost::read_scopes, whose
+        // span stays valid while the session uses the host).
         bool ready = false;
-        std::set<std::string, std::less<>> watched;
-        std::size_t watched_bytes = 0;  // the sum of the lengths of `watched`
+        std::map<std::string, std::span<const std::string>, std::less<>> watched;
+        std::size_t watched_bytes = 0;  // the sum of the lengths of the URIs of `watched`
     };
 
     // Where the session stands with the host's changes. Only the reading thread registers.
@@ -598,6 +605,10 @@ private:
     Answer limit_refusal(const RequestId& id, std::string message, const Served& served) const;
 
     // ---- scopes (neomcp/authorization.h)
+    // A request of the connection brought `presented` (a unit, or Session::present): every resource the connection
+    // watches that it cannot read is no longer watched. With mutex_ held; never calls the host (the connection keeps
+    // what reading each resource needs).
+    void narrow(const std::shared_ptr<const Authorization>& presented);
     // Whether the scopes items declare are checked for the requests of a unit: only where it came with an
     // authorization. Without one there is no identity to check, and nothing is.
     static bool checks_scopes(const Claims& claims) noexcept;
@@ -749,6 +760,8 @@ private:
     Watch watch_ = Watch::none;
     ChangeRegistration registration_;  // reset without the lock held
     std::size_t listening_ = 0;        // the calls in flight that are open subscriptions
+    // The authorization the latest request of the connection brought (see narrow()); null before any did.
+    std::shared_ptr<const Authorization> presented_;
 };
 
 // The listener a session registers with its host: it holds the session weakly, so that a registration the host keeps
@@ -794,6 +807,30 @@ CompletionState::~CompletionState() {
 // Scopes
 
 bool SessionCore::checks_scopes(const Claims& claims) noexcept { return claims.authorization != nullptr; }
+
+void SessionCore::narrow(const std::shared_ptr<const Authorization>& presented) {
+    // The same authorization as the latest ended what it cannot read when it came, and every watch added since was
+    // checked against it (the unit that added it brought it): there is nothing more to end.
+    if (presented == presented_) return;
+    presented_ = presented;
+    if (!connection_) return;
+    auto& watched = connection_->watched;
+    for (auto at = watched.begin(); at != watched.end();) {
+        if (missing_scopes(presented->scopes, at->second, options_.scope_implications).empty()) {
+            ++at;
+            continue;
+        }
+        connection_->watched_bytes -= at->first.size();
+        at = watched.erase(at);
+    }
+}
+
+void SessionCore::present(std::shared_ptr<const Authorization> authorization) {
+    if (!authorization) return;
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (closed_) return;
+    narrow(authorization);
+}
 
 template <class Find>
 std::optional<Answer> SessionCore::scope_refusal(const RequestId& id, const Place& place, const Served& served,
@@ -1023,6 +1060,14 @@ bool SessionCore::receive(std::optional<UnitId> number, std::string_view input,
             units_.emplace(*number, unit);
         }
         reading_thread_ = std::this_thread::get_id();
+        // Before anything of the unit is read: no update the unit's authorization cannot read is queued from here on. A
+        // unit without one checks nothing (and may watch what it likes), so the next one with an authorization checks
+        // every watch again.
+        if (authorization) {
+            narrow(authorization);
+        } else {
+            presented_.reset();
+        }
     }
     std::exception_ptr failure;
     bool awaits = false;
@@ -2483,10 +2528,17 @@ std::optional<Answer> SessionCore::on_watch(const Message& request, const FeedRe
         !reported().resource_updates) {
         return method_not_found(request, served);
     }
-    // Being told of a resource's updates needs what reading it needs.
-    if (auto refusal = scope_refusal(id, place, served, [&] { return resources->read_scopes(asked.uri); })) {
-        return refusal;
+    // Being told of a resource's updates needs what reading it needs. The connection keeps what that is with the URI:
+    // a later unit whose authorization lacks it ends the watch (see narrow()).
+    std::span<const std::string> needed;
+    try {
+        needed = resources->read_scopes(asked.uri);
+    } catch (...) {
+        return served_answer(make_error(id, error_code::internal_error,
+                                        "Internal error: the scopes the request needs could not be found"),
+                             served);
     }
+    if (auto refusal = scope_refusal(id, place, served, [&] { return needed; })) return refusal;
     if (asked.action == FeedRequest::Action::watch) {
         // Bounded before the URI reaches the host, or an answer that would repeat it. A longer URI is never watched,
         // so unwatching one changes nothing and needs no bound.
@@ -2523,7 +2575,7 @@ std::optional<Answer> SessionCore::on_watch(const Message& request, const FeedRe
                 // Removing a URI the connection does not watch changes nothing, and is not an error.
                 const auto found = watched.find(asked.uri);
                 if (found != watched.end()) {
-                    bytes -= found->size();
+                    bytes -= found->first.size();
                     watched.erase(found);
                 }
             } else if (watched.find(asked.uri) == watched.end()) {
@@ -2533,7 +2585,7 @@ std::optional<Answer> SessionCore::on_watch(const Message& request, const FeedRe
                            asked.uri.size() > options_.max_watched_bytes - bytes) {
                     too_many_bytes = true;
                 } else {
-                    watched.insert(asked.uri);
+                    watched.emplace(asked.uri, needed);
                     bytes += asked.uri.size();
                 }
             }
@@ -2863,15 +2915,28 @@ void SessionCore::on_change(const Change& change) {
     bool queued = false;
     // The connection, once its client is ready; an update only when the connection watches the resource. Like a
     // progress notification, a change notification is dropped while the queue is full.
-    if (connection_ && connection_->ready && connection_->served->feed->delivery() == FeedDelivery::connection &&
-        (change.kind != ChangeKind::resource_updated ||
-         connection_->watched.find(change.uri) != connection_->watched.end()) &&
-        queue_.size() < options_.max_queued_notifications) {
+    const bool updated = change.kind == ChangeKind::resource_updated;
+    bool wanted = false;
+    std::span<const std::string> needed;  // an update's: what reading the resource needs
+    if (connection_ && connection_->ready && connection_->served->feed->delivery() == FeedDelivery::connection) {
+        if (!updated) {
+            wanted = true;
+        } else if (const auto found = connection_->watched.find(change.uri); found != connection_->watched.end()) {
+            wanted = true;
+            needed = found->second;
+        }
+    }
+    if (wanted && queue_.size() < options_.max_queued_notifications) {
         const Served& served = *connection_->served;
         if (auto line = feed_line(served, served.feed->notification(change))) {
-            queued = enqueue(Queued{make_output(std::move(*line), OutputKind::notification, false, RefusalReason::none,
-                                                served.profile),
-                                    nullptr, nullptr});
+            Queued notice{make_output(std::move(*line), OutputKind::notification, false, RefusalReason::none,
+                                      served.profile),
+                          nullptr, nullptr};
+            if (updated) {
+                notice.output.read_scopes.assign(needed.begin(), needed.end());
+                notice.watched = change.uri;
+            }
+            queued = enqueue(std::move(notice));
         }
     }
     // Every open subscription that asked for it, tagged with its id.
@@ -3784,6 +3849,12 @@ void SessionCore::drain(std::unique_lock<std::mutex>& lock, Writer writer) {
         }
         if (queued.owner && queued.owner->cancelled) continue;
         if (queued.unit && queued.unit->abandoned) continue;
+        // An update of a resource the connection stopped watching after it was queued (unsubscribed, or ended by a
+        // later authorization) is not written.
+        if (queued.watched &&
+            (!connection_ || connection_->watched.find(*queued.watched) == connection_->watched.end())) {
+            continue;
+        }
         writing_ = queued.unit.get();
         lock.unlock();
         try {
@@ -4008,6 +4079,11 @@ bool Session::receive(UnitId unit, std::string_view input, std::span<const Heade
 void Session::abandon(UnitId unit) {
     const auto core = core_;
     core->abandon(unit);
+}
+
+void Session::present(std::shared_ptr<const Authorization> authorization) {
+    const auto core = core_;
+    core->present(std::move(authorization));
 }
 
 void Session::close() {

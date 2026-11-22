@@ -343,12 +343,14 @@ inline ServerOptions server_options() {
     return options;
 }
 
-// An HttpServer on a loopback port with authorization, over the items above and a table validator.
+// An HttpServer on a loopback port with authorization, over the items above, those `more` registers, and a table
+// validator.
 struct Harness {
     explicit Harness(std::function<void(HttpServerOptions&)> tweak = {},
-                     std::function<void(ServerOptions&)> tweak_server = {})
+                     std::function<void(ServerOptions&)> tweak_server = {}, std::function<void(Server&)> more = {})
         : server(make_server_options(std::move(tweak_server))) {
         register_items(server, items);
+        if (more) more(server);
         HttpServerOptions options = quick_options();
         options.authorization = resource_options(table, clock);
         if (tweak) tweak(options);

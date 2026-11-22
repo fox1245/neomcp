@@ -46,7 +46,10 @@
 // Authorization: with EndpointOptions::authorization set, the endpoint is an OAuth protected resource. Between the
 // method check (step 2, for any other method than POST, GET and DELETE) and the rest, every request needs a valid
 // Bearer token, and a session belongs to the principal of the request that opened it; neomcp/http/resource_server.h
-// says what is checked and answered. The metadata document is served by metadata_handler(), on metadata_path().
+// says what is checked and answered. A session's subscriptions to resources last while its requests may read them: a
+// request of the session (a POST, or the GET that opens its stream) whose authorization cannot read a subscribed
+// resource ends that subscription (Session::present), and the session's stream carries only the updates the
+// authorization that opened it may read. The metadata document is served by metadata_handler(), on metadata_path().
 // With EndpointOptions::fixed_tokens set instead, the tokens are a table the application gives, without an
 // authorization server and without a metadata document (see neomcp/http/fixed_tokens.h).
 //

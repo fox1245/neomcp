@@ -297,7 +297,8 @@ struct Endpoint::Impl : std::enable_shared_from_this<Endpoint::Impl> {
         std::deque<Feed> inputs;
         std::map<UnitId, std::shared_ptr<Exchange>> exchanges;
         std::shared_ptr<BodyStream> connection_stream;
-        // With fixed tokens: the grant of the request that opened connection_stream (meaningful while it is set).
+        // With authorization or fixed tokens: the grant of the request that opened connection_stream (meaningful while
+        // it is set).
         std::shared_ptr<const Authorization> connection_grant;
         std::size_t active = 0;            // exchanges not released, and the connection stream
         std::uint64_t idle_generation = 0;  // a job of the idle timer acts only when it is still current
@@ -841,6 +842,16 @@ void Endpoint::Impl::get(const Request& request, const Responder& responder,
         return;
     }
 
+    // The request's authorization counts for the session as any other of its requests' does: what the session watches
+    // and it cannot read is no longer watched, before the stream can carry anything.
+    if (granted) {
+        std::shared_ptr<Session> session;
+        {
+            std::lock_guard lock(entry->mutex);
+            session = entry->session;
+        }
+        if (session) session->present(granted);
+    }
     auto stream = std::make_shared<BodyStream>(options.max_stream_buffer_bytes);
     {
         std::unique_lock lock(entry->mutex);
@@ -856,7 +867,7 @@ void Endpoint::Impl::get(const Request& request, const Responder& responder,
             return;
         }
         entry->connection_stream = stream;
-        if (resource_server && resource_server->fixed_tokens) entry->connection_grant = granted;
+        entry->connection_grant = granted;
         activate(*entry);
     }
     stream->on_close([self = weak_from_this(), weak = std::weak_ptr<Entry>(entry), raw = stream.get()] {
@@ -1217,11 +1228,18 @@ void Endpoint::Impl::on_output(const std::shared_ptr<Entry>& entry, Output outpu
 void Endpoint::Impl::to_connection(const std::shared_ptr<Entry>& entry, const Output& output) {
     if (output.kind == OutputKind::end) return;
     std::shared_ptr<BodyStream> stream;
+    std::shared_ptr<const Authorization> opener;
     {
         std::lock_guard lock(entry->mutex);
         stream = entry->connection_stream;
+        opener = entry->connection_grant;
     }
     if (!stream) return;  // no stream is open: messages of the connection are dropped
+    // An update of a resource is written only on a stream whose token may read the resource.
+    if (opener && !output.read_scopes.empty() &&
+        !missing_scopes(opener->scopes, output.read_scopes, implications).empty()) {
+        return;
+    }
     if (stream->append(sse_event(output.line)) == BodyStream::Append::full &&
         output.kind != OutputKind::notification) {
         stream->close();  // a request to the client is not dropped silently: the client sees the stream end

@@ -38,6 +38,11 @@
 // - connection_notifications: to the connection a handshake opened, as outputs that belong to the connection, once
 //   the client sent notifications/initialized; list changes of every kind declared, and the updates of the resources
 //   the connection watches (resources/subscribe adds a URI the host offers, resources/unsubscribe removes one).
+//   Where units come with an authorization, watching a resource needs what reading it needs, and keeps needing it:
+//   each later unit (and each Session::present) whose authorization lacks a scope reading a watched resource needs
+//   (ResourceHost::read_scopes, with the implications SessionOptions::scope_implications declares) ends that watch
+//   before anything of the unit is read, and an update already queued for it is not written. The client subscribes
+//   again, with an authorization that holds the scopes, to be told of the resource's updates again.
 // - subscriptions_listen: to the subscriptions the client opened. subscriptions/listen opens one; its unit stays open
 //   and every output of it is long-lived (Output::long_lived). Its first output is the acknowledgement, which names
 //   what of the request's filter is honoured (the kinds the host reports, and the resources it offers now); every
@@ -142,6 +147,10 @@ struct Output {
     // that the unit's authorization does not hold with what its scopes imply, in the order first met, each once.
     // Empty otherwise.
     std::vector<std::string> required_scopes;
+    // On a notification of the connection that a resource it watches was updated: the scopes reading the resource
+    // needs (ResourceHost::read_scopes). A transport that writes it on a stream a request of its own opened with an
+    // authorization (an HTTP GET) writes it only when that authorization holds them. Empty otherwise.
+    std::vector<std::string> read_scopes;
 };
 
 // Receives each output, with the same guarantees as a Sink: one thread at a time, never re-entrantly, never under a
@@ -396,6 +405,13 @@ public:
     // writing one on another thread (but not on its own thread, when called from inside the sink). An unknown or
     // ended unit is ignored.
     void abandon(UnitId unit);
+
+    // A request of the transport that belongs to the connection but carries no input for the session (an HTTP GET
+    // that opens the connection's stream) came with `authorization`: every resource the connection watches that it
+    // cannot read is no longer watched, as when receive() takes a unit with it (see the change notifications above).
+    // Thread-safe: it may be called while another thread is inside receive(). Null, and a call after close(), do
+    // nothing.
+    void present(std::shared_ptr<const Authorization> authorization);
 
     // Requests stop on every call in flight, ends every wait for a client's answers, and drops everything not yet
     // written but the graceful ends of subscriptions; each open subscription ends gracefully (see above), and each

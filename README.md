@@ -349,6 +349,14 @@ principal that names it is answered as if it did not exist. A stream that a requ
 a subscription) ends when the token that opened it expires, with the leeway; the client opens it again with its
 current token.
 
+Subscriptions follow the tokens. A session's later requests may carry other tokens of its principal, with fewer
+scopes. A request of the session (a POST, or the GET that opens its stream) whose token cannot read a resource the
+session subscribed to ends that subscription before the request is served, and an update of it not yet written is
+dropped; a later token that holds the scopes again does not bring it back, the client subscribes again. The stream of
+a session carries only the updates its own token may read. So the updates a session is told of are always of
+resources its latest token, and the token of the stream that carries them, may read. Under 2026-07-28 each
+subscription is a request of its own, checked and served with its own token.
+
 Fixed tokens. A server without an authorization server sets `HttpServerOptions::fixed_tokens` instead
 (`neomcp/http/fixed_tokens.h`): a table of tokens the application gives, each with the subject it acts for, the
 scopes it grants and, when it has one, its expiry.

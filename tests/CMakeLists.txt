@@ -179,6 +179,12 @@ target_link_libraries(neomcp_feed_test PRIVATE neomcp::core GTest::gtest_main Th
 neomcp_configure_target(neomcp_feed_test)
 gtest_discover_tests(neomcp_feed_test DISCOVERY_TIMEOUT 120)
 
+# The resources a connection watches, ended by a later unit whose authorization cannot read them.
+add_executable(neomcp_session_subscription_test session_subscription_test.cpp)
+target_link_libraries(neomcp_session_subscription_test PRIVATE neomcp::core GTest::gtest_main Threads::Threads)
+neomcp_configure_target(neomcp_session_subscription_test)
+gtest_discover_tests(neomcp_session_subscription_test DISCOVERY_TIMEOUT 120)
+
 add_executable(neomcp_uri_template_test uri_template_test.cpp)
 target_link_libraries(neomcp_uri_template_test PRIVATE neomcp::core GTest::gtest_main Threads::Threads)
 neomcp_configure_target(neomcp_uri_template_test)
@@ -376,9 +382,10 @@ gtest_discover_tests(neomcp_http_resource_server_flight_test DISCOVERY_TIMEOUT 1
 
 # The same feature, one scenario per test over loopback sockets (tests/support/resource_scenario.h holds what they
 # share): the checks on every token, the scopes of each kind of item, and the metadata, the owner of a session and the
-# end of a stream, and the bounds of the remembered verdicts, the authorization servers and the metadata document. Kept
-# in files apart so that no compile takes long.
-foreach(scenario_name IN ITEMS token scope session bounds)
+# end of a stream, the bounds of the remembered verdicts, the authorization servers and the metadata document, and the
+# subscriptions of a session whose later requests bring a narrower token. Kept in files apart so that no compile takes
+# long.
+foreach(scenario_name IN ITEMS token scope session bounds subscription)
     add_executable(neomcp_http_resource_server_scenario_${scenario_name}_test
         http_resource_server_scenario_${scenario_name}_test.cpp)
     target_link_libraries(neomcp_http_resource_server_scenario_${scenario_name}_test
@@ -391,8 +398,8 @@ endforeach()
 
 # The endpoint protected by a fixed table of tokens: the table on its own (which reaches the internal scan of its
 # digests), the scenarios over loopback sockets, the table replaced while requests run, the open streams of tokens
-# when the table is replaced, and the library's own client with a static token (with the HTTP client only). The
-# scenarios share tests/support/fixed_tokens_scenario.h.
+# when the table is replaced, the subscriptions of a session under narrower tokens and replacements, and the library's
+# own client with a static token (with the HTTP client only). The scenarios share tests/support/fixed_tokens_scenario.h.
 add_executable(neomcp_http_fixed_tokens_table_test http_fixed_tokens_table_test.cpp)
 target_link_libraries(neomcp_http_fixed_tokens_table_test PRIVATE neomcp::http GTest::gtest_main)
 target_include_directories(neomcp_http_fixed_tokens_table_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
@@ -407,7 +414,7 @@ target_include_directories(neomcp_http_fixed_tokens_probe_test PRIVATE "${CMAKE_
 neomcp_configure_target(neomcp_http_fixed_tokens_probe_test)
 gtest_discover_tests(neomcp_http_fixed_tokens_probe_test DISCOVERY_TIMEOUT 120)
 
-foreach(fixed_tokens_name IN ITEMS scenario replace stream)
+foreach(fixed_tokens_name IN ITEMS scenario replace stream subscription)
     add_executable(neomcp_http_fixed_tokens_${fixed_tokens_name}_test http_fixed_tokens_${fixed_tokens_name}_test.cpp)
     target_link_libraries(neomcp_http_fixed_tokens_${fixed_tokens_name}_test
         PRIVATE neomcp::http neomcp_httplib GTest::gtest_main Threads::Threads)
