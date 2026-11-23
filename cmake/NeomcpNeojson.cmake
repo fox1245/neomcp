@@ -3,7 +3,7 @@ if(NOT TARGET neojson::neojson)
     include(FetchContent)
     FetchContent_Declare(neojson
         GIT_REPOSITORY https://github.com/fox1245/neojson.git
-        GIT_TAG 5ee2793aa946ce5d484df4608905af25299690ee)
+        GIT_TAG 688910ec07fba214ff50a0ff755263e34940134c)
 
     # Only the library is needed. The option is set for this call and put back afterwards.
     if(DEFINED NEOJSON_BUILD_TESTS)

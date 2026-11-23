@@ -901,6 +901,9 @@ public:
                     continue;
                 }
             }
+            tool.input_schema.materialize();
+            if (tool.output_schema) tool.output_schema->materialize();
+            if (tool.meta) tool.meta->materialize();
             remember(tool);
             kept.push_back(std::move(tool));
         }

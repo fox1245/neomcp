@@ -16,6 +16,7 @@
 #include <utility>
 
 #include "core/input.h"
+#include "core/large_json_cache.h"
 #include "neomcp/argument_headers.h"
 #include "neomcp/json_schema.h"
 #include "neomcp/wire.h"
@@ -61,6 +62,12 @@ constexpr std::string_view timed_out_reason = "The request timed out";
 constexpr std::string_view unrestricted_form_message =
     "Invalid params: the requested schema is outside the restricted form of a form";
 constexpr std::string_view invalid_content_message = "The client's answer does not fit the requested schema";
+
+void materialize_server_announcement(ServerAnnouncement& server) {
+    server.capabilities.materialize();
+    server.info.materialize();
+    server.result.materialize();
+}
 
 bool is_success(int status) { return status >= 200 && status < 300; }
 
@@ -527,6 +534,7 @@ public:
             }
             return Reception::too_deep;
         }
+        const detail::LargeJsonCacheGuard trim_caches(text.size() >= detail::large_json_trim_threshold);
         json value = json::parse(text, nullptr, false);
         if (value.is_discarded()) {
             diagnose(DiagnosticKind::not_json, "a message that is not JSON was dropped", unit);
@@ -1810,6 +1818,7 @@ private:
             step(ref, method, "a discovery result");
             contact_.revisions = discovery.versions;
             contact_.server = discovery.server;
+            materialize_server_announcement(contact_.server);
             if (const Speaker* named_per_request = newest_in(discovery.versions, true)) {
                 open_per_request(*named_per_request);
             } else if (const Speaker* named_handshake = newest_in(discovery.versions, false)) {
@@ -1875,6 +1884,7 @@ private:
                 handshake_answered_ = true;
                 contact_.profile = accepted->profile;
                 contact_.server = accepted->server;
+                materialize_server_announcement(contact_.server);
                 contact_.verdict = ContactVerdict{ServerKind::handshake, transport_, accepted->profile->revision()};
                 const json capabilities = accepted->server.capabilities;
                 if (auto ready = chosen->halves.open->opened(*accepted->profile)) send_notification(*ready, *chosen);
