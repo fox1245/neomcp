@@ -66,6 +66,7 @@
 #include "client_http/http_sse.h"
 #include "client_http/transfers.h"
 #include "client_http/url_guard.h"
+#include "core/large_json_cache.h"
 #include "neomcp/client.h"
 #include "neomcp/client/http.h"
 #include "neomcp/http/headers.h"
@@ -290,6 +291,7 @@ private:
 
     bool is_handshake(const Outgoing& outgoing) const {
         if (outgoing.kind != OutgoingKind::request || rules_.handshake_methods.empty()) return false;
+        const detail::LargeJsonCacheGuard trim_caches(outgoing.line.size() >= detail::large_json_trim_threshold);
         const json message = json::parse(outgoing.line, nullptr, false);
         const auto* members = message.get_ptr<const json::object_t*>();
         if (members == nullptr) return false;

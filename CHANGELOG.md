@@ -3,6 +3,13 @@
 Versions follow the rule of the package configuration: before 1.0, a release with a new minor number may change the
 interface, and a new patch number does not.
 
+## Unreleased
+
+### Internal
+
+- Upgraded vendored `neojson` past the lazy/COW and thread-local cache control release (`fox1245/neojson#7`).
+- Added thread-local cache trimming after large JSON parses/serializations (`SessionCore::read`, `serialize`, `ClientEngine::received`, `streamable`, `MemoryTaskStore`) and eager materialization of retained JSON fields across `MemoryTaskStore`, `TaskRunner`, connection handshake state, and client tool metadata so transient large messages do not pin backing documents or per-thread allocator buffers across long-lived worker pools.
+
 ## 0.4.0
 
 Additive changes on the server and client; code built against 0.3 builds cleanly against 0.4.

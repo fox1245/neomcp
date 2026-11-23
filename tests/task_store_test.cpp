@@ -6,14 +6,32 @@
 #include <atomic>
 #include <condition_variable>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
+
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define NEOMCP_TASK_TEST_SANITIZER_HEAP 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define NEOMCP_TASK_TEST_SANITIZER_HEAP 1
+#endif
+#endif
+
+#if defined(NEOMCP_TASK_TEST_SANITIZER_HEAP)
+extern "C" std::size_t __sanitizer_get_current_allocated_bytes();
+#elif defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33))
+#include <malloc.h>
+#define NEOMCP_TASK_TEST_MALLINFO2 1
+#endif
 
 namespace {
 
@@ -1213,6 +1231,95 @@ TEST(TaskStoreRaces, ConcurrentCreationNeverPassesTheCountsAndEachOwnerKeepsItsS
     }
     EXPECT_EQ(total, 100) << "eight owners of 20 fill the 100 the store holds, and no more";
     EXPECT_EQ(store->usage().tasks, 100u);
+}
+
+std::optional<std::size_t> task_store_test_heap_in_use() {
+#if defined(NEOMCP_TASK_TEST_SANITIZER_HEAP)
+    return __sanitizer_get_current_allocated_bytes();
+#elif defined(NEOMCP_TASK_TEST_MALLINFO2)
+    const struct mallinfo2 info = mallinfo2();
+    return info.uordblks + info.hblkhd;
+#else
+    return std::nullopt;
+#endif
+}
+
+TEST(TaskStore, StoredRequestDoesNotPinLargeParsedDocument) {
+    auto store = make_memory_task_store();
+    // Warm the store and finish the warmup task so recover() only targets unfinished test tasks below.
+    const TaskRecord warmup = make_task(*store);
+    ASSERT_FALSE(warmup.id.empty());
+    ASSERT_EQ(step(*store, warmup.id, TaskStatus::working, to(TaskStatus::completed)).outcome,
+              TransitionOutcome::applied);
+    neojson::trim_thread_caches();
+
+    std::string id;
+    std::string ans_id;
+    std::string err_id;
+    std::string rec_id;
+    const std::optional<std::size_t> before = task_store_test_heap_in_use();
+    {
+        const auto extract_small = [](const char* key) -> json {
+            const std::string payload =
+                json{{key, {{"name", "tool"}, {"arguments", {{"x", 1}}}}},
+                     {"discard", std::string(2u * 1024u * 1024u, 'z')}}
+                    .dump();
+            const json parsed = json::parse(payload);
+            // Copying from a const parsed document yields a lazy COW subtree; the store must materialize it.
+            return parsed.at(key);
+        };
+
+        TaskDraft task = draft();
+        task.request = extract_small("keep");
+        id = make_task(*store, std::move(task)).id;
+
+        TaskUpdate done = to(TaskStatus::completed);
+        done.result = extract_small("res");
+        ASSERT_EQ(step(*store, id, TaskStatus::working, std::move(done)).outcome, TransitionOutcome::applied);
+
+        ans_id = make_task(*store).id;
+        TaskUpdate ask = to(TaskStatus::input_required);
+        ask.asked = extract_small("asked");
+        ASSERT_EQ(step(*store, ans_id, TaskStatus::working, std::move(ask)).outcome, TransitionOutcome::applied);
+        {
+            const std::string apayload =
+                json{{"ans", json{{"name", "answered"}}}, {"discard", std::string(2u * 1024u * 1024u, 'q')}}.dump();
+            const json aparsed = json::parse(apayload);
+            ASSERT_EQ(store->put_answers(ans_id, TaskOwner{}, aparsed.at("ans")).outcome, AnswersOutcome::applied);
+        }
+        const auto loaded_ans = store->get(ans_id, TaskOwner{});
+        ASSERT_TRUE(loaded_ans.has_value());
+        EXPECT_EQ(loaded_ans->answers, (json{{"name", "answered"}}));
+
+        err_id = make_task(*store).id;
+        TaskUpdate fail = to(TaskStatus::failed);
+        fail.error = extract_small("err");
+        ASSERT_EQ(step(*store, err_id, TaskStatus::working, std::move(fail)).outcome, TransitionOutcome::applied);
+
+        rec_id = make_task(*store).id;
+        TaskUpdate rec = to(TaskStatus::failed);
+        rec.error = extract_small("rec");
+        // ans_id (input_required) and rec_id (working) are both unfinished.
+        EXPECT_EQ(store->recover(rec), 2u);
+    }
+    neojson::trim_thread_caches();
+    const std::optional<std::size_t> after = task_store_test_heap_in_use();
+
+    const auto loaded = store->get(id, TaskOwner{});
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(loaded->request, (json{{"name", "tool"}, {"arguments", {{"x", 1}}}}));
+    EXPECT_EQ(loaded->result, (json{{"name", "tool"}, {"arguments", {{"x", 1}}}}));
+    const auto loaded_err = store->get(err_id, TaskOwner{});
+    ASSERT_TRUE(loaded_err.has_value());
+    EXPECT_EQ(loaded_err->error, (json{{"name", "tool"}, {"arguments", {{"x", 1}}}}));
+    const auto loaded_rec = store->get(rec_id, TaskOwner{});
+    ASSERT_TRUE(loaded_rec.has_value());
+    EXPECT_EQ(loaded_rec->error, (json{{"name", "tool"}, {"arguments", {{"x", 1}}}}));
+
+    if (before && after) {
+        const std::size_t kept = (*after > *before) ? (*after - *before) : 0u;
+        EXPECT_LT(kept, 1024u * 1024u) << "stored task records pinned " << kept << " extra bytes";
+    }
 }
 
 }  // namespace

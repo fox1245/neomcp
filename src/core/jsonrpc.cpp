@@ -2,6 +2,8 @@
 
 #include <utility>
 
+#include "core/large_json_cache.h"
+
 namespace neomcp {
 
 std::optional<RequestId> RequestId::from_json(const json& value) {
@@ -140,6 +142,11 @@ json make_notification(std::string method, json params) {
     return message;
 }
 
-std::string serialize(const json& message) { return message.dump(-1, ' ', false, json::error_handler_t::replace); }
+std::string serialize(const json& message) {
+    detail::LargeJsonCacheGuard trim_caches(true);
+    std::string text = message.dump(-1, ' ', false, json::error_handler_t::replace);
+    trim_caches.active = text.size() >= detail::large_json_trim_threshold;
+    return text;
+}
 
 }  // namespace neomcp

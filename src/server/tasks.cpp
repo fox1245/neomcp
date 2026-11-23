@@ -151,6 +151,8 @@ std::variant<TaskRunner::Created, TaskRefusal> TaskRunner::create(std::size_t to
     call.name = request.name;
     call.arguments = request.arguments;
     call.meta = request.meta;
+    call.arguments.materialize();
+    call.meta.materialize();
     auto run = std::make_shared<TaskRun>(*this, record.id, record.owner, tool, std::move(call), std::move(origin),
                                          std::move(start));
     {

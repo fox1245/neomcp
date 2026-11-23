@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <unordered_map>
 
+#include "core/large_json_cache.h"
 #include "neomcp/random.h"
 
 namespace neomcp {
@@ -23,7 +24,12 @@ TimePoint saturating_add(TimePoint start, std::chrono::milliseconds span) {
     return start + span;
 }
 
-std::size_t serialized_size(const json& value) { return value.dump().size(); }
+std::size_t serialized_size(const json& value) {
+    detail::LargeJsonCacheGuard trim_caches(true);
+    const std::size_t size = value.dump().size();
+    trim_caches.active = size >= detail::large_json_trim_threshold;
+    return size;
+}
 
 std::size_t serialized_size(const std::optional<json>& value) { return value ? serialized_size(*value) : 0; }
 
@@ -74,6 +80,8 @@ public:
     explicit MemoryTaskStore(MemoryTaskStoreOptions options) : options_(std::move(options)) {}
 
     CreateResult create(TaskDraft draft) override {
+        // Detach any shared parsed document backing before storing a potentially long-lived record.
+        draft.request.materialize();
         Deliveries deliveries;
         CreateResult result = CreateRefusal::store_full;
         {
@@ -94,6 +102,9 @@ public:
     }
 
     Transition transition(std::string_view id, std::span<const TaskStatus> from, TaskUpdate update) override {
+        if (update.result) update.result->materialize();
+        if (update.error) update.error->materialize();
+        if (update.asked) update.asked->materialize();
         Deliveries deliveries;
         Transition result;
         {
@@ -116,6 +127,7 @@ public:
     }
 
     AnswersResult put_answers(std::string_view id, const TaskOwner& owner, json answers) override {
+        answers.materialize();
         Deliveries deliveries;
         AnswersResult result;
         {
@@ -221,6 +233,10 @@ public:
             throw std::invalid_argument(
                 "neomcp: a recovery is a terminal state with an outcome no larger than the reserve");
         }
+        TaskUpdate detached = failure;
+        if (detached.result) detached.result->materialize();
+        if (detached.error) detached.error->materialize();
+        if (detached.asked) detached.asked->materialize();
         Deliveries deliveries;
         std::size_t changed = 0;
         {
@@ -228,7 +244,7 @@ public:
             const TimePoint now = clock();
             for (auto& [id, entry] : entries_) {
                 if (is_terminal(entry.record.status) || !(now < entry.expires)) continue;
-                if (apply(entry, failure, now, false, deliveries) == TransitionOutcome::applied) ++changed;
+                if (apply(entry, detached, now, false, deliveries) == TransitionOutcome::applied) ++changed;
             }
         }
         deliveries.deliver();

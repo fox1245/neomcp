@@ -72,6 +72,7 @@
 #include "core/application_error.h"
 #include "core/headers.h"
 #include "core/input.h"
+#include "core/large_json_cache.h"
 #include "core/request_state.h"
 #include "neomcp/feature_host.h"
 #include "neomcp/jsonrpc.h"
@@ -1145,6 +1146,8 @@ bool SessionCore::read(std::string_view line, const Unit& unit, const Claims& cl
                      RefusalReason::too_deep);
         return true;
     }
+    // Declare the trim guard before `value` so large parse/dump buffers flush after `value` is destroyed.
+    const detail::LargeJsonCacheGuard trim_caches(line.size() >= detail::large_json_trim_threshold);
     json value = json::parse(line, nullptr, false);
     if (value.is_discarded()) {
         emit_refusal(unit, claims, error_code::parse_error, "Parse error", RefusalReason::parse_error);
@@ -1478,6 +1481,8 @@ Answer SessionCore::open_connection(const Message& request, const OpenMechanism&
     finish_result(body, "InitializeResult", profile);
 
     if (served->state->keeps_connection()) {
+        handshake.client.info.materialize();
+        handshake.client.capabilities.materialize();
         const std::lock_guard<std::mutex> lock(mutex_);
         Connection connection;
         connection.served = served;
