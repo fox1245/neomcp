@@ -7,7 +7,7 @@ interface, and a new patch number does not.
 
 ### Internal
 
-- Upgraded vendored `neojson` past the lazy/COW and thread-local cache control release (`fox1245/neojson#7`).
+- Upgraded vendored `neojson` to `v0.1.0` (`177289e`, adding native x86-64 AVX2 and ARM64 NEON SIMD parsers, fused single-pass UTF-8 serialization, `DocArena`/mutable DOM optimizations, hidden vendored `yyjson` symbols, and CMake/pkg-config packaging; builds on `fox1245/neojson#7`).
 - Added thread-local cache trimming after large JSON parses/serializations (`SessionCore::read`, `serialize`, `ClientEngine::received`, `streamable`, `MemoryTaskStore`) and eager materialization of retained JSON fields across `MemoryTaskStore`, `TaskRunner`, connection handshake state, and client tool metadata so transient large messages do not pin backing documents or per-thread allocator buffers across long-lived worker pools.
 
 ## 0.4.0
